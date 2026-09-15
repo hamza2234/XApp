@@ -1,0 +1,38 @@
+name = "x-app-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# ── موارد مشتركة (قراءة فقط — لا نكتب فيها أبداً) ──────────────
+# بيانات التوافقات والمخططات والإعلانات — نفس مصدر تطبيق PhoneX
+[[d1_databases]]
+binding = "MIRROR"
+database_name = "phonex-mirror"
+database_id = "21af0010-582b-4a88-9a9f-ad8a6a5380c3"
+
+# مكتبة المخططات — قراءة فقط (get/head/list فقط)
+[[r2_buckets]]
+binding = "SCHEMATICS"
+bucket_name = "phonex-schematics"
+
+# وسائط إعلانات تطبيق X — ملك X وحده (رفع صور الإعلانات)
+[[r2_buckets]]
+binding = "XMEDIA"
+bucket_name = "x-app-media"
+
+# ── موارد تطبيق X الخاصة (معزولة بالكامل) ─────────────────────
+# قاعدة مستقلة: مستخدمون، تثبيتات، إعدادات، سجل أمان
+[[d1_databases]]
+binding = "XDB"
+database_name = "x-app-db"
+database_id = "c259c8be-806f-4362-b45c-2c11d2578c06"
+
+# KV مستقل: حصص، حدود معدل، حظر، ربط الأجهزة
+[[kv_namespaces]]
+binding = "QUOTA"
+id = "c319bc8396cc40b58c7a3084df00cf21"
+
+# الأسرار (تُضبط عبر: wrangler secret put <NAME>)
+#   X_JWT_SECRET    — توقيع جلسات المستخدمين
+#   X_SIG_SECRET    — توقيع طلبات التطبيق (HMAC)
+#   X_OWNER_KEY     — مفتاح إنشاء حساب المالك لأول مرة
+#   X_FILE_KEY      — مفتاح تشفير ملفات المخططات (AES-CTR)

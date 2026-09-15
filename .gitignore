@@ -1,0 +1,25 @@
+# secrets — never commit
+x_secrets.txt
+.env
+*.keystore
+*.jks
+key.properties
+
+# flutter
+app/.dart_tool/
+app/build/
+app/.flutter-plugins*
+app/.packages
+app/pubspec.lock
+app/.idea/
+*.iml
+
+# worker
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+
+# misc
+flutter_sdk.zip
+nul
+worker/owner_bootstrap.py
