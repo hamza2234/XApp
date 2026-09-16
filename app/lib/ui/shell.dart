@@ -77,21 +77,25 @@ class _ShellState extends State<Shell> {
                   color: Colors.white)),
         ),
         actions: [
+          // شريحة الحصة/البطاقات — قابلة للضغط لفتح الباقات
           if (isGuest && _quotaLimit > 0)
             Padding(
-              padding: const EdgeInsets.only(left: 12),
-              child: Chip(
-                visualDensity: VisualDensity.compact,
-                avatar: Icon(Icons.bolt, size: 16, color: XTheme.gold),
-                label: Text(
-                    '${(_quotaLimit - _quotaUsed).clamp(0, _quotaLimit)}/$_quotaLimit',
-                    style: const TextStyle(fontWeight: FontWeight.w800)),
-                backgroundColor: XTheme.gold.withOpacity(.12),
-                side: BorderSide.none,
+              padding: const EdgeInsets.only(left: 4),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _showPackages,
+                child: Chip(
+                  visualDensity: VisualDensity.compact,
+                  avatar: Icon(Icons.bolt, size: 16, color: XTheme.gold),
+                  label: Text(
+                      '${(_quotaLimit - _quotaUsed).clamp(0, _quotaLimit)}/$_quotaLimit',
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                  backgroundColor: XTheme.gold.withOpacity(.12),
+                  side: BorderSide.none,
+                ),
               ),
             ),
-          // بطاقات المشترك — قابلة للضغط + زر شراء باقة
-          if (!isGuest && !isOwner && _cards != null) ...[
+          if (!isGuest && !isOwner && _cards != null)
             Padding(
               padding: const EdgeInsets.only(left: 4),
               child: InkWell(
@@ -108,19 +112,19 @@ class _ShellState extends State<Shell> {
                 ),
               ),
             ),
-            IconButton(
-              tooltip: 'شراء بطاقات',
-              icon: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                    gradient: XTheme.gradient,
-                    borderRadius: BorderRadius.circular(10)),
-                child: const Icon(Icons.add, color: Colors.white, size: 18),
-              ),
-              onPressed: _showPackages,
+          // زر + لشراء باقة — متاح للجميع (الزائر يُوجَّه لطلب حساب أولاً)
+          IconButton(
+            tooltip: 'شراء بطاقات',
+            icon: Container(
+              padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                  gradient: XTheme.gradient,
+                  borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.add, color: Colors.white, size: 18),
             ),
-            const SizedBox(width: 6),
-          ],
+            onPressed: _showPackages,
+          ),
+          const SizedBox(width: 6),
         ],
       ),
       drawer: _drawer(user, isOwner, isGuest),
@@ -423,13 +427,106 @@ class _ShellState extends State<Shell> {
     );
   }
 
+  /// شراء باقة — مشترك: تيليجرام مباشرة باسم حسابه؛ زائر: طلب حساب ثم تيليجرام
   Future<void> _buyPackage(int cards, String price) async {
+    if (widget.store.isGuest) {
+      _registerAndBuy(cards, price);
+      return;
+    }
+    final username = widget.store.user?['username']?.toString() ?? '';
     final msg = Uri.encodeComponent(
-        'مرحباً، أريد شراء باقة $cards بطاقة مخططات بسعر $price');
+        'مرحباً، أنا المشترك $username — أريد شحن باقة $cards بطاقة مخططات بسعر $price');
     final uri = Uri.parse('$_telegram?text=$msg');
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
+  }
+
+  /// الزائر: يطلب حساباً أولاً ثم يُوجَّه لتيليجرام برسالة تتضمن طلبه + الباقة
+  void _registerAndBuy(int cards, String price) {
+    final user = TextEditingController();
+    final pass = TextEditingController();
+    final name = TextEditingController();
+    bool sending = false;
+    showDialog(
+      context: context,
+      barrierDismissible: !sending,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: XTheme.surface,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22)),
+          title: const Text('طلب حساب + باقة',
+              style:
+                  TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(
+                'ستطلب حساباً وباقة $cards بطاقة بسعر $price — يوافق عليها المالك',
+                style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+                controller: user,
+                decoration:
+                    const InputDecoration(labelText: 'اسم المستخدم'),
+                textDirection: TextDirection.ltr),
+            const SizedBox(height: 10),
+            TextField(
+                controller: pass,
+                obscureText: true,
+                decoration:
+                    const InputDecoration(labelText: 'كلمة المرور'),
+                textDirection: TextDirection.ltr),
+            const SizedBox(height: 10),
+            TextField(
+                controller: name,
+                decoration: const InputDecoration(
+                    labelText: 'الاسم (اختياري)')),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إلغاء')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: XTheme.accent,
+                  foregroundColor: Colors.white),
+              onPressed: sending
+                  ? null
+                  : () async {
+                      setD(() => sending = true);
+                      try {
+                        await widget.api.register(
+                            user.text.trim(),
+                            pass.text,
+                            name.text.trim(),
+                            'طلب باقة $cards بطاقة — $price');
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        final msg = Uri.encodeComponent(
+                            'مرحباً، أنا ${user.text.trim()} — طلبت حساباً في تطبيق X وأريد باقة $cards بطاقة مخططات بسعر $price');
+                        final uri = Uri.parse('$_telegram?text=$msg');
+                        if (await canLaunchUrl(uri)) {
+                          await launchUrl(uri,
+                              mode: LaunchMode.externalApplication);
+                        }
+                      } on ApiException catch (e) {
+                        setD(() => sending = false);
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(e.message)));
+                        }
+                      }
+                    },
+              child: sending
+                  ? const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Text('إرسال الطلب'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _themeBtn(bool light, IconData icon, String label) {
