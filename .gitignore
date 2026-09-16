@@ -23,3 +23,8 @@ worker/.dev.vars
 flutter_sdk.zip
 nul
 worker/owner_bootstrap.py
+
+app/android/build/
+app/android/local.properties
+app/android/app/.cxx/
+app/android/.gradle/

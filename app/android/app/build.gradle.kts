@@ -16,8 +16,7 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "com.xapp.x_app"
     compileSdk = flutter.compileSdkVersion
-    // NDK 30 مثبّت محلياً — نثبّته هنا كي لا يعيد Gradle تنزيل نسخة أخرى
-    ndkVersion = "30.0.14904198"
+    ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
