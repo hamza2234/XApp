@@ -138,19 +138,19 @@ class _SplashScreenState extends State<SplashScreen>
             ),
             const SizedBox(height: 36),
             if (_blocked) ...[
-              const Icon(Icons.lock_outline, color: XTheme.gold, size: 40),
+              Icon(Icons.lock_outline, color: XTheme.gold, size: 40),
               const SizedBox(height: 14),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 40),
                 child: Text(_blockMsg,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: XTheme.text, fontSize: 16)),
+                    style: TextStyle(color: XTheme.text, fontSize: 16)),
               ),
             ] else ...[
               Text(_status,
-                  style: const TextStyle(color: XTheme.textDim, fontSize: 14)),
+                  style: TextStyle(color: XTheme.textDim, fontSize: 14)),
               const SizedBox(height: 14),
-              const SizedBox(
+              SizedBox(
                   width: 22,
                   height: 22,
                   child: CircularProgressIndicator(

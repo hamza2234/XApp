@@ -4,6 +4,7 @@ import '../core/api.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import 'theme.dart';
+import 'brand_logo.dart';
 import 'compat_brand_screen.dart';
 import 'subscribe_dialog.dart';
 
@@ -111,7 +112,7 @@ class _CompatScreenState extends State<CompatScreen>
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
               child: TextField(
                 onChanged: (v) => setState(() => _filter = v),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'ابحث عن شركة…',
                   prefixIcon: Icon(Icons.search, color: XTheme.textDim),
                   isDense: true,
@@ -134,7 +135,7 @@ class _CompatScreenState extends State<CompatScreen>
                     padding: const EdgeInsets.symmetric(horizontal: 40),
                     child: Text(_error!,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: XTheme.textDim)),
+                        style: TextStyle(color: XTheme.textDim)),
                   ),
                   const SizedBox(height: 10),
                   if (_locked)
@@ -154,7 +155,7 @@ class _CompatScreenState extends State<CompatScreen>
               ),
             )
           else if (_brands == null)
-            const SliverFillRemaining(
+            SliverFillRemaining(
                 child: Center(
                     child: CircularProgressIndicator(color: XTheme.accent)))
           else
@@ -193,7 +194,7 @@ class _CompatScreenState extends State<CompatScreen>
                     else
                       Container(
                           decoration:
-                              const BoxDecoration(gradient: XTheme.gradient)),
+                              BoxDecoration(gradient: XTheme.gradient)),
                     Container(
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
@@ -257,21 +258,7 @@ class _CompatScreenState extends State<CompatScreen>
     );
   }
 
-  static const _brandColors = {
-    'xiaomi': Color(0xFFFF6900), 'realme': Color(0xFFFFC915),
-    'huawei': Color(0xFFCF0A2C), 'samsung': Color(0xFF1428A0),
-    'infinix': Color(0xFF44B979), 'itel': Color(0xFF00A8E8),
-    'tecno': Color(0xFF005EB8), 'vivo': Color(0xFF415FFF),
-    'oppo': Color(0xFF2D683D), 'nokia': Color(0xFF0065A3),
-    'oneplus': Color(0xFFEB0028), 'sony': Color(0xFF8A8A8A),
-    'meizu': Color(0xFF008DEB), 'zte': Color(0xFF0A50A0),
-    'google': Color(0xFF4285F4), 'reno': Color(0xFF2D683D),
-    'motorola': Color(0xFF5B92E5),
-  };
-
   Widget _brandCard(CompatBrand b) {
-    final color = _brandColors[b.displayName.toLowerCase()] ??
-        XTheme.accent2;
     return GlassCard(
       padding: const EdgeInsets.all(10),
       onTap: () => Navigator.of(context).push(MaterialPageRoute(
@@ -279,20 +266,7 @@ class _CompatScreenState extends State<CompatScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            width: 46, height: 46,
-            decoration: BoxDecoration(
-              color: color.withOpacity(.14),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Center(
-              child: Text(
-                b.displayName.isEmpty ? '?' : b.displayName[0].toUpperCase(),
-                style: TextStyle(
-                    fontSize: 22, fontWeight: FontWeight.w900, color: color),
-              ),
-            ),
-          ),
+          BrandLogo(name: b.displayName, size: 46),
           const SizedBox(height: 8),
           Text(b.displayName,
               maxLines: 1,
@@ -300,7 +274,7 @@ class _CompatScreenState extends State<CompatScreen>
               style: const TextStyle(
                   fontWeight: FontWeight.w800, fontSize: 13)),
           Text('${b.models} موديل',
-              style: const TextStyle(color: XTheme.textDim, fontSize: 10)),
+              style: TextStyle(color: XTheme.textDim, fontSize: 10)),
         ],
       ),
     );

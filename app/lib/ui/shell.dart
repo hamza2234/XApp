@@ -22,6 +22,9 @@ class _ShellState extends State<Shell> {
   int _tab = 0;
   int _quotaUsed = 0;
   int _quotaLimit = -1;
+  int? _cards;
+  int _cardExpiry = 0;
+  List<dynamic> _packages = const [];
   String _telegram = 'https://t.me/phonex6';
 
   @override
@@ -34,14 +37,20 @@ class _ShellState extends State<Shell> {
     try {
       final m = await widget.api.me();
       final q = m['quota'] as Map?;
+      final c = m['cards'] as Map?;
       final b = await widget.api.bootstrap();
       if (mounted) {
         setState(() {
           _quotaUsed = (q?['used'] as num?)?.toInt() ?? 0;
           _quotaLimit = (q?['limit'] as num?)?.toInt() ?? -1;
+          _cards = c == null ? null : (c['balance'] as num?)?.toInt() ?? 0;
+          _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
           final s = b['settings'];
-          if (s is Map && (s['telegramLink'] ?? '').toString().isNotEmpty) {
-            _telegram = s['telegramLink'];
+          if (s is Map) {
+            if ((s['telegramLink'] ?? '').toString().isNotEmpty) {
+              _telegram = s['telegramLink'];
+            }
+            if (s['packages'] is List) _packages = s['packages'];
           }
         });
       }
@@ -73,7 +82,7 @@ class _ShellState extends State<Shell> {
               padding: const EdgeInsets.only(left: 12),
               child: Chip(
                 visualDensity: VisualDensity.compact,
-                avatar: const Icon(Icons.bolt, size: 16, color: XTheme.gold),
+                avatar: Icon(Icons.bolt, size: 16, color: XTheme.gold),
                 label: Text(
                     '${(_quotaLimit - _quotaUsed).clamp(0, _quotaLimit)}/$_quotaLimit',
                     style: const TextStyle(fontWeight: FontWeight.w800)),
@@ -81,6 +90,37 @@ class _ShellState extends State<Shell> {
                 side: BorderSide.none,
               ),
             ),
+          // بطاقات المشترك — قابلة للضغط + زر شراء باقة
+          if (!isGuest && !isOwner && _cards != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _showCardsInfo,
+                child: Chip(
+                  visualDensity: VisualDensity.compact,
+                  avatar: Icon(Icons.confirmation_number_outlined,
+                      size: 16, color: XTheme.cyan),
+                  label: Text('$_cards',
+                      style: const TextStyle(fontWeight: FontWeight.w800)),
+                  backgroundColor: XTheme.cyan.withOpacity(.12),
+                  side: BorderSide.none,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'شراء بطاقات',
+              icon: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                    gradient: XTheme.gradient,
+                    borderRadius: BorderRadius.circular(10)),
+                child: const Icon(Icons.add, color: Colors.white, size: 18),
+              ),
+              onPressed: _showPackages,
+            ),
+            const SizedBox(width: 6),
+          ],
         ],
       ),
       drawer: _drawer(user, isOwner, isGuest),
@@ -116,7 +156,7 @@ class _ShellState extends State<Shell> {
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(22),
-              decoration: const BoxDecoration(gradient: XTheme.gradient),
+              decoration: BoxDecoration(gradient: XTheme.gradient),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -165,6 +205,27 @@ class _ShellState extends State<Shell> {
               }, highlight: true),
             if (!isGuest && !isOwner)
               _item(Icons.verified_user_outlined, 'حساب مفعّل', null),
+            const SizedBox(height: 8),
+            // تبديل الثيم — أسود / أبيض
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: AnimatedBuilder(
+                animation: ThemeController.instance,
+                builder: (_, __) => Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: XTheme.surface2,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      _themeBtn(false, Icons.dark_mode_rounded, 'داكن'),
+                      _themeBtn(true, Icons.light_mode_rounded, 'فاتح'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
             const Spacer(),
             const Divider(height: 1),
             _item(Icons.logout, isGuest ? 'تسجيل الدخول' : 'تسجيل الخروج',
@@ -181,8 +242,8 @@ class _ShellState extends State<Shell> {
               await widget.store.setUser(g['user']);
               setState(() {});
             }),
-            const Padding(
-              padding: EdgeInsets.all(14),
+            Padding(
+              padding: const EdgeInsets.all(14),
               child: Text('X • إصدار 1.0.0',
                   style: TextStyle(color: XTheme.textDim, fontSize: 11)),
             ),
@@ -204,6 +265,201 @@ class _ShellState extends State<Shell> {
               color: highlight ? XTheme.cyan : XTheme.text)),
       onTap: onTap,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    );
+  }
+
+  /// معلومات رصيد البطاقات + تاريخ الصلاحية
+  void _showCardsInfo() {
+    final exp = _cardExpiry > 0
+        ? DateTime.fromMillisecondsSinceEpoch(_cardExpiry)
+        : null;
+    final expired = exp != null && exp.isBefore(DateTime.now());
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(children: [
+          Icon(Icons.confirmation_number_outlined, color: XTheme.cyan),
+          const SizedBox(width: 8),
+          const Text('بطاقاتك',
+              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('$_cards',
+              style: TextStyle(
+                  fontSize: 40,
+                  fontWeight: FontWeight.w900,
+                  color: expired || (_cards ?? 0) <= 0
+                      ? XTheme.danger
+                      : XTheme.cyan)),
+          Text('بطاقة عرض مخططات',
+              style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+          const SizedBox(height: 10),
+          Text(
+            exp == null
+                ? 'بلا تاريخ انتهاء'
+                : (expired
+                    ? 'انتهت الصلاحية في ${exp.toLocal().toString().split(' ').first}'
+                    : 'صالحة حتى ${exp.toLocal().toString().split(' ').first}'),
+            style: TextStyle(
+                color: expired ? XTheme.danger : XTheme.textDim,
+                fontSize: 12),
+          ),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إغلاق')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: XTheme.accent,
+                foregroundColor: Colors.white),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _showPackages();
+            },
+            child: const Text('شراء باقة'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// باقات البطاقات — الشراء عبر تيليجرام برسالة جاهزة
+  void _showPackages() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: XTheme.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                    color: XTheme.textDim.withOpacity(.4),
+                    borderRadius: BorderRadius.circular(4))),
+            const SizedBox(height: 16),
+            const Text('باقات بطاقات المخططات',
+                style:
+                    TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+            Text('كل بطاقة = فتح مخطط واحد • الشراء عبر تيليجرام',
+                style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+            const SizedBox(height: 16),
+            if (_packages.isEmpty)
+              Text('لا توجد باقات معروضة حالياً',
+                  style: TextStyle(color: XTheme.textDim)),
+            ..._packages.map((p) {
+              final cards = (p['cards'] as num?)?.toInt() ?? 0;
+              final price = p['price']?.toString() ?? '';
+              final days = (p['days'] as num?)?.toInt() ?? 0;
+              final period = days >= 365
+                  ? 'سنة كاملة'
+                  : days >= 150
+                      ? '5 أشهر'
+                      : 'شهران';
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: GlassCard(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(children: [
+                    Container(
+                      width: 52, height: 52,
+                      decoration: BoxDecoration(
+                          gradient: XTheme.gradient,
+                          borderRadius: BorderRadius.circular(14)),
+                      child: Center(
+                          child: Text('$cards',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 17))),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('$cards بطاقة',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w800)),
+                            Text('صالحة لغاية $period',
+                                style: TextStyle(
+                                    color: XTheme.textDim, fontSize: 11.5)),
+                          ]),
+                    ),
+                    Column(children: [
+                      Text(price,
+                          style: TextStyle(
+                              color: XTheme.gold,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 16)),
+                      const SizedBox(height: 4),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: XTheme.accent,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 6),
+                            minimumSize: Size.zero),
+                        onPressed: () => _buyPackage(cards, price),
+                        child: const Text('شراء',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12.5)),
+                      ),
+                    ]),
+                  ]),
+                ),
+              );
+            }),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _buyPackage(int cards, String price) async {
+    final msg = Uri.encodeComponent(
+        'مرحباً، أريد شراء باقة $cards بطاقة مخططات بسعر $price');
+    final uri = Uri.parse('$_telegram?text=$msg');
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  Widget _themeBtn(bool light, IconData icon, String label) {
+    final active = ThemeController.instance.isLight == light;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => ThemeController.instance.setLight(light),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            gradient: active ? XTheme.gradient : null,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon,
+                  size: 17,
+                  color: active ? Colors.white : XTheme.textDim),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      color: active ? Colors.white : XTheme.textDim)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

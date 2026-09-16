@@ -79,7 +79,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             const SizedBox(height: 14),
             Text(_error!,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: XTheme.text, fontSize: 15)),
+                style: TextStyle(color: XTheme.text, fontSize: 15)),
             const SizedBox(height: 18),
             if (_quotaOut)
               ElevatedButton.icon(
@@ -97,7 +97,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
       );
     }
     if (_bytes == null) {
-      return const Center(
+      return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           CircularProgressIndicator(color: XTheme.accent),
           SizedBox(height: 14),

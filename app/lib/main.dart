@@ -21,12 +21,27 @@ class _XAppState extends State<XApp> {
   late final Api api;
 
   @override
+  void initState() {
+    super.initState();
+    ThemeController.instance.addListener(_rebuild);
+    ThemeController.instance.load();
+  }
+
+  @override
+  void dispose() {
+    ThemeController.instance.removeListener(_rebuild);
+    super.dispose();
+  }
+
+  void _rebuild() => setState(() {});
+
+  @override
   Widget build(BuildContext context) {
     return FutureBuilder<Store>(
       future: _store,
       builder: (context, snap) {
         if (!snap.hasData) {
-          return const MaterialApp(
+          return MaterialApp(
             debugShowCheckedModeBanner: false,
             home: Scaffold(backgroundColor: XTheme.bg),
           );
@@ -35,7 +50,7 @@ class _XAppState extends State<XApp> {
         return MaterialApp(
           title: 'X',
           debugShowCheckedModeBanner: false,
-          theme: XTheme.dark(),
+          theme: XTheme.theme(),
           locale: const Locale('ar'),
           supportedLocales: const [Locale('ar'), Locale('en')],
           localizationsDelegates: const [

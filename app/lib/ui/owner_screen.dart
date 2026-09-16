@@ -25,7 +25,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('لوحة تحكم المالك'),
-          bottom: const TabBar(
+          bottom: TabBar(
             isScrollable: true,
             indicatorColor: XTheme.cyan,
             labelStyle:
@@ -88,7 +88,7 @@ class _OverviewTabState extends State<_OverviewTab> {
   @override
   Widget build(BuildContext context) {
     if (_data == null) {
-      return const Center(
+      return Center(
           child: CircularProgressIndicator(color: XTheme.accent));
     }
     final d = _data!;
@@ -127,12 +127,12 @@ class _OverviewTabState extends State<_OverviewTab> {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14, vertical: 10),
                     child: Row(children: [
-                      const Icon(Icons.phone_android,
+                      Icon(Icons.phone_android,
                           size: 18, color: XTheme.textDim),
                       const SizedBox(width: 10),
                       Expanded(child: Text('إصدار ${v['v']}')),
                       Text('${v['c']}',
-                          style: const TextStyle(
+                          style: TextStyle(
                               fontWeight: FontWeight.w900,
                               color: XTheme.cyan)),
                     ]),
@@ -150,7 +150,7 @@ class _OverviewTabState extends State<_OverviewTab> {
                   child: GlassCard(
                     padding: const EdgeInsets.all(14),
                     child: Row(children: [
-                      const Icon(Icons.person_add_alt,
+                      Icon(Icons.person_add_alt,
                           color: XTheme.gold, size: 22),
                       const SizedBox(width: 12),
                       Expanded(
@@ -162,21 +162,21 @@ class _OverviewTabState extends State<_OverviewTab> {
                                       fontWeight: FontWeight.w800)),
                               if ((r['note'] ?? '').toString().isNotEmpty)
                                 Text(r['note'],
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                         color: XTheme.textDim, fontSize: 12)),
                               Text('جهاز: ${r['device_id'] ?? '—'}',
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                       color: XTheme.textDim, fontSize: 10)),
                             ]),
                       ),
                       IconButton(
                           onPressed: () => _act(r['id'], 'approve'),
-                          icon: const Icon(Icons.check_circle,
+                          icon: Icon(Icons.check_circle,
                               color: XTheme.ok)),
                       IconButton(
                           onPressed: () => _act(r['id'], 'reject'),
                           icon:
-                              const Icon(Icons.cancel, color: XTheme.danger)),
+                              Icon(Icons.cancel, color: XTheme.danger)),
                     ]),
                   ),
                 )),
@@ -207,7 +207,7 @@ class _OverviewTabState extends State<_OverviewTab> {
                   fontSize: 24, fontWeight: FontWeight.w900)),
           Text(label,
               style:
-                  const TextStyle(color: XTheme.textDim, fontSize: 12)),
+                  TextStyle(color: XTheme.textDim, fontSize: 12)),
         ],
       ),
     );
@@ -282,7 +282,7 @@ class _SettingsTabState extends State<_SettingsTab> {
   @override
   Widget build(BuildContext context) {
     if (_s == null) {
-      return const Center(
+      return Center(
           child: CircularProgressIndicator(color: XTheme.accent));
     }
     final s = _s!;
@@ -293,14 +293,14 @@ class _SettingsTabState extends State<_SettingsTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Row(children: [
+              Row(children: [
                 Icon(Icons.bolt, color: XTheme.gold, size: 20),
                 SizedBox(width: 8),
                 Text('حصة الزائر اليومية',
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
               const SizedBox(height: 6),
-              const Text('عدد ملفات المخططات التي يفتحها الزائر يومياً',
+              Text('عدد ملفات المخططات التي يفتحها الزائر يومياً',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 8),
               Row(children: [
@@ -321,7 +321,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                       borderRadius: BorderRadius.circular(10)),
                   child: Text('${s.guestFileQuota}',
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontWeight: FontWeight.w900,
                           color: XTheme.gold,
                           fontSize: 17)),
@@ -335,7 +335,7 @@ class _SettingsTabState extends State<_SettingsTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Row(children: [
+              Row(children: [
                 Icon(Icons.system_update_alt,
                     color: XTheme.cyan, size: 20),
                 SizedBox(width: 8),
@@ -420,7 +420,7 @@ class _SettingsTabState extends State<_SettingsTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Row(children: [
+              Row(children: [
                 Icon(Icons.new_releases_outlined,
                     color: XTheme.gold, size: 20),
                 SizedBox(width: 8),
@@ -428,7 +428,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                   'تظهر للمستخدمين عند إيقاف إصدارهم أو رفع الحد الأدنى',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 12),
@@ -473,7 +473,7 @@ class _SettingsTabState extends State<_SettingsTab> {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(_msg!,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: XTheme.ok)),
+                style: TextStyle(color: XTheme.ok)),
           ),
         SizedBox(
           width: double.infinity,
@@ -505,7 +505,7 @@ class _SettingsTabState extends State<_SettingsTab> {
       contentPadding: EdgeInsets.zero,
       title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
       subtitle: Text(sub,
-          style: const TextStyle(color: XTheme.textDim, fontSize: 11)),
+          style: TextStyle(color: XTheme.textDim, fontSize: 11)),
       value: value,
       onChanged: onChanged,
       activeColor: XTheme.cyan,
@@ -555,6 +555,8 @@ class _UsersTabState extends State<_UsersTab> {
     final pass = TextEditingController();
     final name = TextEditingController();
     final days = TextEditingController(text: '30');
+    final cards = TextEditingController(text: '150');
+    final cardDays = TextEditingController(text: '60');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -586,6 +588,18 @@ class _UsersTabState extends State<_UsersTab> {
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
                   labelText: 'مدة الاشتراك بالأيام (0 = بلا انتهاء)')),
+          const SizedBox(height: 10),
+          TextField(
+              controller: cards,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'عدد بطاقات المخططات')),
+          const SizedBox(height: 10),
+          TextField(
+              controller: cardDays,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'صلاحية البطاقات بالأيام (0 = بلا انتهاء)')),
         ]),
         actions: [
           TextButton(
@@ -597,8 +611,11 @@ class _UsersTabState extends State<_UsersTab> {
                 foregroundColor: Colors.white),
             onPressed: () async {
               try {
-                await widget.api.createUser(user.text.trim(), pass.text,
-                    name.text.trim(), int.tryParse(days.text) ?? 0);
+                await widget.api.createUser(
+                    user.text.trim(), pass.text, name.text.trim(),
+                    int.tryParse(days.text) ?? 0,
+                    cards: int.tryParse(cards.text) ?? 0,
+                    cardDays: int.tryParse(cardDays.text) ?? 0);
                 if (ctx.mounted) Navigator.pop(ctx);
                 _load();
               } on ApiException catch (e) {
@@ -628,10 +645,10 @@ class _UsersTabState extends State<_UsersTab> {
                 color: Colors.white, fontWeight: FontWeight.w800)),
       ),
       body: _users == null
-          ? const Center(
+          ? Center(
               child: CircularProgressIndicator(color: XTheme.accent))
           : _users!.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text('لا يوجد مستخدمون',
                       style: TextStyle(color: XTheme.textDim)))
               : RefreshIndicator(
@@ -639,6 +656,65 @@ class _UsersTabState extends State<_UsersTab> {
                   color: XTheme.accent,
                   child: _list(),
     ));
+  }
+
+  /// حوار شحن بطاقات مخططات لمستخدم — يُنفَّذ في السيرفر فقط
+  void _quotaDialog(Map<String, dynamic> u) {
+    final cards = TextEditingController(text: '150');
+    final days = TextEditingController(text: '60');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Text('شحن بطاقات — ${u['username']}',
+            style: const TextStyle(
+                fontWeight: FontWeight.w900, fontSize: 16)),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('الرصيد الحالي: ${u['quota_balance'] ?? 0} بطاقة',
+              style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+          const SizedBox(height: 10),
+          TextField(
+              controller: cards,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'عدد البطاقات المضافة')),
+          const SizedBox(height: 10),
+          TextField(
+              controller: days,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                  labelText: 'صلاحية البطاقات بالأيام (0 = بلا انتهاء)')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: XTheme.accent,
+                foregroundColor: Colors.white),
+            onPressed: () async {
+              try {
+                await widget.api.grantQuota(
+                    u['id'],
+                    int.tryParse(cards.text) ?? 0,
+                    int.tryParse(days.text) ?? 0);
+                if (ctx.mounted) Navigator.pop(ctx);
+                _load();
+              } on ApiException catch (e) {
+                if (ctx.mounted) {
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(SnackBar(content: Text(e.message)));
+                }
+              }
+            },
+            child: const Text('شحن'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _list() {
@@ -672,18 +748,26 @@ class _UsersTabState extends State<_UsersTab> {
                                 fontWeight: FontWeight.w800)),
                         Text(
                             '${u['role']} • ${active ? 'مفعّل' : 'موقوف'} • جهاز: ${u['device_id'] ?? '—'}',
-                            style: const TextStyle(
+                            style: TextStyle(
                                 color: XTheme.textDim, fontSize: 11)),
+                        if (!isOwner)
+                          Text(
+                            'بطاقات: ${u['quota_balance'] ?? 0}'
+                            '${(u['quota_expires_at'] ?? 0) > 0 ? ' • حتى ${DateTime.fromMillisecondsSinceEpoch(u['quota_expires_at']).toLocal().toString().split(' ').first}' : ''}',
+                            style: TextStyle(
+                                color: XTheme.cyan, fontSize: 11)),
                       ]),
                 ),
                 if (!isOwner)
                   PopupMenuButton<String>(
-                    icon: const Icon(Icons.more_vert,
+                    icon: Icon(Icons.more_vert,
                         color: XTheme.textDim),
                     color: XTheme.surface2,
                     onSelected: (a) {
                       if (a == 'extend') {
                         _act(u['id'], 'extend', days: 30);
+                      } else if (a == 'quota') {
+                        _quotaDialog(u);
                       } else {
                         _act(u['id'], a);
                       }
@@ -692,6 +776,9 @@ class _UsersTabState extends State<_UsersTab> {
                       PopupMenuItem(
                           value: active ? 'deactivate' : 'activate',
                           child: Text(active ? 'إيقاف' : 'تفعيل')),
+                      const PopupMenuItem(
+                          value: 'quota',
+                          child: Text('شحن بطاقات مخططات')),
                       const PopupMenuItem(
                           value: 'extend',
                           child: Text('تمديد 30 يوم')),
@@ -752,11 +839,11 @@ class _SecurityTabState extends State<_SecurityTab> {
   @override
   Widget build(BuildContext context) {
     if (_events == null) {
-      return const Center(
+      return Center(
           child: CircularProgressIndicator(color: XTheme.accent));
     }
     if (_events!.isEmpty) {
-      return const Center(
+      return Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
         Icon(Icons.verified_user, size: 48, color: XTheme.ok),
         SizedBox(height: 10),
@@ -796,12 +883,12 @@ class _SecurityTabState extends State<_SecurityTab> {
                           const SizedBox(height: 4),
                           Text(
                               'جهاز: ${e['device_id'] ?? '—'}\nIP: ${e['ip'] ?? '—'}\nمسار: ${e['path'] ?? '—'}',
-                              style: const TextStyle(
+                              style: TextStyle(
                                   color: XTheme.textDim,
                                   fontSize: 11,
                                   height: 1.5)),
                           Text(e['at']?.toString().substring(0, 19) ?? '',
-                              style: const TextStyle(
+                              style: TextStyle(
                                   color: XTheme.textDim, fontSize: 10)),
                         ]),
                   ),
@@ -959,10 +1046,10 @@ class _AnnouncementsTabState extends State<_AnnouncementsTab> {
                 color: Colors.white, fontWeight: FontWeight.w800)),
       ),
       body: _ads == null
-          ? const Center(
+          ? Center(
               child: CircularProgressIndicator(color: XTheme.accent))
           : _ads!.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text('لا إعلانات — انشر أول إعلان',
                       style: TextStyle(color: XTheme.textDim)))
               : RefreshIndicator(
@@ -978,7 +1065,7 @@ class _AnnouncementsTabState extends State<_AnnouncementsTab> {
                         child: GlassCard(
                           padding: const EdgeInsets.all(14),
                           child: Row(children: [
-                            const Icon(Icons.campaign,
+                            Icon(Icons.campaign,
                                 color: XTheme.gold, size: 22),
                             const SizedBox(width: 12),
                             Expanded(
@@ -994,13 +1081,13 @@ class _AnnouncementsTabState extends State<_AnnouncementsTab> {
                                         .toString()
                                         .isNotEmpty)
                                       Text(a['subtitle'],
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                               color: XTheme.textDim,
                                               fontSize: 12)),
                                     if ((a['imageUrl'] ?? '')
                                         .toString()
                                         .isNotEmpty)
-                                      const Text('مع صورة',
+                                      Text('مع صورة',
                                           style: TextStyle(
                                               color: XTheme.cyan,
                                               fontSize: 11)),
@@ -1012,7 +1099,7 @@ class _AnnouncementsTabState extends State<_AnnouncementsTab> {
                                     .deleteAnnouncement(a['id']);
                                 _load();
                               },
-                              icon: const Icon(Icons.delete_outline,
+                              icon: Icon(Icons.delete_outline,
                                   color: XTheme.danger),
                             ),
                           ]),
@@ -1089,10 +1176,10 @@ class _BansTabState extends State<_BansTab> {
       ),
       Expanded(
         child: _bans == null
-            ? const Center(
+            ? Center(
                 child: CircularProgressIndicator(color: XTheme.accent))
             : _bans!.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text('لا أجهزة محظورة',
                         style: TextStyle(color: XTheme.textDim)))
                 : RefreshIndicator(
@@ -1109,7 +1196,7 @@ class _BansTabState extends State<_BansTab> {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 14, vertical: 10),
                             child: Row(children: [
-                              const Icon(Icons.phonelink_erase,
+                              Icon(Icons.phonelink_erase,
                                   color: XTheme.danger, size: 20),
                               const SizedBox(width: 10),
                               Expanded(
@@ -1124,7 +1211,7 @@ class _BansTabState extends State<_BansTab> {
                                               fontSize: 13)),
                                       Text(
                                           '${b['reason'] ?? ''} • ${b['at']?.toString().substring(0, 10) ?? ''}',
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                               color: XTheme.textDim,
                                               fontSize: 11)),
                                     ]),
@@ -1135,7 +1222,7 @@ class _BansTabState extends State<_BansTab> {
                                       .unbanDevice(b['id']);
                                   _load();
                                 },
-                                child: const Text('فك الحظر',
+                                child: Text('فك الحظر',
                                     style: TextStyle(
                                         color: XTheme.ok,
                                         fontSize: 12)),

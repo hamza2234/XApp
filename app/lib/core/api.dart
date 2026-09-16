@@ -10,7 +10,7 @@ class ApiException implements Exception {
   ApiException(this.status, this.message);
   final int status;
   final String message;
-  bool get quotaExhausted => status == 429;
+  bool get quotaExhausted => status == 429 || status == 402;
   bool get forbidden => status == 403;
   bool get updateRequired => status == 426;
   @override
@@ -208,13 +208,20 @@ class Api {
   Future<void> requestAction(String id, String action) =>
       post('/v1/owner/requests/$id/$action', {});
   Future<void> createUser(
-          String username, String password, String displayName, int days) =>
+          String username, String password, String displayName, int days,
+          {int cards = 0, int cardDays = 0}) =>
       post('/v1/owner/users', {
         'username': username,
         'password': password,
         'displayName': displayName,
-        'days': days
+        'days': days,
+        'cards': cards,
+        'cardDays': cardDays,
       });
+
+  /// شحن بطاقات مخططات لمستخدم — يضيف للرصيد ويحدد الصلاحية
+  Future<void> grantQuota(String id, int cards, int days) =>
+      post('/v1/owner/users/$id/quota', {'cards': cards, 'days': days});
   Future<List<dynamic>> ownerBans() async =>
       (await get('/v1/owner/bans'))['bans'] as List;
   Future<void> banDevice(String deviceId, String reason) =>

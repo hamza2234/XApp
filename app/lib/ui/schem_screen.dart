@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../core/api.dart';
 import '../core/models.dart';
 import 'theme.dart';
+import 'brand_logo.dart';
 import 'browser_screen.dart';
 
 /// شاشة المخططات — شبكة الشركات (من كتالوج R2 بترتيبه الأصلي)
@@ -44,21 +45,6 @@ class _SchemScreenState extends State<SchemScreen>
     }
   }
 
-  static const _icons = {
-    'iphone': Icons.apple,
-    'samsung': Icons.phone_android,
-    'huawei': Icons.smartphone,
-    'infinix': Icons.smartphone_outlined,
-    'itel': Icons.phone_iphone,
-    'tecno': Icons.phonelink,
-    'vivo': Icons.smartphone,
-    'realme': Icons.phone_android_outlined,
-    'mi': Icons.smartphone,
-    'redmi': Icons.smartphone_outlined,
-    'poco': Icons.phonelink_outlined,
-    'black shark': Icons.sports_esports,
-  };
-
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -72,7 +58,7 @@ class _SchemScreenState extends State<SchemScreen>
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
               child: TextField(
                 onChanged: (v) => setState(() => _filter = v),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'ابحث عن شركة…',
                   prefixIcon: Icon(Icons.search, color: XTheme.textDim),
                   isDense: true,
@@ -84,17 +70,17 @@ class _SchemScreenState extends State<SchemScreen>
             SliverFillRemaining(
                 child: Center(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.lock_outline, color: XTheme.gold, size: 44),
+              Icon(Icons.lock_outline, color: XTheme.gold, size: 44),
               const SizedBox(height: 12),
               Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 40),
                   child: Text(_error!,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: XTheme.textDim))),
+                      style: TextStyle(color: XTheme.textDim))),
               TextButton(onPressed: _load, child: const Text('إعادة المحاولة')),
             ])))
           else if (_brands == null)
-            const SliverFillRemaining(
+            SliverFillRemaining(
                 child: Center(
                     child: CircularProgressIndicator(color: XTheme.accent)))
           else
@@ -120,8 +106,6 @@ class _SchemScreenState extends State<SchemScreen>
             childAspectRatio: .9),
         delegate: SliverChildBuilderDelegate((context, i) {
           final b = list[i];
-          final icon =
-              _icons[b.name.toLowerCase()] ?? Icons.folder_special_outlined;
           return GlassCard(
             padding: const EdgeInsets.all(10),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(
@@ -132,14 +116,7 @@ class _SchemScreenState extends State<SchemScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Container(
-                  width: 46, height: 46,
-                  decoration: BoxDecoration(
-                    color: XTheme.cyan.withOpacity(.1),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Icon(icon, color: XTheme.cyan, size: 24),
-                ),
+                BrandLogo(name: b.name, size: 46),
                 const SizedBox(height: 8),
                 Text(b.name,
                     maxLines: 1,

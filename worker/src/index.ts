@@ -146,6 +146,7 @@ function uid(): string {
 
 interface XUser {
   id: string; username: string; display_name: string; role: string
+  quota_balance: number; quota_expires_at: number
   active: number; device_id: string | null; expires_at: number
 }
 
@@ -169,6 +170,7 @@ interface XSettings {
   updateMessage: string           // رسالة شاشة التحديث الإجباري
   updateUrl: string               // رابط زر التحديث
   updateImageUrl: string          // صورة شاشة التحديث
+  packages: { cards: number; price: string; days: number }[]  // باقات بطاقات المخططات
 }
 
 const DEFAULT_SETTINGS: XSettings = {
@@ -182,7 +184,12 @@ const DEFAULT_SETTINGS: XSettings = {
   lockMessage: '',
   updateMessage: 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
   updateUrl: '',
-  updateImageUrl: ''
+  updateImageUrl: '',
+  packages: [
+    { cards: 150, price: '3$', days: 60 },
+    { cards: 300, price: '5$', days: 150 },
+    { cards: 500, price: '7$', days: 365 },
+  ]
 }
 
 async function xSettings(XDB: D1Database): Promise<XSettings> {
@@ -376,9 +383,25 @@ function versionGate(request: Request, settings: XSettings): Response | null {
   return null
 }
 
-/** حصة فتح ملفات المخططات — للزائر فقط (المشتركون بلا حدود) */
+/** حصة فتح ملفات المخططات — زائر: حصة يومية؛ مشترك: بطاقات برصيد وصلاحية */
 async function consumeFileQuota(env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings): Promise<number> {
-  if (caller.role !== 'guest') return Number.MAX_SAFE_INTEGER
+  if (caller.role === 'owner') return Number.MAX_SAFE_INTEGER
+  if (caller.role === 'user') {
+    // خصم ذري من الرصيد — شرط الرصيد والصلاحية داخل UPDATE نفسه لمنع التلاعب/السباق
+    const now = Date.now()
+    const row = await env.XDB.prepare(
+      `UPDATE x_users SET quota_balance = quota_balance - 1
+       WHERE id = ?1 AND quota_balance > 0
+         AND (quota_expires_at = 0 OR quota_expires_at > ?2)
+       RETURNING quota_balance`
+    ).bind(caller.uid, now).first<{ quota_balance: number }>()
+    if (row) return row.quota_balance
+    const u = await xUser(env.XDB, caller.uid)
+    if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
+      throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
+    }
+    throw new HttpError(402, 'لا توجد بطاقات متبقية — اشترِ باقة جديدة من المالك')
+  }
   const dev = caller.uid.replace(/^guest_/, '')
   const key = `fq:${dev}:${today()}`
   const seenKey = `fqseen:${dev}:${today()}`
@@ -592,7 +615,8 @@ export default {
             minVersion: settings.minVersion,
             telegramLink: settings.telegramLink,
             schematicsLocked: settings.schematicsLocked,
-            compatLocked: settings.compatLocked
+            compatLocked: settings.compatLocked,
+            packages: settings.packages
           },
           update: {
             message: settings.updateMessage,
@@ -725,7 +749,13 @@ export default {
           },
           quota: caller.role === 'guest'
             ? { used, limit: settings.guestFileQuota }
-            : { used: 0, limit: -1 }
+            : { used: 0, limit: -1 },
+          cards: caller.role === 'user'
+            ? {
+                balance: auth.user?.quota_balance ?? 0,
+                expiresAt: auth.user?.quota_expires_at ?? 0
+              }
+            : null
         })
       }
 
@@ -906,7 +936,7 @@ export default {
 
         if (path === '/v1/owner/users' && request.method === 'GET') {
           const rows = await env.XDB.prepare(
-            "SELECT id, username, display_name, role, active, device_id, expires_at, created_at FROM x_users WHERE role != 'guest' ORDER BY created_at DESC LIMIT 500"
+            "SELECT id, username, display_name, role, active, device_id, expires_at, quota_balance, quota_expires_at, created_at FROM x_users WHERE role != 'guest' ORDER BY created_at DESC LIMIT 500"
           ).all()
           return json({ users: rows.results ?? [] })
         }
@@ -914,20 +944,25 @@ export default {
         // إنشاء حساب مفعّل مباشرة — المالك يضيف مشتركين بنفسه
         if (path === '/v1/owner/users' && request.method === 'POST') {
           const body = await request.json() as {
-            username?: string; password?: string; displayName?: string; days?: number
+            username?: string; password?: string; displayName?: string
+            days?: number; cards?: number; cardDays?: number
           }
           const username = body.username?.trim() ?? ''
           if (!/^[\w.\-@]{3,60}$/.test(username)) throw new HttpError(400, 'اسم مستخدم غير صالح')
           if ((body.password ?? '').length < 6) throw new HttpError(400, 'كلمة المرور قصيرة')
           if (await xUserByName(env.XDB, username)) throw new HttpError(409, 'اسم المستخدم مستخدم')
           const days = Math.max(0, Math.min(3650, Number(body.days) || 0))
+          const cards = Math.max(0, Math.min(100000, Math.floor(Number(body.cards) || 0)))
+          const cardDays = Math.max(0, Math.min(3650, Number(body.cardDays) || 0))
           await env.XDB.prepare(
-            `INSERT INTO x_users (id, username, display_name, password_hash, role, active, device_id, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'user', 1, NULL, ?5, ?6)`
+            `INSERT INTO x_users (id, username, display_name, password_hash, role, active, device_id, expires_at, quota_balance, quota_expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'user', 1, NULL, ?5, ?6, ?7, ?8)`
           ).bind(
             `u_${uid()}`, username, body.displayName?.trim() ?? '',
             await hashPassword(body.password!),
             days > 0 ? Date.now() + days * DAY * 1000 : 0,
+            cards,
+            cardDays > 0 ? Date.now() + cardDays * DAY * 1000 : 0,
             new Date().toISOString()
           ).run()
           return json({ ok: true })
@@ -954,7 +989,7 @@ export default {
           return json({ ok: true })
         }
 
-        const userAction = path.match(/^\/v1\/owner\/users\/([\w-]+)\/(activate|deactivate|reset-device|delete|extend)$/)
+        const userAction = path.match(/^\/v1\/owner\/users\/([\w-]+)\/(activate|deactivate|reset-device|delete|extend|quota)$/)
         if (userAction && request.method === 'POST') {
           const [, targetId, action] = userAction
           const target = await xUser(env.XDB, targetId)
@@ -972,6 +1007,18 @@ export default {
             const days = Math.max(1, Math.min(3650, Number(body.days) || 30))
             await env.XDB.prepare('UPDATE x_users SET expires_at = ?1 WHERE id = ?2')
               .bind(Date.now() + days * DAY * 1000, targetId).run()
+          } else if (action === 'quota') {
+            // شحن بطاقات: يضيف للرصيد ويحدد صلاحية جديدة — كل الحسابات في السيرفر فقط
+            const body = await request.json() as { cards?: number; days?: number }
+            const cards = Math.max(0, Math.min(100000, Math.floor(Number(body.cards) || 0)))
+            const days = Math.max(0, Math.min(3650, Number(body.days) || 0))
+            if (cards <= 0) throw new HttpError(400, 'عدد البطاقات مطلوب')
+            await env.XDB.prepare(
+              `UPDATE x_users SET
+                 quota_balance = quota_balance + ?2,
+                 quota_expires_at = ?3
+               WHERE id = ?1`
+            ).bind(targetId, cards, days > 0 ? Date.now() + days * DAY * 1000 : 0).run()
           } else if (action === 'delete') {
             await env.XDB.prepare('DELETE FROM x_users WHERE id = ?1').bind(targetId).run()
           }

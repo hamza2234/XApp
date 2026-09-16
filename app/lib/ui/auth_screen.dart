@@ -118,7 +118,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 _registerMode
                     ? 'الحساب يُفعَّل من المالك بعد الطلب'
                     : 'أدخل بياناتك للمتابعة بلا حدود',
-                style: const TextStyle(color: XTheme.textDim),
+                style: TextStyle(color: XTheme.textDim),
               ),
               const SizedBox(height: 28),
               GlassCard(
@@ -224,7 +224,7 @@ class _AuthScreenState extends State<AuthScreen> {
                           color: Color(0xFF229ED9)),
                     ),
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -236,7 +236,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         ],
                       ),
                     ),
-                    const Icon(Icons.open_in_new,
+                    Icon(Icons.open_in_new,
                         size: 18, color: XTheme.textDim),
                   ],
                 ),

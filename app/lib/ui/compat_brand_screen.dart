@@ -96,7 +96,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
               decoration: InputDecoration(
                 hintText: 'اكتب موديل الجهاز… (مثال: A57)',
                 prefixIcon:
-                    const Icon(Icons.search, color: XTheme.textDim),
+                    Icon(Icons.search, color: XTheme.textDim),
                 suffixIcon: _q.text.isNotEmpty
                     ? IconButton(
                         icon: const Icon(Icons.close, size: 18),
@@ -116,7 +116,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
 
   Widget _body() {
     if (_loading) {
-      return const Center(
+      return Center(
           child: CircularProgressIndicator(color: XTheme.accent));
     }
     if (_error != null) {
@@ -129,7 +129,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 40),
             child: Text(_error!,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: XTheme.textDim)),
+                style: TextStyle(color: XTheme.textDim)),
           ),
           if (_locked)
             Padding(
@@ -152,7 +152,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Icon(Icons.search_off, size: 52, color: XTheme.textDim.withOpacity(.5)),
           const SizedBox(height: 10),
-          const Text('لا توجد توافقات مطابقة',
+          Text('لا توجد توافقات مطابقة',
               style: TextStyle(color: XTheme.textDim)),
         ]),
       );
@@ -186,7 +186,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                         fontSize: 15)),
                 const SizedBox(width: 8),
                 Text('${recs.length}',
-                    style: const TextStyle(
+                    style: TextStyle(
                         color: XTheme.textDim, fontSize: 12)),
               ]),
             ),
@@ -207,7 +207,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(r.subCategory!,
-                  style: const TextStyle(
+                  style: TextStyle(
                       color: XTheme.cyan,
                       fontSize: 12,
                       fontWeight: FontWeight.w700)),

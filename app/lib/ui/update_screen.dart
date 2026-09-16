@@ -43,7 +43,7 @@ class UpdateScreen extends StatelessWidget {
                       ? message!
                       : 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
+                  style: TextStyle(
                       color: XTheme.textDim, fontSize: 15, height: 1.6),
                 ),
                 const SizedBox(height: 26),

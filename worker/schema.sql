@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS x_users (
   active        INTEGER NOT NULL DEFAULT 0,     -- الحسابات الجديدة تنتظر تفعيل المالك
   device_id     TEXT,
   expires_at    INTEGER NOT NULL DEFAULT 0,     -- 0 = بلا انتهاء
+  quota_balance INTEGER NOT NULL DEFAULT 0,     -- رصيد بطاقات عرض المخططات
+  quota_expires_at INTEGER NOT NULL DEFAULT 0,  -- انتهاء صلاحية البطاقات (0 = بلا انتهاء)
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS x_users_role ON x_users (role, active);

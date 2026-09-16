@@ -60,7 +60,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               _debounce = Timer(
                   const Duration(milliseconds: 400), () => _load(v.trim()));
             },
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               hintText: 'ابحث عن موديل…',
               prefixIcon: Icon(Icons.search, color: XTheme.textDim),
             ),
@@ -74,14 +74,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget _body() {
     if (_error != null) {
       return Center(
-          child: Text(_error!, style: const TextStyle(color: XTheme.danger)));
+          child: Text(_error!, style: TextStyle(color: XTheme.danger)));
     }
     if (_models == null) {
-      return const Center(
+      return Center(
           child: CircularProgressIndicator(color: XTheme.accent));
     }
     if (_models!.isEmpty) {
-      return const Center(
+      return Center(
           child: Text('لا توجد موديلات',
               style: TextStyle(color: XTheme.textDim)));
     }
@@ -99,7 +99,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(children: [
-                  const Icon(Icons.phone_android,
+                  Icon(Icons.phone_android,
                       size: 20, color: XTheme.accent),
                   const SizedBox(width: 10),
                   Expanded(
@@ -113,7 +113,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   runSpacing: 8,
                   children: m.folders.map((f) {
                     return ActionChip(
-                      avatar: const Icon(Icons.folder_outlined,
+                      avatar: Icon(Icons.folder_outlined,
                           size: 16, color: XTheme.cyan),
                       label: Text(f.category,
                           style: const TextStyle(
@@ -208,12 +208,12 @@ class _FolderScreenState extends State<FolderScreen> {
           ? (_error != null
               ? Center(
                   child: Text(_error!,
-                      style: const TextStyle(color: XTheme.danger)))
-              : const Center(
+                      style: TextStyle(color: XTheme.danger)))
+              : Center(
                   child:
                       CircularProgressIndicator(color: XTheme.accent)))
           : _entries!.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text('المجلد فارغ',
                       style: TextStyle(color: XTheme.textDim)))
               : ListView.builder(
@@ -251,7 +251,7 @@ class _FolderScreenState extends State<FolderScreen> {
                                         fontSize: 13.5)),
                                 if (e.sizeText != null)
                                   Text(e.sizeText!,
-                                      style: const TextStyle(
+                                      style: TextStyle(
                                           color: XTheme.textDim,
                                           fontSize: 11)),
                               ],
