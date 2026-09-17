@@ -1,18 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
 import '../core/api.dart';
 import '../core/compat_catalog.dart';
 import '../core/models.dart';
-import 'theme.dart';
 import 'subscribe_dialog.dart';
+import 'theme.dart';
 
-/// ميتاداتا نوع القطعة: أيقونة ولون وترتيب مستقل لكل نوع.
+/// بيانات كل نوع قطعة: الاسم والأيقونة واللون وترتيب العرض.
 class CompatTypeMeta {
   const CompatTypeMeta(this.label, this.icon, this.color, this.rank);
+
   final String label;
   final IconData icon;
   final Color color;
-
-  /// ترتيب العرض: الشاشات أولاً ثم البطاريات فالزجاج فضد الكسر.
   final int rank;
 
   static const _map = <String, CompatTypeMeta>{
@@ -23,18 +25,27 @@ class CompatTypeMeta {
         CompatTypeMeta('ضد الكسر', Icons.verified_outlined, Color(0xFFF5B942), 3),
   };
 
-  /// كل قيمة غير معروفة تأخذ أيقونة محايدة مستقلة وأخيرة في الترتيب.
-  static CompatTypeMeta of(String type) =>
-      _map[type.toUpperCase()] ??
+  /// الأنواع الأربعة بترتيب العرض — ثابتة كي لا تحتاج طلباً عند فتح الشاشة.
+  static List<String> get orderedTypes {
+    final keys = _map.keys.toList();
+    keys.sort((a, b) => _map[a]!.rank.compareTo(_map[b]!.rank));
+    return keys;
+  }
+
+  static CompatTypeMeta of(String type) => _map[type] ??
       CompatTypeMeta(type, Icons.build_outlined, XTheme.cyan, 100);
 
   static int rankOf(String type) => of(type).rank;
 }
 
-/// شاشة شركة: يختار المستخدم نوع القطعة أولاً (شاشات/بطاريات/زجاج/ضد الكسر)
-/// ثم يبحث داخل ذلك النوع فقط. لا نتائج قبل اختيار النوع وكتابة الاستعلام.
+/// شاشة توافقات شركة واحدة: اختيار النوع ثم البحث النصّي.
+///
+/// البحث يجري على الخادم (مكلّف ببطاقات) — لا نسحب سجلات الشركة كاملة إلى
+/// الجهاز، وإلا صار نظام العملات بلا معنى. لا نتائج قبل اختيار النوع وكتابة
+/// الاستعلام.
 class CompatBrandScreen extends StatefulWidget {
   const CompatBrandScreen({super.key, required this.api, required this.brand});
+
   final Api api;
   final CompatBrand brand;
 
@@ -43,116 +54,143 @@ class CompatBrandScreen extends StatefulWidget {
 }
 
 class _CompatBrandScreenState extends State<CompatBrandScreen> {
+  /// مهلة قبل إرسال الطلب بعد آخر ضغطة مفتاح. كل طلب جديد يُخصم من
+  /// بطاقات المشترك، فالمهلة القصيرة كانت تكلّف بطاقة لكل وقفة قصيرة أثناء
+  /// الكتابة. 600ms يجعل كتابة الموديل المتصلة طلباً واحداً — وإعادة البحث
+  /// نفسه مجانية داخل نافذة الخادم (15 دقيقة).
+  static const _debounce = Duration(milliseconds: 600);
+
+  /// أقل طول استعلام: حرف واحد يطابق كل شيء تقريباً فيُخصم بلا فائدة.
+  static const _minQuery = 2;
+
   final _q = TextEditingController();
-  CompatCatalog? _catalog;
-  bool _loading = true;
-  String? _loadError;
-  bool _locked = false;
+  Timer? _timer;
+
+  /// رقم الطلب الأخير — يمنع رداً قديماً من الكتابة فوق نتيجة أحدث.
+  int _seq = 0;
+
   String? _type;
   String _query = '';
+  bool _loading = false;
+  bool _charged = false;
+  String? _error;
+  bool _locked = false;
+  bool _quotaEmpty = false;
+  List<CompatRecord> _records = const [];
+  int _remaining = -1;
+  bool _searched = false;
 
   @override
-  void initState() {
-    super.initState();
-    _loadCatalog();
-  }
-
-  /// يُجلب كامل سجلات الشركة مرة واحدة وتُبنى فهرسة محلية، فيعمل العدّ
-  /// والبحث داخل النوع فوراً وبلا طلبات متكررة.
-  Future<void> _loadCatalog() async {
-    setState(() {
-      _loading = true;
-      _loadError = null;
-    });
-    try {
-      // الشركة الفرعية تُطلب بمعرّفها ليصفّيها الخادم على كلمتها.
-      final list = await widget.api.compatByBrand(widget.brand.ref);
-      if (!mounted) return;
-      setState(() {
-        _catalog =
-            CompatCatalog(list.map((e) => CompatRecord.fromJson(e)).toList());
-        _loading = false;
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _loadError = e.message;
-        _locked = e.forbidden;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _loadError = 'تعذر تحميل بيانات الشركة';
-      });
-    }
+  void dispose() {
+    _timer?.cancel();
+    _q.dispose();
+    super.dispose();
   }
 
   void _selectType(String type) {
     setState(() {
       _type = _type == type ? null : type;
       _query = '';
+      _records = const [];
+      _error = null;
+      _quotaEmpty = false;
+      _searched = false;
     });
     _q.clear();
+    _timer?.cancel();
   }
 
-  void _onQuery(String v) => setState(() => _query = v);
+  void _onQuery(String v) {
+    setState(() => _query = v);
+    _timer?.cancel();
+    final q = v.trim();
+    if (q.length < _minQuery) {
+      setState(() {
+        _records = const [];
+        _error = null;
+        _searched = false;
+      });
+      return;
+    }
+    _timer = Timer(_debounce, () => _search(q));
+  }
 
-  @override
-  void dispose() {
-    _q.dispose();
-    super.dispose();
+  Future<void> _search(String q) async {
+    final type = _type;
+    if (type == null) return;
+    final seq = ++_seq;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _quotaEmpty = false;
+    });
+    try {
+      final r = await widget.api
+          .searchCompatCharged(q, brand: widget.brand.ref, type: type);
+      if (!mounted || seq != _seq) return;
+      setState(() {
+        _loading = false;
+        _searched = true;
+        _charged = r.charged;
+        _remaining = r.remaining;
+        _records = r.records.map((e) => CompatRecord.fromJson(e)).toList();
+      });
+    } on ApiException catch (e) {
+      if (!mounted || seq != _seq) return;
+      setState(() {
+        _loading = false;
+        _searched = true;
+        _records = const [];
+        _error = e.message;
+        _locked = e.forbidden;
+        _quotaEmpty = e.quotaExhausted;
+      });
+      if (e.quotaExhausted && mounted) {
+        await showSubscribeDialog(context);
+      }
+    } catch (_) {
+      if (!mounted || seq != _seq) return;
+      setState(() {
+        _loading = false;
+        _searched = true;
+        _records = const [];
+        _error = 'تعذر الاتصال بالخادم — تحقق من الإنترنت';
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(widget.brand.displayName)),
-      body: _body(),
+      body: Column(
+        children: [
+          _typeSelector(),
+          if (_type != null) _searchField(),
+          if (_type != null && _remaining >= 0) _quotaChip(),
+          Expanded(child: _results()),
+        ],
+      ),
     );
   }
 
-  Widget _body() {
-    if (_loading) {
-      return Center(child: CircularProgressIndicator(color: XTheme.accent));
-    }
-    if (_loadError != null) return _errorView();
-
-    final catalog = _catalog!;
-    if (catalog.availableTypes.isEmpty) {
-      return _emptyView('لا توجد توافقات لهذه الشركة');
-    }
-
-    return Column(
-      children: [
-        _typeSelector(catalog),
-        if (_type != null) _searchField(),
-        Expanded(child: _results(catalog)),
-      ],
-    );
-  }
-
-  /// صف الأنواع: أيقونة واسم وعدد مستقل لكل نوع — بلا خلط بين الأنواع.
-  Widget _typeSelector(CompatCatalog catalog) {
-    final types = [...catalog.availableTypes]
-      ..sort((a, b) => CompatTypeMeta.rankOf(a).compareTo(
-          CompatTypeMeta.rankOf(b)));
-    final counts = catalog.counts;
+  /// صف الأنواع: أيقونة واسم فقط — بلا أعداد كي لا تُبنى صورة كاملة عن
+  /// حجم البيانات بلا بحث.
+  Widget _typeSelector() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
       child: Wrap(
         spacing: 10,
         runSpacing: 10,
         children: [
-          for (final t in types)
-            _typeChip(t, counts[t] ?? 0, _type == t),
+          for (final t in CompatTypeMeta.orderedTypes)
+            _typeChip(t, _type == t),
         ],
       ),
     );
   }
 
-  Widget _typeChip(String type, int count, bool selected) {
+  Widget _typeChip(String type, bool selected) {
     final meta = CompatTypeMeta.of(type);
     return InkWell(
       onTap: () => _selectType(type),
@@ -179,19 +217,6 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                   fontWeight: FontWeight.w800,
                   fontSize: 13.5,
                   color: selected ? meta.color : XTheme.text)),
-          const SizedBox(width: 7),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-            decoration: BoxDecoration(
-              color: meta.color.withOpacity(.2),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text('$count',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    color: meta.color)),
-          ),
         ]),
       ),
     );
@@ -200,7 +225,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   Widget _searchField() {
     final meta = CompatTypeMeta.of(_type!);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
       child: TextField(
         controller: _q,
         autofocus: true,
@@ -222,31 +247,55 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     );
   }
 
-  Widget _results(CompatCatalog catalog) {
+  /// شريحة الرصيد: تظهر فقط بعد خصم فعلي حتى يعرف المشترك ثمن بحثه.
+  Widget _quotaChip() {
+    final ok = _remaining > 0;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Row(children: [
+        Icon(Icons.monetization_on_outlined,
+            size: 15, color: ok ? XTheme.gold : XTheme.danger),
+        const SizedBox(width: 6),
+        Text(ok ? 'البطاقات المتبقية: $_remaining' : 'آخر بطاقاتك',
+            style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: ok ? XTheme.gold : XTheme.danger)),
+        if (_charged) ...[
+          const Spacer(),
+          Text('خُصمت بطاقة لهذا البحث',
+              style:
+                  TextStyle(fontSize: 11, color: XTheme.textDim.withOpacity(.8))),
+        ],
+      ]),
+    );
+  }
+
+  Widget _results() {
     if (_type == null) {
       return _emptyView(
           'اختر نوع القطعة أولاً — شاشات أو بطاريات أو زجاج أو ضد الكسر',
           Icons.touch_app);
     }
     final meta = CompatTypeMeta.of(_type!);
-    final total = catalog.byType(_type!).length;
 
-    if (_query.trim().isEmpty) {
+    if (_query.trim().length < _minQuery) {
       return _emptyView(
-          'اكتب موديل الجهاز للبحث داخل ${meta.label}\n($total توافق متاح)',
-          meta.icon,
-          meta.color);
+          'اكتب موديل الجهاز للبحث داخل ${meta.label}', meta.icon, meta.color);
     }
-
-    final found = catalog.search(_type!, _query);
-    if (found.isEmpty) {
-      return _emptyView('لا توجد توافقات مطابقة في ${meta.label}',
-          Icons.search_off);
+    if (_loading) {
+      return Center(child: CircularProgressIndicator(color: meta.color));
+    }
+    if (_error != null) return _errorView();
+    if (!_searched) return const SizedBox.shrink();
+    if (_records.isEmpty) {
+      return _emptyView(
+          'لا توجد توافقات مطابقة في ${meta.label}', Icons.search_off);
     }
 
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 28),
-      itemCount: found.length + 1,
+      itemCount: _records.length + 1,
       itemBuilder: (context, i) {
         if (i == 0) {
           return Padding(
@@ -254,7 +303,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             child: Row(children: [
               Icon(meta.icon, size: 17, color: meta.color),
               const SizedBox(width: 8),
-              Text('${found.length} نتيجة في ${meta.label}',
+              Text('${_records.length} نتيجة في ${meta.label}',
                   style: TextStyle(
                       color: meta.color,
                       fontSize: 13,
@@ -262,7 +311,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             ]),
           );
         }
-        return _recordCard(found[i - 1], meta, i - 1);
+        return _recordCard(_records[i - 1], meta, i - 1);
       },
     );
   }
@@ -309,7 +358,6 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
               ],
             ),
           ),
-          // فاصل بصري رفيع بين الصفوف.
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Row(children: [
@@ -338,12 +386,9 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
       decoration: BoxDecoration(
-        color: hit
-            ? meta.color.withOpacity(.26)
-            : meta.color.withOpacity(.09),
+        color: hit ? meta.color.withOpacity(.26) : meta.color.withOpacity(.09),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-            color: meta.color.withOpacity(hit ? .7 : .2)),
+        border: Border.all(color: meta.color.withOpacity(hit ? .7 : .2)),
       ),
       child: Text.rich(_highlighted(m, q, meta),
           style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
@@ -383,30 +428,33 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   Widget _errorView() {
+    final icon = _quotaEmpty
+        ? Icons.monetization_on_outlined
+        : (_locked ? Icons.lock_outline : Icons.error_outline);
+    final color = (_quotaEmpty || _locked) ? XTheme.gold : XTheme.danger;
     return Center(
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(_locked ? Icons.lock_outline : Icons.error_outline,
-            size: 44, color: _locked ? XTheme.gold : XTheme.danger),
+        Icon(icon, size: 44, color: color),
         const SizedBox(height: 12),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 40),
-          child: Text(_loadError!,
+          child: Text(_error!,
               textAlign: TextAlign.center,
-              style: TextStyle(color: XTheme.textDim)),
+              style: TextStyle(color: XTheme.textDim, height: 1.6)),
         ),
         const SizedBox(height: 12),
-        if (_locked)
+        if (_locked || _quotaEmpty)
           ElevatedButton.icon(
             onPressed: () => showSubscribeDialog(context),
             icon: const Icon(Icons.send_rounded, size: 18),
             label: const Text('تواصل مع المالك'),
             style: ElevatedButton.styleFrom(
-                backgroundColor: XTheme.accent,
-                foregroundColor: Colors.white),
+                backgroundColor: XTheme.accent, foregroundColor: Colors.white),
           )
         else
           TextButton(
-              onPressed: _loadCatalog, child: const Text('إعادة المحاولة')),
+              onPressed: () => _search(_query.trim()),
+              child: const Text('إعادة المحاولة')),
       ]),
     );
   }

@@ -465,7 +465,13 @@ async function mirrorSearchCompat(
   if (opts.brandFile) { binds.push(opts.brandFile); clauses.push(`brand_file = ?${binds.length}`) }
   if (opts.type) { binds.push(opts.type); clauses.push(`component_type = ?${binds.length}`) }
   if (opts.keyword) { binds.push(`%${opts.keyword.toLowerCase()}%`); clauses.push(`LOWER(data) LIKE ?${binds.length}`) }
-  if (opts.query) { binds.push(`%${opts.query.toLowerCase()}%`); clauses.push(`LOWER(data) LIKE ?${binds.length}`) }
+  // كل كلمة شرط مستقل (AND): بحث «iphone 11» كان يرجع صفراً لأن المطابقة
+  // كانت على النص كاملاً. سقف 4 كلمات يحدّ كلفة الاستعلام.
+  const tokens = opts.query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 4)
+  for (const t of tokens) {
+    binds.push(`%${t}%`)
+    clauses.push(`LOWER(data) LIKE ?${binds.length}`)
+  }
   binds.push(opts.limit)
   return mrows(await db.prepare(
     `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')} LIMIT ?${binds.length}`
