@@ -165,6 +165,7 @@ interface XSettings {
   telegramLink: string
   schematicsLocked: boolean       // قفل المخططات كلياً عن الزوار
   compatLocked: boolean           // قفل التوافقات عن الزوار
+  compatSearchCost: number        // ثمن البحث الواحد في التوافقات (0 = مجاني)
   appLocked: boolean              // قفل التطبيق كلياً (صيانة)
   lockMessage: string
   updateMessage: string           // رسالة شاشة التحديث الإجباري
@@ -180,6 +181,7 @@ const DEFAULT_SETTINGS: XSettings = {
   telegramLink: 'https://t.me/phonex6',
   schematicsLocked: false,
   compatLocked: false,
+  compatSearchCost: 1,
   appLocked: false,
   lockMessage: '',
   updateMessage: 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
@@ -238,6 +240,19 @@ async function noteAbuse(env: Env, request: Request, reason: string): Promise<vo
 }
 
 /** حظر جهاز نهائي — لا يفيده تغيير IP أو بروكسي أو حساب جديد */
+/**
+ * حظر IP دائم — يُستخدم مع حظر الجهاز: الأول يوقف المهاجم فوراً،
+ * والثاني يمنعه حتى لو غيّر عنوانه.
+ */
+async function banIp(env: Env, addr: string, reason: string, request?: Request): Promise<void> {
+  await env.QUOTA.put(`hardban:${addr}`, 'perm') // بلا انتهاء
+  await env.XDB.prepare(
+    `INSERT INTO x_bans (id, kind, reason, permanent, at) VALUES (?1, 'ip', ?2, 1, ?3)
+     ON CONFLICT(id) DO UPDATE SET reason = ?2, at = ?3`
+  ).bind(addr, reason.slice(0, 200), new Date().toISOString()).run()
+  if (request) await logSecurity(env, request, 'ip_banned', reason)
+}
+
 async function banDevice(env: Env, deviceId: string, reason: string, request?: Request): Promise<void> {
   await env.QUOTA.put(`devban:${deviceId}`, 'perm') // بلا انتهاء
   await env.XDB.prepare(
@@ -385,7 +400,10 @@ function versionGate(request: Request, settings: XSettings): Response | null {
 }
 
 /** حصة فتح ملفات المخططات — زائر: حصة يومية؛ مشترك: بطاقات برصيد وصلاحية */
-async function consumeFileQuota(env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings): Promise<number> {
+async function consumeFileQuota(
+  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
+  chargeKey?: string
+): Promise<number> {
   if (caller.role === 'owner') return Number.MAX_SAFE_INTEGER
   if (caller.role === 'user') {
     // خصم ذري من الرصيد — شرط الرصيد والصلاحية داخل UPDATE نفسه لمنع التلاعب/السباق
@@ -396,7 +414,13 @@ async function consumeFileQuota(env: Env, ctx: ExecutionContext, caller: Caller,
          AND (quota_expires_at = 0 OR quota_expires_at > ?2)
        RETURNING quota_balance`
     ).bind(caller.uid, now).first<{ quota_balance: number }>()
-    if (row) return row.quota_balance
+    if (row) {
+      // البصمة تُسجَّل بعد نجاح الخصم فقط، فلا تُحتسب محاولة رُفضت.
+      if (chargeKey) {
+        ctx.waitUntil(env.QUOTA.put(chargeKey, '1', { expirationTtl: 900 }))
+      }
+      return row.quota_balance
+    }
     const u = await xUser(env.XDB, caller.uid)
     if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
       throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
@@ -413,6 +437,9 @@ async function consumeFileQuota(env: Env, ctx: ExecutionContext, caller: Caller,
   }
   ctx.waitUntil(env.QUOTA.put(key, String(used + 1), { expirationTtl: DAY }))
   ctx.waitUntil(env.QUOTA.put(seenKey, '1', { expirationTtl: DAY }))
+  if (chargeKey) {
+    ctx.waitUntil(env.QUOTA.put(chargeKey, '1', { expirationTtl: 900 }))
+  }
   return limit - used - 1
 }
 
@@ -444,6 +471,75 @@ async function mirrorSearchCompat(
     `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')} LIMIT ?${binds.length}`
   ).bind(...binds).all<{ id: string; data: string }>())
 }
+
+/** الأنواع المتوفرة لشركة — استعلام تجميعي واحد، مخزّن مؤقتاً. */
+async function compatTypesOf(db: D1Database, brandFile: string): Promise<string[]> {
+  const rows = await db.prepare(
+    `SELECT component_type t, COUNT(*) c FROM docs
+     WHERE collection = 'compatibility' AND brand_file = ?1
+     GROUP BY component_type ORDER BY c DESC`
+  ).bind(brandFile).all<{ t: string; c: number }>()
+  return (rows.results ?? []).map(r => r.t).filter(Boolean)
+}
+
+/** كل ملفات الشركات المتوفرة في المرآة — لتصفية سجل التثبيتات حسب النشاط. */
+async function compatBrandFiles(db: D1Database): Promise<string[]> {
+  const rows = await db.prepare(
+    "SELECT DISTINCT brand_file f FROM docs WHERE collection = 'compatibility'"
+  ).all<{ f: string }>()
+  return (rows.results ?? []).map(r => r.f).filter(Boolean)
+}
+
+// ---------- تحصيل التوافقات ----------
+
+/** ثمن البحث الواحد. المالك يضبطه؛ 0 يعني مجاني. */
+function compatCost(settings: XSettings): number {
+  const c = Number(settings.compatSearchCost)
+  return Number.isFinite(c) && c >= 0 ? Math.min(1000, Math.floor(c)) : 1
+}
+
+/**
+ * يخصم ثمن بحث واحد لكل (مستخدم + شركة + نوع + نص) في نافذة قصيرة.
+ * إعادة البحث نفسه — أو التنقل بين النتائج — لا تُخصم مرتين، فلا يُستنزف
+ * المشترك وهو يتصفح، بينما كل استعلام جديد يُحاسَب. هذا يمنع أيضاً سحب
+ * التوافقات آلياً: كل نص جديد يكلّف.
+ */
+async function chargeCompatSearch(
+  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
+  brandRef: string, type: string, q: string
+): Promise<{ remaining: number; charged: boolean }> {
+  const cost = compatCost(settings)
+  if (caller.role === 'owner' || cost === 0) {
+    return { remaining: Number.MAX_SAFE_INTEGER, charged: false }
+  }
+  const digest = await hmacHex(settings.telegramLink || 'x-compat', `${caller.uid}|${brandRef}|${type}|${q}`)
+  const seenKey = `cq:${caller.uid}:${digest.slice(0, 32)}`
+  if (await env.QUOTA.get(seenKey)) {
+    // نفس البحث خلال النافذة — بلا خصم جديد.
+    return { remaining: -1, charged: false }
+  }
+  // الخصم أولاً؛ عند الفشل لا تُعاد أي بيانات.consumeFileQuota هي المسؤولة
+  // عن تسجيل البصمة، فنسجيلها هنا مرة ثانية كان يمنع أي بحث لاحق خلال
+  // النافذة من الخصم حتى لو تغيّر النص.
+  const remaining = await consumeFileQuota(env, ctx, caller, settings, seenKey)
+  return { remaining, charged: true }
+}
+
+/**
+ * أحداث تستحق انتباه المالك: محاولات تجاوز الحماية والاستنزاف.
+ * تُستثنى الأحداث الروتينية (تسجيل دخول خاطئ، جهاز مختلف) لأنها لا تعني هجوماً
+ * وتُغرق السجل فيصعب رؤية المهم.
+ */
+const ATTACK_REASONS = [
+  'missing_signature', 'bad_signature', 'stale_signature', 'ip_hardban',
+  'device_farm', 'device_mismatch', 'banned_device_hit', 'banned_ip_hit',
+  'device_banned', 'ip_banned', 'non_owner_admin_attempt',
+  'guest_token_device_mismatch', 'rate_limited',
+  'bad_owner_key', 'scraping_suspected'
+]
+
+
+const COMPAT_TYPES = ['SCREEN', 'BATTERY', 'GLASS', 'INCASSABLE']
 
 /** شركات فرعية افتراضية — تُشتق قراءةً فقط من ملفات الشركات الأم، بلا أي كتابة على المصدر */
 const VIRTUAL_SUB_BRANDS: { name: string; file: string; key: string }[] = [
@@ -745,27 +841,98 @@ export default {
         return json({ brands })
       }
 
-      if (path === '/v1/data/compatibility' && request.method === 'GET') {
-        await rateLimit(env, request, 'compat', 200, 600)
+      // بحث التوافقات — نقطة واحدة محصّنة تُخصم منها العملة.
+      // POST لا GET: البحث فعل مكلّف لا يجوز أن يُخزَّن في الكاش أو يُستدعى
+      // تلقائياً من متصفح/زاحف، ولا يظهر نصه في سجلات الوسطاء.
+      if (path === '/v1/data/compat/search' && request.method === 'POST') {
+        await Promise.all([
+          rateLimit(env, request, 'compatsearch', 240, 600),
+          rateLimit(env, request, 'compatsearchhour', 120, 3600)
+        ])
         if (caller.role === 'guest' && settings.compatLocked) {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
         }
-        let brandFile = url.searchParams.get('brand')?.trim() || undefined
+        const body = await request.json() as {
+          q?: string; brand?: string; type?: string; limit?: number
+        }
+        // حدود صارمة: نص طويل أو نوع غير معروف يزيد كلفة LIKE بلا فائدة
+        const q = String(body.q ?? '').trim().slice(0, 64).toLowerCase()
+        let brandRef = String(body.brand ?? '').trim().slice(0, 80)
+        const type = String(body.type ?? '').trim().slice(0, 24).toUpperCase()
+
+        let brandFile = brandRef || undefined
         let keyword: string | undefined
-        // بطاقة شركة فرعية: تُفك إلى ملف الشركة الأم + كلمة الفرعية — لا كتابة على المصدر
-        if (brandFile?.startsWith('v_')) {
-          const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brandFile)
+        if (brandRef.startsWith('v_')) {
+          const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brandRef)
           brandFile = vb?.file
           keyword = vb?.key
         }
+        // نوع غير معروف لا يطابق شيئاً — نرفضه بدل تمريره للاستعلام
+        if (type && !COMPAT_TYPES.includes(type)) {
+          throw new HttpError(400, 'نوع قطعة غير معروف')
+        }
+        const types = brandFile
+          ? await cached(env, `ctypes:${brandFile}`, 3600, () => compatTypesOf(env.MIRROR, brandFile!))
+          : [...COMPAT_TYPES]
+
+        // لا خصم على استعلام فارغ: هو استعراض لأنواع الشركة لا سحب بيانات.
+        if (!q) {
+          return json({ records: [], types, charged: false, remaining: -1 },
+            200, { 'cache-control': 'no-store' })
+        }
+
+        const { remaining, charged } = await chargeCompatSearch(
+          env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
+
         const results = await mirrorSearchCompat(env.MIRROR, {
-          query: url.searchParams.get('q')?.trim() ?? '',
-          brandFile,
-          keyword,
-          type: url.searchParams.get('type')?.trim() || undefined,
-          limit: Math.min(Number(url.searchParams.get('limit')) || 200, 500)
+          query: q, brandFile, keyword,
+          type: type || undefined,
+          limit: Math.max(1, Math.min(Number(body.limit) || 60, 120))
         })
-        return json({ records: results.map(d => ({ id: d.id, ...d.fields })) })
+        return json({
+          records: results.map(d => ({ id: d.id, ...d.fields })),
+          types, charged,
+          remaining: remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining
+        }, 200, {
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff'
+        })
+      }
+
+      // قراءة كاملة لشركة كانت تُستخدم للفهرسة المحلية. صارت مكلّفة أيضاً:
+      // تركها مجانية كان ثقباً يسمح بسحب كل التوافقات شركةً شركة.
+      if (path === '/v1/data/compatibility' && request.method === 'GET') {
+        await rateLimit(env, request, 'compat', 60, 600)
+        if (caller.role === 'guest' && settings.compatLocked) {
+          throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
+        }
+        const q = url.searchParams.get('q')?.trim() ?? ''
+        let brandRef = url.searchParams.get('brand')?.trim() ?? ''
+        const type = (url.searchParams.get('type')?.trim() ?? '').toUpperCase()
+        let brandFile = brandRef || undefined
+        let keyword: string | undefined
+        if (brandRef.startsWith('v_')) {
+          const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brandRef)
+          brandFile = vb?.file
+          keyword = vb?.key
+        }
+        // استعلام فارغ = استكشاف لا بحث، فلا يُخصم — نفس سلوك نقطة البحث.
+        const probe = q.length === 0
+        const { remaining } = probe
+          ? { remaining: Number.MAX_SAFE_INTEGER }
+          : await chargeCompatSearch(
+              env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
+        const results = await mirrorSearchCompat(env.MIRROR, {
+          query: q, brandFile, keyword,
+          type: type || undefined,
+          limit: probe
+            ? 0
+            : Math.min(Number(url.searchParams.get('limit')) || 200, 500)
+        })
+        return json({ records: results.map(d => ({ id: d.id, ...d.fields })) }, 200, {
+          'cache-control': 'no-store',
+          'x-quota-remaining': String(remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining)
+        })
       }
 
       if (path === '/v1/me' && request.method === 'GET') {
@@ -914,22 +1081,32 @@ export default {
         }
 
         if (path === '/v1/owner/overview' && request.method === 'GET') {
-          const [installs, users, pending, secToday, guests24h] = await Promise.all([
-            env.XDB.prepare('SELECT COUNT(*) c FROM x_installs').first<{ c: number }>(),
+          const since = new Date(Date.now() - DAY).toISOString()
+          const attacks = ATTACK_REASONS.map(() => '?').join(',')
+          const [installs, users, pending, attacksToday, activeToday] = await Promise.all([
+            // جهاز فريد: إعادة التثبيت أو تحديث النسخة لا تحتسب هاتفاً جديداً
+            env.XDB.prepare(
+              "SELECT COUNT(DISTINCT COALESCE(device_id, install_id)) c FROM x_installs"
+            ).first<{ c: number }>(),
             env.XDB.prepare("SELECT COUNT(*) c FROM x_users WHERE role != 'owner'").first<{ c: number }>(),
             env.XDB.prepare("SELECT COUNT(*) c FROM x_requests WHERE status = 'pending'").first<{ c: number }>(),
-            env.XDB.prepare("SELECT COUNT(*) c FROM x_security WHERE at > ?1").bind(new Date(Date.now() - DAY).toISOString()).first<{ c: number }>(),
-            env.XDB.prepare("SELECT COUNT(*) c FROM x_installs WHERE last_seen > ?1").bind(new Date(Date.now() - DAY).toISOString()).first<{ c: number }>()
+            env.XDB.prepare(
+              `SELECT COUNT(*) c FROM x_security WHERE at > ?1 AND reason IN (${attacks})`
+            ).bind(since, ...ATTACK_REASONS).first<{ c: number }>(),
+            env.XDB.prepare(
+              "SELECT COUNT(DISTINCT COALESCE(device_id, install_id)) c FROM x_installs WHERE last_seen > ?1"
+            ).bind(since).first<{ c: number }>()
           ])
           const byVersion = await env.XDB.prepare(
-            'SELECT app_version v, COUNT(*) c FROM x_installs GROUP BY app_version ORDER BY c DESC'
+            `SELECT app_version v, COUNT(DISTINCT COALESCE(device_id, install_id)) c
+             FROM x_installs GROUP BY app_version ORDER BY c DESC`
           ).all<{ v: string; c: number }>()
           return json({
             installs: installs?.c ?? 0,
             users: users?.c ?? 0,
             pendingRequests: pending?.c ?? 0,
-            securityEvents24h: secToday?.c ?? 0,
-            activeInstalls24h: guests24h?.c ?? 0,
+            securityEvents24h: attacksToday?.c ?? 0,
+            activeInstalls24h: activeToday?.c ?? 0,
             installsByVersion: byVersion.results ?? [],
             settings
           })
@@ -950,6 +1127,7 @@ export default {
               ? body.telegramLink.trim() : settings.telegramLink,
             schematicsLocked: body.schematicsLocked ?? settings.schematicsLocked,
             compatLocked: body.compatLocked ?? settings.compatLocked,
+            compatSearchCost: Math.max(0, Math.min(1000, Math.floor(Number(body.compatSearchCost ?? settings.compatSearchCost) || 0))),
             appLocked: body.appLocked ?? settings.appLocked,
             lockMessage: typeof body.lockMessage === 'string' ? body.lockMessage.slice(0, 300) : settings.lockMessage,
             updateMessage: typeof body.updateMessage === 'string' ? body.updateMessage.slice(0, 500) : settings.updateMessage,
@@ -1017,17 +1195,27 @@ export default {
           return json({ bans: rows.results ?? [] })
         }
         if (path === '/v1/owner/bans' && request.method === 'POST') {
-          const body = await request.json() as { deviceId?: string; reason?: string }
+          const body = await request.json() as {
+            deviceId?: string; ip?: string; reason?: string
+          }
+          const reason = body.reason?.trim() || 'manual'
           const dev = body.deviceId?.trim() ?? ''
-          if (!dev || dev.length > 100) throw new HttpError(400, 'deviceId required')
-          await banDevice(env, dev, body.reason?.trim() || 'manual', request)
+          const addr = body.ip?.trim() ?? ''
+          if (!dev && !addr) throw new HttpError(400, 'deviceId أو ip مطلوب')
+          if (dev.length > 100 || addr.length > 64) throw new HttpError(400, 'قيمة طويلة جداً')
+          if (dev) await banDevice(env, dev, reason, request)
+          if (addr) await banIp(env, addr, reason, request)
           return json({ ok: true })
         }
         const unban = path.match(/^\/v1\/owner\/bans\/(.+)$/)
         if (unban && request.method === 'DELETE') {
-          const dev = decodeURIComponent(unban[1])
-          await env.QUOTA.delete(`devban:${dev}`)
-          await env.XDB.prepare('DELETE FROM x_bans WHERE id = ?1').bind(dev).run()
+          const target = decodeURIComponent(unban[1])
+          // الهدف قد يكون جهازاً أو عنوان IP — ننظّف المفتاحين معاً.
+          await Promise.all([
+            env.QUOTA.delete(`devban:${target}`),
+            env.QUOTA.delete(`hardban:${target}`)
+          ])
+          await env.XDB.prepare('DELETE FROM x_bans WHERE id = ?1').bind(target).run()
           return json({ ok: true })
         }
 
@@ -1089,11 +1277,17 @@ export default {
           return json({ ok: true })
         }
 
+        // الهجمات فقط افتراضياً — الأحداث الروتينية تُعرض عند ?all=1 فحسب،
+        // كي يرى المالك ما يستحق تدخّلاً لا كل نشاط عادي.
         if (path === '/v1/owner/security' && request.method === 'GET') {
-          const rows = await env.XDB.prepare(
-            'SELECT * FROM x_security ORDER BY at DESC LIMIT 200'
-          ).all()
-          return json({ events: rows.results ?? [] })
+          const all = url.searchParams.get('all') === '1'
+          const marks = ATTACK_REASONS.map(() => '?').join(',')
+          const rows = all
+            ? await env.XDB.prepare('SELECT * FROM x_security ORDER BY at DESC LIMIT 200').all()
+            : await env.XDB.prepare(
+                `SELECT * FROM x_security WHERE reason IN (${marks}) ORDER BY at DESC LIMIT 200`
+              ).bind(...ATTACK_REASONS).all()
+          return json({ events: rows.results ?? [], attacksOnly: !all })
         }
 
         if (path === '/v1/owner/announcements' && request.method === 'GET') {

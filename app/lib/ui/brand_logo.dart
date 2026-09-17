@@ -27,9 +27,9 @@ class CoinIcon extends StatelessWidget {
             border: Border.all(color: const Color(0xFF8A6410), width: size * .07),
           ),
           child: Center(
-            child: Text('X',
+            child: Text('M',
                 style: TextStyle(
-                    fontSize: size * .46,
+                    fontSize: size * .52,
                     fontWeight: FontWeight.w900,
                     color: const Color(0xFF6B4C08),
                     height: 1)),
@@ -48,7 +48,10 @@ class BrandLogo extends StatelessWidget {
 
   /// أسماء بديلة → ملف الأصل
   static const _alias = {
-    'mi': 'xiaomi', 'redmi': 'xiaomi', 'xiaomi': 'xiaomi',
+    'mi': 'xiaomi', 'xiaomi': 'xiaomi',
+    'redmi': 'redmi',
+    'black shark': 'blackshark', 'blackshark': 'blackshark',
+    'black shark 3': 'blackshark',
     'iphone': 'iphone', 'apple': 'iphone',
     'oneplus': 'oneplus', 'one_plus': 'oneplus', 'one plus': 'oneplus',
     'pixel': 'google', 'google': 'google',
@@ -58,13 +61,12 @@ class BrandLogo extends StatelessWidget {
     'oppo': 'oppo', 'realme': 'realme', 'vivo': 'vivo',
     'nokia': 'nokia', 'sony': 'sony', 'motorola': 'motorola',
     'zte': 'zte', 'meizu': 'meizu', 'reno': 'oppo',
-    'black shark': 'xiaomi', 'blackshark': 'xiaomi',
   };
 
   static const _available = {
-    'xiaomi', 'iphone', 'tecno', 'honor', 'oneplus', 'vivo', 'google',
-    'huawei', 'realme', 'poco', 'motorola', 'nokia', 'sony', 'samsung',
-    'oppo', 'itel',
+    'xiaomi', 'redmi', 'blackshark', 'infinix', 'iphone', 'tecno',
+    'honor', 'oneplus', 'vivo', 'google', 'huawei', 'realme', 'poco',
+    'motorola', 'nokia', 'sony', 'samsung', 'oppo', 'itel',
   };
 
   static const _colors = {
@@ -78,14 +80,20 @@ class BrandLogo extends StatelessWidget {
     'google': Color(0xFF4285F4), 'reno': Color(0xFF2D683D),
     'motorola': Color(0xFF5B92E5), 'iphone': Color(0xFF555555),
     'apple': Color(0xFF555555), 'honor': Color(0xFF00C4D8),
-    'poco': Color(0xFFFFD900),
+    'poco': Color(0xFFFFD900), 'redmi': Color(0xFFE00040),
+    'blackshark': Color(0xFF00C060),
   };
 
-  String get _key {
+  /// يحل اسم الشركة إلى مفتاح الأصل: يزيل بادئة الترتيب الرقمية ويوحّد
+  /// الأسماء البديلة. عام ليسهل اختباره.
+  static String assetKeyFor(String name) {
     var k = name.replaceAll(RegExp(r'^\d+'), '').toLowerCase().trim();
-    k = _alias[k] ?? k;
-    return k;
+    return _alias[k] ?? k;
   }
+
+  static bool hasAsset(String name) => _available.contains(assetKeyFor(name));
+
+  String get _key => assetKeyFor(name);
 
   @override
   Widget build(BuildContext context) {

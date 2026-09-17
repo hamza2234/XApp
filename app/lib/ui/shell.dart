@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../core/api.dart';
+import '../core/config.dart';
+import '../core/app_config.dart';
 import '../core/store.dart';
 import 'theme.dart';
 import 'brand_logo.dart';
@@ -8,6 +9,7 @@ import 'compat_screen.dart';
 import 'schem_screen.dart';
 import 'owner_screen.dart';
 import 'splash.dart';
+import 'external_link.dart';
 
 /// الهيكل الرئيسي: شريط تنقل سفلي + قائمة جانبية
 class Shell extends StatefulWidget {
@@ -25,36 +27,52 @@ class _ShellState extends State<Shell> {
   int _quotaLimit = -1;
   int? _cards;
   int _cardExpiry = 0;
-  List<dynamic> _packages = const [];
-  String _telegram = 'https://t.me/phonex6';
+  // الإعدادات المشتركة: رابط تيليجرام والباقات من مصدر واحد.
+  AppConfig get _cfg => AppConfig.instance;
 
   @override
   void initState() {
     super.initState();
+    // إعادة البناء فوراً إن وصل تحديث للرابط أو الباقات.
+    _cfg.addListener(_onConfigChanged);
     _refresh();
+  }
+
+  @override
+  void dispose() {
+    _cfg.removeListener(_onConfigChanged);
+    super.dispose();
+  }
+
+  void _onConfigChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// رسالة جاهزة على رابط تيليجرام — يتعامل مع رابط فيه استعلام مسبقاً.
+  String _tgWithText(String msg) {
+    final base = _cfg.telegram;
+    final sep = base.contains('?') ? '&' : '?';
+    return '$base${sep}text=${Uri.encodeComponent(msg)}';
   }
 
   Future<void> _refresh() async {
     try {
-      final m = await widget.api.me();
+      // الإعدادات المشتركة تُجلب في التوازي مع الحصة.
+      final results = await Future.wait<Map<String, dynamic>>([
+        widget.api.me(),
+        widget.api.bootstrap(),
+      ]);
+      await _cfg.applyBootstrap(results[1]);
+      final m = results[0];
       final q = m['quota'] as Map?;
       final c = m['cards'] as Map?;
-      final b = await widget.api.bootstrap();
-      if (mounted) {
-        setState(() {
-          _quotaUsed = (q?['used'] as num?)?.toInt() ?? 0;
-          _quotaLimit = (q?['limit'] as num?)?.toInt() ?? -1;
-          _cards = c == null ? null : (c['balance'] as num?)?.toInt() ?? 0;
-          _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
-          final s = b['settings'];
-          if (s is Map) {
-            if ((s['telegramLink'] ?? '').toString().isNotEmpty) {
-              _telegram = s['telegramLink'];
-            }
-            if (s['packages'] is List) _packages = s['packages'];
-          }
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _quotaUsed = (q?['used'] as num?)?.toInt() ?? 0;
+        _quotaLimit = (q?['limit'] as num?)?.toInt() ?? -1;
+        _cards = c == null ? null : (c['balance'] as num?)?.toInt() ?? 0;
+        _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
+      });
     } catch (_) {}
   }
 
@@ -71,10 +89,11 @@ class _ShellState extends State<Shell> {
         title: ShaderMask(
           shaderCallback: (b) =>
               XTheme.gradient.createShader(Rect.fromLTWH(0, 0, 120, 40)),
-          child: const Text('X',
+          child: const Text(kAppName,
               style: TextStyle(
-                  fontSize: 26,
+                  fontSize: 20,
                   fontWeight: FontWeight.w900,
+                  letterSpacing: .5,
                   color: Colors.white)),
         ),
         actions: [
@@ -196,9 +215,8 @@ class _ShellState extends State<Shell> {
                     builder: (_) =>
                         OwnerScreen(api: widget.api, store: widget.store)));
               }, highlight: true),
-            _item(Icons.send_rounded, 'تواصل مع المالك', () async {
-              final uri = Uri.parse(_telegram);
-              if (await canLaunchUrl(uri)) launchUrl(uri);
+            _item(Icons.send_rounded, 'تواصل مع المالك', () {
+              openExternal(context, _cfg.telegram, label: 'تيليجرام');
             }),
             if (isGuest)
               _item(Icons.workspace_premium_outlined, 'اشترك — تصفح بلا حدود',
@@ -358,10 +376,10 @@ class _ShellState extends State<Shell> {
             Text('كل بطاقة = فتح مخطط واحد • الشراء عبر تيليجرام',
                 style: TextStyle(color: XTheme.textDim, fontSize: 12)),
             const SizedBox(height: 16),
-            if (_packages.isEmpty)
+            if (_cfg.packages.isEmpty)
               Text('لا توجد باقات معروضة حالياً',
                   style: TextStyle(color: XTheme.textDim)),
-            ..._packages.map((p) {
+            ..._cfg.packages.map((p) {
               final cards = (p['cards'] as num?)?.toInt() ?? 0;
               final price = p['price']?.toString() ?? '';
               final days = (p['days'] as num?)?.toInt() ?? 0;
@@ -442,12 +460,11 @@ class _ShellState extends State<Shell> {
       return;
     }
     final username = widget.store.user?['username']?.toString() ?? '';
-    final msg = Uri.encodeComponent(
-        'مرحباً، أنا المشترك $username — أريد شحن باقة $cards بطاقة مخططات بسعر $price');
-    final uri = Uri.parse('$_telegram?text=$msg');
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    }
+    await openExternal(
+        context,
+        _tgWithText(
+            'مرحباً، أنا المشترك $username — أريد شحن باقة $cards بطاقة مخططات بسعر $price'),
+        label: 'تيليجرام');
   }
 
   /// الزائر: يطلب حساباً أولاً ثم يُوجَّه لتيليجرام برسالة تتضمن طلبه + الباقة
@@ -509,13 +526,11 @@ class _ShellState extends State<Shell> {
                             name.text.trim(),
                             'طلب باقة $cards بطاقة — $price');
                         if (ctx.mounted) Navigator.pop(ctx);
-                        final msg = Uri.encodeComponent(
-                            'مرحباً، أنا ${user.text.trim()} — طلبت حساباً في تطبيق X وأريد باقة $cards بطاقة مخططات بسعر $price');
-                        final uri = Uri.parse('$_telegram?text=$msg');
-                        if (await canLaunchUrl(uri)) {
-                          await launchUrl(uri,
-                              mode: LaunchMode.externalApplication);
-                        }
+                        await openExternal(
+                            context,
+                            _tgWithText(
+                                'مرحباً، أنا ${user.text.trim()} — طلبت حساباً في تطبيق X وأريد باقة $cards بطاقة مخططات بسعر $price'),
+                            label: 'تيليجرام');
                       } on ApiException catch (e) {
                         setD(() => sending = false);
                         if (ctx.mounted) {

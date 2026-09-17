@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart' as cg;
 import 'package:http/http.dart' as http;
 import 'config.dart';
+import 'models.dart';
 import 'store.dart';
 
 class ApiException implements Exception {
@@ -171,14 +172,46 @@ class Api {
   Future<List<dynamic>> compatBrands() async =>
       (await get('/v1/data/brands'))['brands'] as List;
 
+  /// بحث التوافقات — يتم على الخادم داخل نطاق الشركة والنوع.
+  /// لا نجلب ملف الشركة كاملاً بعد الآن: كان ذلك ~65KB و0.9 ثانية لكل دخول،
+  /// وهو ما كان يسبب إحساس «تحميل كل التوافقات»، وكان يسمح بسحب البيانات.
+  /// يُعيد السجلات + أنواع القطع المتوفرة + ما إذا خُصمت عملة.
+  Future<CompatSearchResult> searchCompatCharged(String q,
+      {String? brand, String? type}) async {
+    final body = <String, dynamic>{'q': q};
+    if (brand != null && brand.isNotEmpty) body['brand'] = brand;
+    if (type != null && type.isNotEmpty) body['type'] = type;
+    Map<String, dynamic> j;
+    try {
+      j = await post('/v1/data/compat/search', body);
+    } on ApiException catch (e) {
+      // خادم قديم بلا نقطة البحث المحصّنة: نتراجع إلى القراءة العامة كي لا
+      // تتعطّل الشاشة قبل نشر الخادم الجديد.
+      if (e.status != 404) rethrow;
+      final params = <String, String>{'q': q, 'limit': '120'};
+      if (brand != null && brand.isNotEmpty) params['brand'] = brand;
+      if (type != null && type.isNotEmpty) params['type'] = type;
+      j = await get('/v1/data/compatibility', query: params);
+    }
+    return CompatSearchResult(
+      records: (j['records'] as List?) ?? const [],
+      types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
+      charged: j['charged'] == true,
+      remaining: (j['remaining'] as num?)?.toInt() ?? -1,
+    );
+  }
+
   Future<List<dynamic>> searchCompat(String q,
       {String? brand, String? type}) async {
-    final params = <String, String>{'q': q, 'limit': '200'};
-    if (brand != null) params['brand'] = brand;
-    if (type != null) params['type'] = type;
-    return (await get('/v1/data/compatibility', query: params))['records']
-        as List;
+    final r = await searchCompatCharged(q, brand: brand, type: type);
+    return r.records;
   }
+
+  /// كل سجلات شركة واحدة — مكلّف أيضاً، يُستخدم عند الحاجة لتعبئة محلية فقط.
+  Future<List<dynamic>> compatByBrand(String brandRef) async =>
+      (await get('/v1/data/compatibility',
+              query: {'q': '', 'brand': brandRef, 'limit': '500'}))['records']
+          as List;
 
   Future<List<dynamic>> schemBrands() async =>
       (await get('/v1/schem/brands'))['brands'] as List;
@@ -201,8 +234,10 @@ class Api {
       (await get('/v1/owner/users'))['users'] as List;
   Future<List<dynamic>> ownerRequests() async =>
       (await get('/v1/owner/requests'))['requests'] as List;
-  Future<List<dynamic>> ownerSecurity() async =>
-      (await get('/v1/owner/security'))['events'] as List;
+  /// سجل الأمان — الهجمات فقط افتراضياً، و`all` يكشف كل الأحداث.
+  Future<List<dynamic>> ownerSecurity({bool all = false}) async =>
+      (await get('/v1/owner/security', query: all ? {'all': '1'} : null))['events']
+          as List;
   Future<void> userAction(String id, String action, {int? days}) =>
       post('/v1/owner/users/$id/$action', {if (days != null) 'days': days});
   Future<void> requestAction(String id, String action) =>
@@ -226,6 +261,10 @@ class Api {
       (await get('/v1/owner/bans'))['bans'] as List;
   Future<void> banDevice(String deviceId, String reason) =>
       post('/v1/owner/bans', {'deviceId': deviceId, 'reason': reason});
+
+  /// حظر عنوان IP — يمنع المهاجم حتى لو غيّر جهازه.
+  Future<void> banIp(String ip, String reason) =>
+      post('/v1/owner/bans', {'ip': ip, 'reason': reason});
   Future<void> unbanDevice(String deviceId) =>
       delete('/v1/owner/bans/${Uri.encodeComponent(deviceId)}');
   Future<List<dynamic>> ownerAnnouncements() async =>

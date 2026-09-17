@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../core/api.dart';
 import '../core/config.dart';
 import '../core/models.dart';
@@ -7,6 +6,7 @@ import 'theme.dart';
 import 'brand_logo.dart';
 import 'compat_brand_screen.dart';
 import 'subscribe_dialog.dart';
+import 'external_link.dart';
 
 /// شاشة التوافقات — لوحة إعلانات أعلى + شبكة الشركات (توافقات نصية فقط)
 class CompatScreen extends StatefulWidget {
@@ -195,8 +195,7 @@ class _CompatScreenState extends State<CompatScreen>
               padding: EdgeInsets.zero,
               onTap: () async {
                 if (ad.linkUrl.isNotEmpty) {
-                  final uri = Uri.parse(ad.linkUrl);
-                  if (await canLaunchUrl(uri)) launchUrl(uri);
+                  await openExternal(context, ad.linkUrl);
                 }
               },
               child: ClipRRect(

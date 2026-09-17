@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'theme.dart';
+import 'external_link.dart';
 
 /// شاشة التحديث الإجباري — نص وصورة وزر يتحكم بها المالك من اللوحة
 class UpdateScreen extends StatelessWidget {
@@ -55,13 +55,8 @@ class UpdateScreen extends StatelessWidget {
                           gradient: XTheme.gradient,
                           borderRadius: BorderRadius.circular(16)),
                       child: ElevatedButton.icon(
-                        onPressed: () async {
-                          final uri = Uri.parse(url!);
-                          if (await canLaunchUrl(uri)) {
-                            launchUrl(uri,
-                                mode: LaunchMode.externalApplication);
-                          }
-                        },
+                        onPressed: () => openExternal(context, url!,
+                            label: 'رابط التحديث'),
                         icon: const Icon(Icons.system_update_alt,
                             color: Colors.white),
                         label: const Text('تحديث الآن',

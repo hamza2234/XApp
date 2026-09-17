@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import '../core/api.dart';
+import '../core/app_config.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
@@ -26,6 +30,12 @@ class _SplashScreenState extends State<SplashScreen>
   String _status = 'جاري التهيئة…';
   bool _blocked = false;
   String _blockMsg = '';
+  bool _offline = false;
+  int _attempt = 0;
+
+  /// أقصى عدد محاولات تلقائية قبل إظهار زر إعادة المحاولة — بدل حلقة
+  /// صامتة لا تنتهي كانت تُظهر «تعذر الاتصال» بلا مخرج عند أول تشغيل.
+  static const _maxAutoRetries = 3;
 
   @override
   void initState() {
@@ -33,10 +43,27 @@ class _SplashScreenState extends State<SplashScreen>
     _boot();
   }
 
+  /// الاستثناءات المتعلقة بالشبكة وحدها تستحق إعادة المحاولة.
+  /// `http.ClientException` هو ما يغلّف به package:http انقطاع الاتصال
+  /// وفشل DNS — وهو الحالة الأكثر شيوعاً عند أول تشغيل بلا إنترنت.
+  static bool _isNetworkError(Object e) =>
+      e is http.ClientException ||
+      e is SocketException ||
+      e is HttpException ||
+      e is TimeoutException ||
+      e is HandshakeException;
+
   Future<void> _boot() async {
     try {
-      setState(() => _status = 'الاتصال بالخادم…');
+      setState(() {
+        _status = _attempt == 0
+            ? 'الاتصال بالخادم…'
+            : 'إعادة المحاولة (${_attempt + 1}/$_maxAutoRetries)…';
+        _offline = false;
+      });
       final boot = await widget.api.bootstrap();
+      // تُحدَّث الإعدادات المشتركة (رابط تيليجرام والباقات) من نفس الردّ.
+      await AppConfig.instance.applyBootstrap(boot);
       final settings =
           XSettings.fromJson(boot['settings'] as Map<String, dynamic>? ?? {});
 
@@ -93,10 +120,29 @@ class _SplashScreenState extends State<SplashScreen>
             builder: (_) => Shell(api: widget.api, store: widget.store)),
       );
     } catch (e) {
-      setState(() => _status = 'تعذر الاتصال — تحقق من الإنترنت');
-      await Future.delayed(const Duration(seconds: 2));
-      if (mounted) _boot();
+      if (!mounted) return;
+      _attempt++;
+      final retriable = _isNetworkError(e) && _attempt < _maxAutoRetries;
+      setState(() {
+        _offline = !retriable;
+        _status = retriable
+            ? 'إعادة المحاولة (${_attempt + 1}/$_maxAutoRetries)…'
+            : 'تعذر الاتصال بالخادم — تحقق من الإنترنت ثم أعد المحاولة';
+      });
+      if (retriable) {
+        // تراجع تدريجي: يمنح الشبكة الضعيفة عند أول تشغيل وقتاً للاستقرار.
+        await Future.delayed(Duration(milliseconds: 600 * _attempt));
+        if (mounted) _boot();
+      }
     }
+  }
+
+  void _retry() {
+    setState(() {
+      _attempt = 0;
+      _offline = false;
+    });
+    _boot();
   }
 
   @override
@@ -128,10 +174,11 @@ class _SplashScreenState extends State<SplashScreen>
                   ],
                 ),
                 child: const Center(
-                  child: Text('X',
+                  child: Text('MAPX',
                       style: TextStyle(
-                          fontSize: 44,
+                          fontSize: 22,
                           fontWeight: FontWeight.w900,
+                          letterSpacing: .5,
                           color: Colors.white)),
                 ),
               ),
@@ -145,6 +192,27 @@ class _SplashScreenState extends State<SplashScreen>
                 child: Text(_blockMsg,
                     textAlign: TextAlign.center,
                     style: TextStyle(color: XTheme.text, fontSize: 16)),
+              ),
+            ] else if (_offline) ...[
+              Icon(Icons.cloud_off_rounded,
+                  size: 42, color: XTheme.danger.withOpacity(.85)),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: Text(_status,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: XTheme.text, fontSize: 15)),
+              ),
+              const SizedBox(height: 18),
+              ElevatedButton.icon(
+                onPressed: _retry,
+                icon: const Icon(Icons.refresh_rounded, size: 19),
+                label: const Text('إعادة المحاولة'),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: XTheme.accent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 26, vertical: 12)),
               ),
             ] else ...[
               Text(_status,

@@ -15,6 +15,10 @@ class CompatBrand {
     return n.isEmpty ? name : n[0].toUpperCase() + n.substring(1);
   }
 
+  /// معرّف الطلب: الشركات الفرعية تُطلب بـ`v_*` ليصفّيها الخادم على كلمتها،
+  /// وإلا تُطلب باسم ملف الشركة كما هو.
+  String get ref => id.startsWith('v_') ? id : file;
+
   factory CompatBrand.fromJson(Map<String, dynamic> j) => CompatBrand(
         '${j['id']}',
         j['name'] ?? '',
@@ -115,6 +119,7 @@ class XSettings {
     this.telegramLink = '',
     this.schematicsLocked = false,
     this.compatLocked = false,
+    this.compatSearchCost = 1,
     this.appLocked = false,
     this.lockMessage = '',
     this.updateMessage = '',
@@ -128,6 +133,9 @@ class XSettings {
   String telegramLink;
   bool schematicsLocked;
   bool compatLocked;
+
+  /// ثمن البحث الواحد في التوافقات — 0 يعني مجاني.
+  int compatSearchCost;
   bool appLocked;
   String lockMessage;
   String updateMessage;
@@ -143,6 +151,7 @@ class XSettings {
         telegramLink: j['telegramLink']?.toString() ?? '',
         schematicsLocked: j['schematicsLocked'] == true,
         compatLocked: j['compatLocked'] == true,
+        compatSearchCost: (j['compatSearchCost'] as num?)?.toInt() ?? 1,
         appLocked: j['appLocked'] == true,
         lockMessage: j['lockMessage']?.toString() ?? '',
         updateMessage: j['updateMessage']?.toString() ?? '',
@@ -166,6 +175,7 @@ class XSettings {
         'telegramLink': telegramLink,
         'schematicsLocked': schematicsLocked,
         'compatLocked': compatLocked,
+        'compatSearchCost': compatSearchCost,
         'appLocked': appLocked,
         'lockMessage': lockMessage,
         'updateMessage': updateMessage,
@@ -189,4 +199,23 @@ class XPackage {
   String price;
   int days;
   String desc;
+}
+
+/// نتيجة بحث توافقات: السجلات + الأنواع المتوفرة + حالة الخصم.
+class CompatSearchResult {
+  const CompatSearchResult({
+    required this.records,
+    required this.types,
+    this.charged = false,
+    this.remaining = -1,
+  });
+
+  final List<dynamic> records;
+
+  /// أنواع القطع الموجودة فعلاً لهذه الشركة — تُشتق على الخادم بلا أعداد.
+  final List<String> types;
+  final bool charged;
+
+  /// ما تبقّى من البطاقات، أو -1 إذا كان غير محدود/غير معروف.
+  final int remaining;
 }

@@ -18,11 +18,12 @@ class XTheme {
   static const _lText = Color(0xFF10141F);
   static const _lTextDim = Color(0xFF4E576C);
 
-  static Color bg = _dBg;
-  static Color surface = _dSurface;
-  static Color surface2 = _dSurface2;
-  static Color text = _dText;
-  static Color textDim = _dTextDim;
+  // تبدأ فاتحة حتى لا يظهر وميض داكن قبل أن يقرأ المتحكّم اختيار المستخدم.
+  static Color bg = _lBg;
+  static Color surface = _lSurface;
+  static Color surface2 = _lSurface2;
+  static Color text = _lText;
+  static Color textDim = _lTextDim;
 
   static const accent = Color(0xFFFF7A18);      // برتقالي دافئ — هوية التطبيق
   static const accent2 = Color(0xFFFFB020);     // كهرماني
@@ -37,7 +38,7 @@ class XTheme {
     end: Alignment.bottomLeft,
   );
 
-  static bool isLight = false;
+  static bool isLight = true;
 
   static void apply(bool light) {
     isLight = light;
@@ -121,7 +122,7 @@ class ThemeController extends ChangeNotifier {
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
-    XTheme.apply(p.getBool('light_theme') ?? false);
+    XTheme.apply(p.getBool('light_theme') ?? true);
     notifyListeners();
   }
 

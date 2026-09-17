@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import '../core/app_config.dart';
 import 'theme.dart';
+import 'external_link.dart';
 
-/// حوار انتهاء الحصة — اشترك/تواصل مع المالك لإنشاء حساب بلا حدود
-Future<void> showSubscribeDialog(BuildContext context,
-    {String telegram = 'https://t.me/phonex6'}) {
+/// حوار انتهاء الحصة — اشترك/تواصل مع المالك لإنشاء حساب بلا حدود.
+///
+/// يُقرأ الرابط من الإعدادات المشتركة، فيتبعه تغيير المالك مباشرة بدل
+/// قيمة مثبتة في الكود.
+Future<void> showSubscribeDialog(BuildContext context, {String? telegram}) {
+  final link = telegram ?? AppConfig.instance.telegram;
   return showModalBottomSheet(
     context: context,
     backgroundColor: Colors.transparent,
@@ -46,10 +50,8 @@ Future<void> showSubscribeDialog(BuildContext context,
                   gradient: XTheme.gradient,
                   borderRadius: BorderRadius.circular(16)),
               child: ElevatedButton.icon(
-                onPressed: () async {
-                  final uri = Uri.parse(telegram);
-                  if (await canLaunchUrl(uri)) launchUrl(uri);
-                },
+                onPressed: () =>
+                    openExternal(context, link, label: 'تيليجرام'),
                 icon: const Icon(Icons.send_rounded, color: Colors.white),
                 label: const Text('تواصل مع المالك — تيليجرام',
                     style: TextStyle(

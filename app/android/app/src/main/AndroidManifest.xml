@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- مطلوب لكل اتصال شبكي — التطبيق يعمل عبر Worker خارجي فقط -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="X"
+        android:label="MAPX"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -41,5 +43,23 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- أندرويد 11+ يخفي التطبيقات غير المعلَنة، فبدون هذه الاستعلامات
+             يعيد canLaunchUrl القيمة false ولا يُفتح تيليجرام -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="http"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="tg"/>
+        </intent>
+        <package android:name="org.telegram.messenger"/>
+        <package android:name="org.telegram.messenger.web"/>
+        <package android:name="org.telegram.plus"/>
+        <package android:name="com.telegram.messenger"/>
     </queries>
 </manifest>

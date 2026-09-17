@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/api.dart';
+import 'core/config.dart';
+import 'core/app_config.dart';
 import 'core/store.dart';
 import 'ui/theme.dart';
 import 'ui/splash.dart';
@@ -25,6 +27,7 @@ class _XAppState extends State<XApp> {
     super.initState();
     ThemeController.instance.addListener(_rebuild);
     ThemeController.instance.load();
+    AppConfig.instance.load();
   }
 
   @override
@@ -48,7 +51,7 @@ class _XAppState extends State<XApp> {
         }
         api = Api(snap.data!);
         return MaterialApp(
-          title: 'X',
+          title: kAppName,
           debugShowCheckedModeBanner: false,
           theme: XTheme.theme(),
           locale: const Locale('ar'),

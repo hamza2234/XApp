@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../core/api.dart';
+import '../core/app_config.dart';
 import '../core/store.dart';
 import 'theme.dart';
+import 'external_link.dart';
 
 /// تسجيل الدخول / طلب حساب / متابعة كزائر
 /// إنشاء الحساب يتطلب تفعيل المالك — التواصل عبر تيليجرام.
@@ -20,23 +21,11 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _busy = false;
   String? _msg;
   bool _msgOk = false;
-  String _telegram = 'https://t.me/phonex6';
 
   final _user = TextEditingController();
   final _pass = TextEditingController();
   final _name = TextEditingController();
   final _note = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    widget.api.bootstrap().then((b) {
-      final s = b['settings'];
-      if (s is Map && (s['telegramLink'] ?? '').toString().isNotEmpty) {
-        setState(() => _telegram = s['telegramLink']);
-      }
-    }).catchError((_) {});
-  }
 
   Future<void> _login() async {
     if (_user.text.trim().isEmpty || _pass.text.isEmpty) {
@@ -70,7 +59,10 @@ class _AuthScreenState extends State<AuthScreen> {
       _set(
           'تم إرسال طلبك — فعّل المالك حسابك ثم سجّل دخولك. تواصل عبر تيليجرام للإسراع.',
           ok: true);
-      if (r['telegram'] != null) _telegram = r['telegram'];
+      if (r['telegram'] != null) {
+        AppConfig.instance
+            .applyOwnerSettings(telegram: r['telegram'].toString());
+      }
     } on ApiException catch (e) {
       _set(e.message);
     } catch (_) {
@@ -83,10 +75,8 @@ class _AuthScreenState extends State<AuthScreen> {
   void _set(String m, {bool ok = false}) =>
       setState(() { _msg = m; _msgOk = ok; });
 
-  Future<void> _openTelegram() async {
-    final uri = Uri.parse(_telegram);
-    if (await canLaunchUrl(uri)) await launchUrl(uri);
-  }
+  Future<void> _openTelegram() =>
+      openExternal(context, AppConfig.instance.telegram, label: 'تيليجرام');
 
   @override
   Widget build(BuildContext context) {
@@ -103,10 +93,11 @@ class _AuthScreenState extends State<AuthScreen> {
                     gradient: XTheme.gradient,
                     borderRadius: BorderRadius.circular(26)),
                 child: const Center(
-                    child: Text('X',
+                    child: Text('MAPX',
                         style: TextStyle(
-                            fontSize: 40,
+                            fontSize: 20,
                             fontWeight: FontWeight.w900,
+                            letterSpacing: .5,
                             color: Colors.white))),
               ),
               const SizedBox(height: 18),

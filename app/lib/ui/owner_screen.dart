@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import '../core/api.dart';
+import '../core/app_config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'theme.dart';
@@ -269,8 +271,22 @@ class _SettingsTabState extends State<_SettingsTab> {
       _s!.updateUrl = _updUrl.text.trim();
       _s!.updateImageUrl = _updImg.text.trim();
       final r = await widget.api.saveSettings(_s!.toJson());
+      final saved = XSettings.fromJson(r['settings']);
+      // تُطبَّق فوراً على التطبيق كله بلا انتظار دورة تحديث.
+      await AppConfig.instance.applyOwnerSettings(
+        telegram: saved.telegramLink,
+        packages: saved.packages
+            .map((p) => {
+                  'cards': p.cards,
+                  'price': p.price,
+                  'days': p.days,
+                  'desc': p.desc,
+                })
+            .toList(),
+        guestQuota: saved.guestFileQuota,
+      );
       setState(() {
-        _s = XSettings.fromJson(r['settings']);
+        _s = saved;
         _msg = 'تم الحفظ';
       });
     } catch (_) {
@@ -301,7 +317,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
               const SizedBox(height: 6),
-              Text('عدد ملفات المخططات التي يفتحها الزائر يومياً',
+              Text('عدد ملفات المخططات وبحوث التوافقات للزائر يومياً',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 8),
               Row(children: [
@@ -410,6 +426,50 @@ class _SettingsTabState extends State<_SettingsTab> {
                 'الزائر يحتاج حساباً مفعّلاً لعرض التوافقات',
                 s.compatLocked,
                 (v) => setState(() => s.compatLocked = v)),
+            const Divider(height: 20),
+            // ثمن البحث — نفس عملة بطاقات المخططات، يضبطه المالك.
+            Row(children: [
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('ثمن البحث في التوافقات',
+                          style: TextStyle(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 4),
+                      Text(
+                          s.compatSearchCost == 0
+                              ? 'مجاني — بلا خصم من البطاقات'
+                              : 'يُخصم ${s.compatSearchCost} من البطاقات لكل بحث جديد',
+                          style: TextStyle(
+                              color: XTheme.textDim, fontSize: 12)),
+                    ]),
+              ),
+              IconButton(
+                onPressed: s.compatSearchCost <= 0
+                    ? null
+                    : () => setState(() => s.compatSearchCost--),
+                icon: const Icon(Icons.remove_circle_outline, size: 20),
+              ),
+              Container(
+                width: 46,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                    color: XTheme.gold.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Text('${s.compatSearchCost}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: XTheme.gold,
+                        fontSize: 16)),
+              ),
+              IconButton(
+                onPressed: s.compatSearchCost >= 100
+                    ? null
+                    : () => setState(() => s.compatSearchCost++),
+                icon: const Icon(Icons.add_circle_outline, size: 20),
+              ),
+            ]),
             const Divider(height: 20),
             _switch('قفل التطبيق كلياً',
                 'إيقاف التطبيق لجميع المستخدمين (صيانة)', s.appLocked,
@@ -941,6 +1001,9 @@ class _SecurityTab extends StatefulWidget {
 class _SecurityTabState extends State<_SecurityTab> {
   List<dynamic>? _events;
 
+  /// افتراضياً تُعرض الهجمات فقط؛ التبديل يكشف الأحداث الروتينية عند الحاجة.
+  bool _attacksOnly = true;
+
   @override
   void initState() {
     super.initState();
@@ -949,7 +1012,7 @@ class _SecurityTabState extends State<_SecurityTab> {
 
   Future<void> _load() async {
     try {
-      final e = await widget.api.ownerSecurity();
+      final e = await widget.api.ownerSecurity(all: !_attacksOnly);
       if (mounted) setState(() => _events = e);
     } catch (_) {}
   }
@@ -959,32 +1022,91 @@ class _SecurityTabState extends State<_SecurityTab> {
     'missing_signature': ('طلب بلا توقيع', XTheme.danger),
     'stale_signature': ('توقيع منتهي', XTheme.gold),
     'rate_limited': ('هجوم طلبات مكثفة', XTheme.danger),
-    'device_mismatch': ('حساب من جهاز غريب', XTheme.danger),
+    'device_mismatch': ('حساب من جهاز غريب', XTheme.gold),
     'device_farm': ('مزرعة أجهزة', XTheme.danger),
     'bad_login': ('دخول فاشل', XTheme.gold),
     'bad_owner_key': ('مفتاح مالك خاطئ', XTheme.danger),
-    'ip_hardban': ('حظر IP', XTheme.danger),
+    'ip_hardban': ('حظر IP تلقائي', XTheme.danger),
     'non_owner_admin_attempt': ('محاولة وصول للوحة', XTheme.danger),
     'guest_token_device_mismatch': ('توكن زائر مسروق', XTheme.danger),
-    'banned_ip_hit': ('وصول من IP محظور', XTheme.gold),
+    'banned_ip_hit': ('وصول من IP محظور', XTheme.danger),
     'banned_device_hit': ('وصول من جهاز محظور', XTheme.danger),
     'device_banned': ('حظر جهاز', XTheme.danger),
+    'ip_banned': ('حظر IP', XTheme.danger),
   };
+
+  Future<void> _copy(String value, String what) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('تم نسخ $what')));
+    }
+  }
+
+  Future<void> _ban(String? deviceId, String? addr, String reason) async {
+    try {
+      if (deviceId != null && deviceId.isNotEmpty) {
+        await widget.api.banDevice(deviceId, 'ban_from_security:$reason');
+      }
+      if (addr != null && addr.isNotEmpty) {
+        await widget.api.banIp(addr, 'ban_from_security:$reason');
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('تم الحظر')));
+      }
+    } on ApiException catch (ex) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(ex.message)));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
+          child: Row(children: [
+            Expanded(
+              child: Text('الهجمات ومحاولات التجاوز فقط',
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: XTheme.textDim)),
+            ),
+            Switch(
+              value: _attacksOnly,
+              activeColor: XTheme.accent,
+              onChanged: (v) {
+                setState(() => _attacksOnly = v);
+                _load();
+              },
+            ),
+            Text('هجمات فقط',
+                style: TextStyle(fontSize: 12, color: XTheme.textDim)),
+          ]),
+        ),
+        Expanded(child: _list()),
+      ],
+    );
+  }
+
+  Widget _list() {
     if (_events == null) {
-      return Center(
-          child: CircularProgressIndicator(color: XTheme.accent));
+      return Center(child: CircularProgressIndicator(color: XTheme.accent));
     }
     if (_events!.isEmpty) {
       return Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.verified_user, size: 48, color: XTheme.ok),
-        SizedBox(height: 10),
-        Text('لا توجد أحداث أمنية',
-            style: TextStyle(color: XTheme.textDim)),
-      ]));
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.verified_user, size: 48, color: XTheme.ok),
+          const SizedBox(height: 10),
+          Text(_attacksOnly ? 'لا توجد هجمات مسجّلة' : 'لا توجد أحداث',
+              style: TextStyle(color: XTheme.textDim)),
+        ]),
+      );
     }
     return RefreshIndicator(
       onRefresh: _load,
@@ -992,73 +1114,105 @@ class _SecurityTabState extends State<_SecurityTab> {
       child: ListView.builder(
         padding: const EdgeInsets.all(14),
         itemCount: _events!.length,
-        itemBuilder: (context, i) {
-          final e = _events![i];
-          final meta = _labels[e['reason']] ??
-              (e['reason']?.toString() ?? '?', XTheme.gold);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: GlassCard(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.warning_amber_rounded,
-                      color: meta.$2, size: 20),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(meta.$1,
-                              style: TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  color: meta.$2,
-                                  fontSize: 13)),
-                          const SizedBox(height: 4),
-                          Text(
-                              'جهاز: ${e['device_id'] ?? '—'}\nIP: ${e['ip'] ?? '—'}\nمسار: ${e['path'] ?? '—'}',
-                              style: TextStyle(
-                                  color: XTheme.textDim,
-                                  fontSize: 11,
-                                  height: 1.5)),
-                          Text(e['at']?.toString().substring(0, 19) ?? '',
-                              style: TextStyle(
-                                  color: XTheme.textDim, fontSize: 10)),
-                        ]),
-                  ),
-                  // حظر فوري للجهاز المهاجم من نفس البطاقة
-                  if ((e['device_id'] ?? '').toString().isNotEmpty)
-                    IconButton(
-                      tooltip: 'حظر هذا الجهاز',
-                      icon: Icon(Icons.gpp_bad_rounded,
-                          color: XTheme.danger, size: 22),
-                      onPressed: () async {
-                        try {
-                          await widget.api.banDevice(
-                              e['device_id'].toString(),
-                              'ban_from_security:${e['reason']}');
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                    content: Text('تم حظر الجهاز')));
-                          }
-                        } on ApiException catch (ex) {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text(ex.message)));
-                          }
-                        }
-                      },
-                    ),
-                ],
-              ),
-            ),
-          );
-        },
+        itemBuilder: (context, i) => _eventCard(_events![i]),
       ),
     );
   }
+
+  Widget _eventCard(dynamic e) {
+    final reason = e['reason']?.toString() ?? '?';
+    final meta = _labels[reason] ?? (reason, XTheme.gold);
+    final deviceId = (e['device_id'] ?? '').toString();
+    final addr = (e['ip'] ?? '').toString();
+    final at = e['at']?.toString() ?? '';
+    final detail = (e['detail'] ?? '').toString();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GlassCard(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.gpp_maybe_rounded, color: meta.$2, size: 20),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(meta.$1,
+                  style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      color: meta.$2,
+                      fontSize: 13.5)),
+            ),
+            Text(at.length >= 19 ? at.substring(0, 19).replaceAll('T', ' ') : at,
+                style: TextStyle(color: XTheme.textDim, fontSize: 10.5)),
+          ]),
+          const SizedBox(height: 10),
+          if (addr.isNotEmpty && addr != 'unknown')
+            _field('IP', addr, XTheme.cyan, () => _ban(null, addr, reason)),
+          if (deviceId.isNotEmpty)
+            _field('معرّف الجهاز', deviceId, XTheme.accent,
+                () => _ban(deviceId, null, reason)),
+          if (detail.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(detail,
+                  style: TextStyle(
+                      color: XTheme.textDim, fontSize: 11, height: 1.5)),
+            ),
+          const SizedBox(height: 10),
+          Row(children: [
+            if (deviceId.isNotEmpty || (addr.isNotEmpty && addr != 'unknown'))
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _ban(
+                      deviceId.isEmpty ? null : deviceId,
+                      (addr.isEmpty || addr == 'unknown') ? null : addr,
+                      reason),
+                  icon: const Icon(Icons.block, size: 18),
+                  label: const Text('حظر الجهاز و IP'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: XTheme.danger,
+                    side: BorderSide(color: XTheme.danger.withOpacity(.5)),
+                  ),
+                ),
+              ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  /// سطر حقل حسّاس مع زر نسخ — المالك يحتاج نقل الـID/IP لمنعهما.
+  Widget _field(String label, String value, Color color, VoidCallback onBan) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Row(children: [
+          SizedBox(
+            width: 82,
+            child: Text(label,
+                style: TextStyle(color: XTheme.textDim, fontSize: 11.5)),
+          ),
+          Expanded(
+            child: SelectableText(value,
+                maxLines: 1,
+                style: TextStyle(
+                    fontSize: 11.5,
+                    color: color,
+                    fontWeight: FontWeight.w700)),
+          ),
+          IconButton(
+            tooltip: 'نسخ $label',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.copy_rounded, size: 16, color: XTheme.textDim),
+            onPressed: () => _copy(value, label),
+          ),
+          IconButton(
+            tooltip: 'حظر $label',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(Icons.gpp_bad_rounded, size: 18, color: XTheme.danger),
+            onPressed: onBan,
+          ),
+        ]),
+      );
 }
 
 // ============ الإعلانات ============
