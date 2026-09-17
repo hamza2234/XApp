@@ -49,7 +49,10 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     });
     try {
       final list = await widget.api
-          .searchCompat(q.trim(), brand: widget.brand.file);
+          .searchCompat(q.trim(),
+              brand: widget.brand.id.startsWith('v_')
+                  ? widget.brand.id
+                  : widget.brand.file);
       if (!mounted) return;
       setState(() {
         _results =

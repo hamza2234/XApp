@@ -24,8 +24,8 @@ class XTheme {
   static Color text = _dText;
   static Color textDim = _dTextDim;
 
-  static const accent = Color(0xFF4D8DFF);
-  static const accent2 = Color(0xFF8B5CF6);
+  static const accent = Color(0xFFFF7A18);      // برتقالي دافئ — هوية التطبيق
+  static const accent2 = Color(0xFFFFB020);     // كهرماني
   static const cyan = Color(0xFF22D3EE);
   static const gold = Color(0xFFF5B942);
   static const danger = Color(0xFFFF5470);

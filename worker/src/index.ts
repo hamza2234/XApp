@@ -431,18 +431,28 @@ async function mirrorCollection(db: D1Database, collection: string): Promise<Mir
 }
 
 async function mirrorSearchCompat(
-  db: D1Database, opts: { query: string; brandFile?: string; type?: string; limit: number }
+  db: D1Database, opts: { query: string; brandFile?: string; type?: string; keyword?: string; limit: number }
 ): Promise<MirrorDoc[]> {
   const clauses = ["collection = 'compatibility'"]
   const binds: (string | number)[] = []
   if (opts.brandFile) { binds.push(opts.brandFile); clauses.push(`brand_file = ?${binds.length}`) }
   if (opts.type) { binds.push(opts.type); clauses.push(`component_type = ?${binds.length}`) }
+  if (opts.keyword) { binds.push(`%${opts.keyword.toLowerCase()}%`); clauses.push(`search_text LIKE ?${binds.length}`) }
   if (opts.query) { binds.push(`%${opts.query.toLowerCase()}%`); clauses.push(`search_text LIKE ?${binds.length}`) }
   binds.push(opts.limit)
   return mrows(await db.prepare(
     `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')} LIMIT ?${binds.length}`
   ).bind(...binds).all<{ id: string; data: string }>())
 }
+
+/** شركات فرعية افتراضية — تُشتق قراءةً فقط من ملفات الشركات الأم، بلا أي كتابة على المصدر */
+const VIRTUAL_SUB_BRANDS: { name: string; file: string; key: string }[] = [
+  { name: 'redmi', file: '01xiaomi.json', key: 'redmi' },
+  { name: 'poco', file: '01xiaomi.json', key: 'poco' },
+  { name: 'oppo', file: '02realme.json', key: 'oppo' },
+  { name: 'honor', file: '03huawei.json', key: 'honor' },
+  { name: 'iqoo', file: '14vivo.json', key: 'iqoo' },
+]
 
 // ============================== Schematics catalog (READ-ONLY) ==============================
 
@@ -722,6 +732,16 @@ export default {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
         }
         const brands = (await mirrorCollection(env.MIRROR, 'brands')).map(d => ({ id: d.id, ...d.fields }))
+        // شركات فرعية افتراضية (Redmi/POCO/Oppo/Honor/iQOO) — قراءة فقط من ملفات الشركات الأم
+        const files = new Set(brands.map(b => (b as any).file))
+        for (const vb of VIRTUAL_SUB_BRANDS) {
+          if (files.has(vb.file)) {
+            brands.push({
+              id: `v_${vb.key}`, name: vb.name, file: vb.file,
+              imageUrl: '', records: 0, models: 0, virtual: true, keyword: vb.key
+            } as any)
+          }
+        }
         return json({ brands })
       }
 
@@ -730,9 +750,18 @@ export default {
         if (caller.role === 'guest' && settings.compatLocked) {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
         }
+        let brandFile = url.searchParams.get('brand')?.trim() || undefined
+        let keyword: string | undefined
+        // بطاقة شركة فرعية: تُفك إلى ملف الشركة الأم + كلمة الفرعية — لا كتابة على المصدر
+        if (brandFile?.startsWith('v_')) {
+          const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brandFile)
+          brandFile = vb?.file
+          keyword = vb?.key
+        }
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: url.searchParams.get('q')?.trim() ?? '',
-          brandFile: url.searchParams.get('brand')?.trim() || undefined,
+          brandFile,
+          keyword,
           type: url.searchParams.get('type')?.trim() || undefined,
           limit: Math.min(Number(url.searchParams.get('limit')) || 200, 500)
         })
@@ -926,7 +955,19 @@ export default {
             updateMessage: typeof body.updateMessage === 'string' ? body.updateMessage.slice(0, 500) : settings.updateMessage,
             updateUrl: typeof body.updateUrl === 'string' && (!body.updateUrl || /^https?:\/\//.test(body.updateUrl))
               ? body.updateUrl.trim() : settings.updateUrl,
-            updateImageUrl: typeof body.updateImageUrl === 'string' ? body.updateImageUrl.slice(0, 500) : settings.updateImageUrl
+            updateImageUrl: typeof body.updateImageUrl === 'string' ? body.updateImageUrl.slice(0, 500) : settings.updateImageUrl,
+            // باقات البطاقات — تحقق صارم: عدد بطاقات وصلاحية وسعر ووصف
+            packages: Array.isArray(body.packages)
+              ? body.packages
+                  .map(p => ({
+                    cards: Math.max(1, Math.min(1000000, Math.floor(Number(p?.cards) || 0))),
+                    price: String(p?.price ?? '').slice(0, 30),
+                    days: Math.max(0, Math.min(3650, Math.floor(Number(p?.days) || 0))),
+                    desc: String(p?.desc ?? '').slice(0, 120),
+                  }))
+                  .filter(p => p.cards > 0)
+                  .slice(0, 20)
+              : settings.packages
           }
           await env.XDB.prepare(
             `INSERT INTO x_settings (id, data) VALUES ('main', ?1)
