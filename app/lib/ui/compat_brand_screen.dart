@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../core/api.dart';
 import '../core/compat_catalog.dart';
 import '../core/models.dart';
+import '../core/store.dart';
 import 'subscribe_dialog.dart';
 import 'theme.dart';
 
@@ -44,10 +45,12 @@ class CompatTypeMeta {
 /// الجهاز، وإلا صار نظام العملات بلا معنى. لا نتائج قبل اختيار النوع وكتابة
 /// الاستعلام.
 class CompatBrandScreen extends StatefulWidget {
-  const CompatBrandScreen({super.key, required this.api, required this.brand});
+  const CompatBrandScreen(
+      {super.key, required this.api, required this.brand, this.store});
 
   final Api api;
   final CompatBrand brand;
+  final Store? store;
 
   @override
   State<CompatBrandScreen> createState() => _CompatBrandScreenState();
@@ -141,7 +144,11 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _loading = false;
         _searched = true;
         _records = const [];
-        _error = e.message;
+        // خادم قديم بلا نقطة البحث المحصّنة: نقولها صراحةً بدل خطأ غامض،
+        // فالمشكلة في النشر لا في إنترنت المستخدم.
+        _error = e.serverOutdated
+            ? 'الخادم يحتاج تحديثاً من المالك — التوافقات غير متاحة الآن'
+            : e.message;
         _locked = e.forbidden;
         _quotaEmpty = e.quotaExhausted;
       });
@@ -247,23 +254,30 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     );
   }
 
-  /// شريحة الرصيد: تظهر فقط بعد خصم فعلي حتى يعرف المشترك ثمن بحثه.
+  /// شريحة الرصيد: تظهر فقط بعد خصم فعلي حتى يعرف المستخدم ثمن بحثه.
+  /// الزائر له حصة يومية مجانية لا بطاقات، فالصياغة تختلف كي لا تُوهمه بأنه
+  /// اشترى شيئاً أو بأن رصيده انتهى دائماً.
   Widget _quotaChip() {
+    final guest = widget.store?.isGuest ?? false;
     final ok = _remaining > 0;
+    final left = guest
+        ? (ok ? 'بحوثك المجانية اليوم: $_remaining' : 'آخر بحث مجاني اليوم')
+        : (ok ? 'البطاقات المتبقية: $_remaining' : 'آخر بطاقاتك');
+    final spent = guest ? 'خُصم بحث من حصتك' : 'خُصمت بطاقة لهذا البحث';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
       child: Row(children: [
-        Icon(Icons.monetization_on_outlined,
+        Icon(guest ? Icons.hourglass_bottom : Icons.monetization_on_outlined,
             size: 15, color: ok ? XTheme.gold : XTheme.danger),
         const SizedBox(width: 6),
-        Text(ok ? 'البطاقات المتبقية: $_remaining' : 'آخر بطاقاتك',
+        Text(left,
             style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w700,
                 color: ok ? XTheme.gold : XTheme.danger)),
         if (_charged) ...[
           const Spacer(),
-          Text('خُصمت بطاقة لهذا البحث',
+          Text(spent,
               style:
                   TextStyle(fontSize: 11, color: XTheme.textDim.withOpacity(.8))),
         ],

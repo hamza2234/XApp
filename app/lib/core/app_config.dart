@@ -16,12 +16,14 @@ class AppConfig extends ChangeNotifier {
   static const _kTelegram = 'cfg_telegram';
   static const _kPackages = 'cfg_packages';
   static const _kQuota = 'cfg_guest_quota';
+  static const _kCompatQuota = 'cfg_guest_compat_quota';
 
   // لا رابط مثبت في الكود: الوجهة يحددها المالك من لوحته فقط. رابط مثبت
   // سابقاً كان يوجّه المستخدمين لحساب آخر عند تعطّل الشبكة أو نسيان الضبط.
   String _telegram = '';
   List<dynamic> _packages = const [];
   int _guestQuota = 5;
+  int _guestCompatQuota = 3;
   bool _loadedFromCache = false;
 
   /// رابط تواصل المالك. فارغ يعني أن المالك لم يضبطه بعد.
@@ -29,6 +31,9 @@ class AppConfig extends ChangeNotifier {
   bool get hasTelegram => _telegram.isNotEmpty;
   List<dynamic> get packages => _packages;
   int get guestQuota => _guestQuota;
+
+  /// حصة الزائر المجانية لبحوث التوافقات — عدّاد مستقل عن ملفات المخططات.
+  int get guestCompatQuota => _guestCompatQuota;
   bool get loadedFromCache => _loadedFromCache;
 
   /// يُحمّل من الذاكرة المحلية — يعمل بلا شبكة ويسد فجوة أول تشغيل.
@@ -36,6 +41,7 @@ class AppConfig extends ChangeNotifier {
     final p = await SharedPreferences.getInstance();
     _telegram = p.getString(_kTelegram) ?? '';
     _guestQuota = p.getInt(_kQuota) ?? 5;
+    _guestCompatQuota = p.getInt(_kCompatQuota) ?? 3;
     final raw = p.getString(_kPackages);
     if (raw != null) {
       try {
@@ -56,7 +62,13 @@ class AppConfig extends ChangeNotifier {
     final tg = (s['telegramLink'] ?? '').toString().trim();
     final pk = s['packages'] is List ? s['packages'] as List : _packages;
     final quota = (s['guestFileQuota'] as num?)?.toInt() ?? _guestQuota;
-    await _apply(tg: tg, packages: pk, guestQuota: quota);
+    final compatQuota =
+        (s['guestCompatQuota'] as num?)?.toInt() ?? _guestCompatQuota;
+    await _apply(
+        tg: tg,
+        packages: pk,
+        guestQuota: quota,
+        guestCompatQuota: compatQuota);
   }
 
   /// بعد حفظ المالك للإعدادات، يُحدَّث فوراً بلا انتظار دورة تحديث.
@@ -64,29 +76,35 @@ class AppConfig extends ChangeNotifier {
     String? telegram,
     List<dynamic>? packages,
     int? guestQuota,
+    int? guestCompatQuota,
   }) =>
       _apply(
           tg: telegram ?? _telegram,
           packages: packages ?? _packages,
-          guestQuota: guestQuota ?? _guestQuota);
+          guestQuota: guestQuota ?? _guestQuota,
+          guestCompatQuota: guestCompatQuota ?? _guestCompatQuota);
 
   Future<void> _apply({
     required String tg,
     required List<dynamic> packages,
     required int guestQuota,
+    required int guestCompatQuota,
   }) async {
     // رابط فارغ من الخادم لا يمحو رابطاً صالحاً محفوظاً.
     final nextTg = tg.trim().isEmpty ? _telegram : tg.trim();
     final changed = nextTg != _telegram ||
         !listEquals(_pkgKeys(packages), _pkgKeys(_packages)) ||
-        guestQuota != _guestQuota;
+        guestQuota != _guestQuota ||
+        guestCompatQuota != _guestCompatQuota;
     _telegram = nextTg;
     _packages = packages;
     _guestQuota = guestQuota;
+    _guestCompatQuota = guestCompatQuota;
 
     final p = await SharedPreferences.getInstance();
     await p.setString(_kTelegram, _telegram);
     await p.setInt(_kQuota, _guestQuota);
+    await p.setInt(_kCompatQuota, _guestCompatQuota);
     await p.setString(_kPackages, jsonEncode(_packages));
 
     if (changed) notifyListeners();

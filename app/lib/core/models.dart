@@ -120,6 +120,7 @@ class XSettings {
     this.schematicsLocked = false,
     this.compatLocked = false,
     this.compatSearchCost = 1,
+    this.guestCompatQuota = 3,
     this.appLocked = false,
     this.lockMessage = '',
     this.updateMessage = '',
@@ -134,8 +135,11 @@ class XSettings {
   bool schematicsLocked;
   bool compatLocked;
 
-  /// ثمن البحث الواحد في التوافقات — 0 يعني مجاني.
+  /// ثمن البحث الواحد في التوافقات بالمكوّنات — 0 يعني مجاني.
   int compatSearchCost;
+
+  /// عدد بحوث التوافقات المجانية للزائر يومياً — عدّاد مستقل عن ملفات المخططات.
+  int guestCompatQuota;
   bool appLocked;
   String lockMessage;
   String updateMessage;
@@ -152,6 +156,7 @@ class XSettings {
         schematicsLocked: j['schematicsLocked'] == true,
         compatLocked: j['compatLocked'] == true,
         compatSearchCost: (j['compatSearchCost'] as num?)?.toInt() ?? 1,
+        guestCompatQuota: (j['guestCompatQuota'] as num?)?.toInt() ?? 3,
         appLocked: j['appLocked'] == true,
         lockMessage: j['lockMessage']?.toString() ?? '',
         updateMessage: j['updateMessage']?.toString() ?? '',
@@ -176,6 +181,7 @@ class XSettings {
         'schematicsLocked': schematicsLocked,
         'compatLocked': compatLocked,
         'compatSearchCost': compatSearchCost,
+        'guestCompatQuota': guestCompatQuota,
         'appLocked': appLocked,
         'lockMessage': lockMessage,
         'updateMessage': updateMessage,

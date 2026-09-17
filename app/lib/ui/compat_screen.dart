@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../core/api.dart';
 import '../core/config.dart';
 import '../core/models.dart';
+import '../core/store.dart';
 import 'theme.dart';
 import 'brand_logo.dart';
 import 'compat_brand_screen.dart';
@@ -10,8 +11,9 @@ import 'external_link.dart';
 
 /// شاشة التوافقات — لوحة إعلانات أعلى + شبكة الشركات (توافقات نصية فقط)
 class CompatScreen extends StatefulWidget {
-  const CompatScreen({super.key, required this.api});
+  const CompatScreen({super.key, required this.api, this.store});
   final Api api;
+  final Store? store;
 
   @override
   State<CompatScreen> createState() => _CompatScreenState();
@@ -276,7 +278,8 @@ class _CompatScreenState extends State<CompatScreen>
     return GlassCard(
       padding: const EdgeInsets.all(10),
       onTap: () => Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => CompatBrandScreen(api: widget.api, brand: b))),
+          builder: (_) =>
+              CompatBrandScreen(api: widget.api, brand: b, store: widget.store))),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [

@@ -13,6 +13,10 @@ class ApiException implements Exception {
   final String message;
   bool get quotaExhausted => status == 429 || status == 402;
   bool get forbidden => status == 403;
+
+  /// الخادم المنشور لا يعرف نقطة البحث المحصّنة بعد (نسخة قديمة).
+  /// تُعرض للمستخدم رسالة مفهومة بدل خطأ عام غامض.
+  bool get serverOutdated => status == 404;
   bool get updateRequired => status == 426;
   @override
   String toString() => message;
@@ -181,18 +185,9 @@ class Api {
     final body = <String, dynamic>{'q': q};
     if (brand != null && brand.isNotEmpty) body['brand'] = brand;
     if (type != null && type.isNotEmpty) body['type'] = type;
-    Map<String, dynamic> j;
-    try {
-      j = await post('/v1/data/compat/search', body);
-    } on ApiException catch (e) {
-      // خادم قديم بلا نقطة البحث المحصّنة: نتراجع إلى القراءة العامة كي لا
-      // تتعطّل الشاشة قبل نشر الخادم الجديد.
-      if (e.status != 404) rethrow;
-      final params = <String, String>{'q': q, 'limit': '120'};
-      if (brand != null && brand.isNotEmpty) params['brand'] = brand;
-      if (type != null && type.isNotEmpty) params['type'] = type;
-      j = await get('/v1/data/compatibility', query: params);
-    }
+    // بلا مسار تراجع إلى القراءة العامة: كان يمنح كل السجلات بلا خصم
+    // عند أي 404، فيُبطل نظام العملات كله.
+    final j = await post('/v1/data/compat/search', body);
     return CompatSearchResult(
       records: (j['records'] as List?) ?? const [],
       types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
@@ -207,11 +202,8 @@ class Api {
     return r.records;
   }
 
-  /// كل سجلات شركة واحدة — مكلّف أيضاً، يُستخدم عند الحاجة لتعبئة محلية فقط.
-  Future<List<dynamic>> compatByBrand(String brandRef) async =>
-      (await get('/v1/data/compatibility',
-              query: {'q': '', 'brand': brandRef, 'limit': '500'}))['records']
-          as List;
+  /// كل سجلات شركة واحدة — حُذفت: القراءة الكاملة صارت مرفوضة على الخادم
+  /// (استعلام فارغ = 400) لأنها كانت تسمح بسحب كل التوافقات مجاناً.
 
   Future<List<dynamic>> schemBrands() async =>
       (await get('/v1/schem/brands'))['brands'] as List;

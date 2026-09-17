@@ -150,7 +150,7 @@ class _ShellState extends State<Shell> {
       body: IndexedStack(
         index: _tab,
         children: [
-          CompatScreen(api: widget.api),
+          CompatScreen(api: widget.api, store: widget.store),
           SchemScreen(api: widget.api, onFileOpened: refreshQuota),
         ],
       ),

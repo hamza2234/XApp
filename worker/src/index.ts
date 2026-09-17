@@ -165,7 +165,8 @@ interface XSettings {
   telegramLink: string
   schematicsLocked: boolean       // قفل المخططات كلياً عن الزوار
   compatLocked: boolean           // قفل التوافقات عن الزوار
-  compatSearchCost: number        // ثمن البحث الواحد في التوافقات (0 = مجاني)
+  compatSearchCost: number        // ثمن البحث الواحد في التوافقات بالبطاقات للمشتركين (0 = مجاني)
+  guestCompatQuota: number        // عدد بحوث التوافقات المجانية للزائر يومياً (عدّاد مستقل عن الملفات)
   appLocked: boolean              // قفل التطبيق كلياً (صيانة)
   lockMessage: string
   updateMessage: string           // رسالة شاشة التحديث الإجباري
@@ -182,6 +183,7 @@ const DEFAULT_SETTINGS: XSettings = {
   schematicsLocked: false,
   compatLocked: false,
   compatSearchCost: 1,
+  guestCompatQuota: 3,
   appLocked: false,
   lockMessage: '',
   updateMessage: 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
@@ -401,8 +403,7 @@ function versionGate(request: Request, settings: XSettings): Response | null {
 
 /** حصة فتح ملفات المخططات — زائر: حصة يومية؛ مشترك: بطاقات برصيد وصلاحية */
 async function consumeFileQuota(
-  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
-  chargeKey?: string
+  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings
 ): Promise<number> {
   if (caller.role === 'owner') return Number.MAX_SAFE_INTEGER
   if (caller.role === 'user') {
@@ -414,13 +415,7 @@ async function consumeFileQuota(
          AND (quota_expires_at = 0 OR quota_expires_at > ?2)
        RETURNING quota_balance`
     ).bind(caller.uid, now).first<{ quota_balance: number }>()
-    if (row) {
-      // البصمة تُسجَّل بعد نجاح الخصم فقط، فلا تُحتسب محاولة رُفضت.
-      if (chargeKey) {
-        ctx.waitUntil(env.QUOTA.put(chargeKey, '1', { expirationTtl: 900 }))
-      }
-      return row.quota_balance
-    }
+    if (row) return row.quota_balance
     const u = await xUser(env.XDB, caller.uid)
     if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
       throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
@@ -437,9 +432,6 @@ async function consumeFileQuota(
   }
   ctx.waitUntil(env.QUOTA.put(key, String(used + 1), { expirationTtl: DAY }))
   ctx.waitUntil(env.QUOTA.put(seenKey, '1', { expirationTtl: DAY }))
-  if (chargeKey) {
-    ctx.waitUntil(env.QUOTA.put(chargeKey, '1', { expirationTtl: 900 }))
-  }
   return limit - used - 1
 }
 
@@ -498,36 +490,84 @@ async function compatBrandFiles(db: D1Database): Promise<string[]> {
 
 // ---------- تحصيل التوافقات ----------
 
-/** ثمن البحث الواحد. المالك يضبطه؛ 0 يعني مجاني. */
+/** ثمن البحث الواحد بالمكوّنات — للمشتركين فقط. المالك يضبطه؛ 0 يعني مجاني. */
 function compatCost(settings: XSettings): number {
   const c = Number(settings.compatSearchCost)
   return Number.isFinite(c) && c >= 0 ? Math.min(1000, Math.floor(c)) : 1
 }
 
+/** عدد بحوث التوافقات المجانية اليومية للزائر. 0 يعني مقفلة تماماً. */
+function guestCompatLimit(settings: XSettings): number {
+  const n = Number(settings.guestCompatQuota)
+  return Number.isFinite(n) && n > 0 ? Math.min(1000, Math.floor(n)) : 0
+}
+
 /**
- * يخصم ثمن بحث واحد لكل (مستخدم + شركة + نوع + نص) في نافذة قصيرة.
+ * يخصم ثمن بحث توافقات واحد لكل (مستخدم + شركة + نوع + نص) في نافذة قصيرة.
  * إعادة البحث نفسه — أو التنقل بين النتائج — لا تُخصم مرتين، فلا يُستنزف
  * المشترك وهو يتصفح، بينما كل استعلام جديد يُحاسَب. هذا يمنع أيضاً سحب
  * التوافقات آلياً: كل نص جديد يكلّف.
+ *
+ * المستخدم المشترك: يُخصم من بطاقاته (رصيد + صلاحية).
+ * الزائر: عدّاد مجاني يومي مستقل عن ملفات المخططات (guestCompatQuota)،
+ *        وليس حصة الملفات — الخلط بينهما كان يُنهي "الحصة" بلا علاقة.
+ * المالك: بلا خصم.
  */
 async function chargeCompatSearch(
   env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
   brandRef: string, type: string, q: string
 ): Promise<{ remaining: number; charged: boolean }> {
-  const cost = compatCost(settings)
-  if (caller.role === 'owner' || cost === 0) {
+  if (caller.role === 'owner') {
     return { remaining: Number.MAX_SAFE_INTEGER, charged: false }
   }
+  if (caller.role === 'user') {
+    const cost = compatCost(settings)
+    if (cost === 0) return { remaining: Number.MAX_SAFE_INTEGER, charged: false }
+  } else if (guestCompatLimit(settings) === 0) {
+    throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
+  }
+
   const digest = await hmacHex(settings.telegramLink || 'x-compat', `${caller.uid}|${brandRef}|${type}|${q}`)
   const seenKey = `cq:${caller.uid}:${digest.slice(0, 32)}`
-  if (await env.QUOTA.get(seenKey)) {
-    // نفس البحث خلال النافذة — بلا خصم جديد.
-    return { remaining: -1, charged: false }
+  const cached = await env.QUOTA.get(seenKey)
+  if (cached) {
+    // نفس البحث خلال النافذة — بلا خصم جديد. الرصيد المتبقي محفوظ مع البصمة
+    // كي لا يظهر للمستخدم رصيد خاطئ أو -1 بعد إعادة.
+    return { remaining: Number(cached), charged: false }
   }
-  // الخصم أولاً؛ عند الفشل لا تُعاد أي بيانات.consumeFileQuota هي المسؤولة
-  // عن تسجيل البصمة، فنسجيلها هنا مرة ثانية كان يمنع أي بحث لاحق خلال
-  // النافذة من الخصم حتى لو تغيّر النص.
-  const remaining = await consumeFileQuota(env, ctx, caller, settings, seenKey)
+
+  if (caller.role === 'user') {
+    // خصم ذري من الرصيد — الشرط داخل UPDATE نفسه فلا سباق ولا تجاوز.
+    const now = Date.now()
+    const row = await env.XDB.prepare(
+      `UPDATE x_users SET quota_balance = quota_balance - ?3
+       WHERE id = ?1 AND quota_balance >= ?3
+         AND (quota_expires_at = 0 OR quota_expires_at > ?2)
+       RETURNING quota_balance`
+    ).bind(caller.uid, now, compatCost(settings)).first<{ quota_balance: number }>()
+    if (!row) {
+      const u = await xUser(env.XDB, caller.uid)
+      if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
+        throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
+      }
+      throw new HttpError(402, 'لا توجد بطاقات متبقية — اشترِ باقة جديدة من المالك')
+    }
+    const remaining = row.quota_balance
+    ctx.waitUntil(env.QUOTA.put(seenKey, String(remaining), { expirationTtl: 900 }))
+    return { remaining, charged: true }
+  }
+
+  // زائر: عدّاد يومي مستقل. المفتاح منفصل عن fq: كي لا تتداخل الحصتان.
+  const dev = caller.uid.replace(/^guest_/, '')
+  const key = `fqcompat:${dev}:${today()}`
+  const limit = guestCompatLimit(settings)
+  const used = Number(await env.QUOTA.get(key)) || 0
+  if (used >= limit) {
+    throw new HttpError(429, 'انتهت حصة التوافقات المجانية اليوم — تواصل مع المالك للمتابعة')
+  }
+  const remaining = limit - used - 1
+  ctx.waitUntil(env.QUOTA.put(key, String(used + 1), { expirationTtl: DAY }))
+  ctx.waitUntil(env.QUOTA.put(seenKey, String(remaining), { expirationTtl: 900 }))
   return { remaining, charged: true }
 }
 
@@ -725,6 +765,8 @@ export default {
           serverTime: Date.now(),
           settings: {
             guestFileQuota: settings.guestFileQuota,
+            guestCompatQuota: settings.guestCompatQuota,
+            compatSearchCost: settings.compatSearchCost,
             minVersion: settings.minVersion,
             telegramLink: settings.telegramLink,
             schematicsLocked: settings.schematicsLocked,
@@ -905,16 +947,26 @@ export default {
         })
       }
 
-      // قراءة كاملة لشركة كانت تُستخدم للفهرسة المحلية. صارت مكلّفة أيضاً:
-      // تركها مجانية كان ثقباً يسمح بسحب كل التوافقات شركةً شركة.
+      // نفس بحث npm التوافقات لكن بـ GET — يُستعمل للتشخيص وللإصدارات
+      // القديمة من التطبيق. يخضع لنفس الخصم تماماً.
+      //
+      // استعلام فارغ مرفوض: كان يسمح بسحب سجلات شركة كاملة (حتى 500 سجل)
+      // بصفر بطاقات، فيكفي المهاجم أن يمرّ على كل الشركات ليحصل على كل
+      // التوافقات مجاناً — أي أن نظام العملات كان بلا معنى.
       if (path === '/v1/data/compatibility' && request.method === 'GET') {
         await rateLimit(env, request, 'compat', 60, 600)
         if (caller.role === 'guest' && settings.compatLocked) {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
         }
-        const q = url.searchParams.get('q')?.trim() ?? ''
+        const q = url.searchParams.get('q')?.trim().slice(0, 64).toLowerCase() ?? ''
+        if (!q) {
+          throw new HttpError(400, 'نص البحث مطلوب — استخدم /v1/data/compat/search')
+        }
         let brandRef = url.searchParams.get('brand')?.trim() ?? ''
         const type = (url.searchParams.get('type')?.trim() ?? '').toUpperCase()
+        if (type && !COMPAT_TYPES.includes(type)) {
+          throw new HttpError(400, 'نوع قطعة غير معروف')
+        }
         let brandFile = brandRef || undefined
         let keyword: string | undefined
         if (brandRef.startsWith('v_')) {
@@ -922,20 +974,18 @@ export default {
           brandFile = vb?.file
           keyword = vb?.key
         }
-        // استعلام فارغ = استكشاف لا بحث، فلا يُخصم — نفس سلوك نقطة البحث.
-        const probe = q.length === 0
-        const { remaining } = probe
-          ? { remaining: Number.MAX_SAFE_INTEGER }
-          : await chargeCompatSearch(
-              env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
+        const { remaining, charged } = await chargeCompatSearch(
+          env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
-          limit: probe
-            ? 0
-            : Math.min(Number(url.searchParams.get('limit')) || 200, 500)
+          limit: Math.min(Number(url.searchParams.get('limit')) || 60, 120)
         })
-        return json({ records: results.map(d => ({ id: d.id, ...d.fields })) }, 200, {
+        return json({
+          records: results.map(d => ({ id: d.id, ...d.fields })),
+          charged,
+          remaining: remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining
+        }, 200, {
           'cache-control': 'no-store',
           'x-quota-remaining': String(remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining)
         })
@@ -944,6 +994,9 @@ export default {
       if (path === '/v1/me' && request.method === 'GET') {
         const dev = caller.uid.replace(/^guest_/, '')
         const used = caller.role === 'guest' ? Number(await env.QUOTA.get(`fq:${dev}:${today()}`)) || 0 : 0
+        const compatUsed = caller.role === 'guest'
+          ? Number(await env.QUOTA.get(`fqcompat:${dev}:${today()}`)) || 0
+          : 0
         return json({
           user: {
             id: caller.uid, role: caller.role,
@@ -953,6 +1006,11 @@ export default {
           quota: caller.role === 'guest'
             ? { used, limit: settings.guestFileQuota }
             : { used: 0, limit: -1 },
+          compatQuota: caller.role === 'guest'
+            ? { used: compatUsed, limit: settings.guestCompatQuota }
+            : caller.role === 'user'
+              ? { used: 0, limit: -1, cost: settings.compatSearchCost }
+              : null,
           cards: caller.role === 'user'
             ? {
                 balance: auth.user?.quota_balance ?? 0,
@@ -1134,6 +1192,7 @@ export default {
             schematicsLocked: body.schematicsLocked ?? settings.schematicsLocked,
             compatLocked: body.compatLocked ?? settings.compatLocked,
             compatSearchCost: Math.max(0, Math.min(1000, Math.floor(Number(body.compatSearchCost ?? settings.compatSearchCost) || 0))),
+            guestCompatQuota: Math.max(0, Math.min(1000, Math.floor(Number(body.guestCompatQuota ?? settings.guestCompatQuota) || 0))),
             appLocked: body.appLocked ?? settings.appLocked,
             lockMessage: typeof body.lockMessage === 'string' ? body.lockMessage.slice(0, 300) : settings.lockMessage,
             updateMessage: typeof body.updateMessage === 'string' ? body.updateMessage.slice(0, 500) : settings.updateMessage,

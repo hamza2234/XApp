@@ -284,6 +284,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                 })
             .toList(),
         guestQuota: saved.guestFileQuota,
+        guestCompatQuota: saved.guestCompatQuota,
       );
       setState(() {
         _s = saved;
@@ -313,11 +314,11 @@ class _SettingsTabState extends State<_SettingsTab> {
               Row(children: [
                 Icon(Icons.bolt, color: XTheme.gold, size: 20),
                 SizedBox(width: 8),
-                Text('حصة الزائر اليومية',
+                Text('ملفات المخططات للزائر يومياً',
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
               const SizedBox(height: 6),
-              Text('عدد ملفات المخططات وبحوث التوافقات للزائر يومياً',
+              Text('عدد ملفات المخططات التي يفتحها الزائر كل يوم',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 8),
               Row(children: [
@@ -427,19 +428,64 @@ class _SettingsTabState extends State<_SettingsTab> {
                 s.compatLocked,
                 (v) => setState(() => s.compatLocked = v)),
             const Divider(height: 20),
+            // حصة الزائر للتوافقات: عدّاد مستقل تماماً عن ملفات المخططات،
+            // فمن ينفد رصيده في أحدهما لا يفقد الآخر.
+            Row(children: [
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('بحوث التوافقات للزائر يومياً',
+                          style: TextStyle(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 4),
+                      Text(
+                          s.guestCompatQuota == 0
+                              ? 'مقفلة عن الزوار — للمشتركين فقط'
+                              : 'يجرّب الزائر ${s.guestCompatQuota} بحثاً كل يوم بلا بطاقات',
+                          style: TextStyle(
+                              color: XTheme.textDim, fontSize: 12)),
+                    ]),
+              ),
+              IconButton(
+                onPressed: s.guestCompatQuota <= 0
+                    ? null
+                    : () => setState(() => s.guestCompatQuota--),
+                icon: const Icon(Icons.remove_circle_outline, size: 20),
+              ),
+              Container(
+                width: 46,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                    color: XTheme.cyan.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Text('${s.guestCompatQuota}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: XTheme.cyan,
+                        fontSize: 16)),
+              ),
+              IconButton(
+                onPressed: s.guestCompatQuota >= 100
+                    ? null
+                    : () => setState(() => s.guestCompatQuota++),
+                icon: const Icon(Icons.add_circle_outline, size: 20),
+              ),
+            ]),
+            const Divider(height: 20),
             // ثمن البحث — نفس عملة بطاقات المخططات، يضبطه المالك.
             Row(children: [
               Expanded(
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('ثمن البحث في التوافقات',
+                      Text('ثمن البحث للمشتركين',
                           style: TextStyle(fontWeight: FontWeight.w800)),
                       const SizedBox(height: 4),
                       Text(
                           s.compatSearchCost == 0
-                              ? 'مجاني — بلا خصم من البطاقات'
-                              : 'يُخصم ${s.compatSearchCost} من البطاقات لكل بحث جديد',
+                              ? 'مجاني للمشتركين — بلا خصم من البطاقات'
+                              : 'يُخصم ${s.compatSearchCost} من بطاقات المشترك لكل بحث جديد',
                           style: TextStyle(
                               color: XTheme.textDim, fontSize: 12)),
                     ]),
