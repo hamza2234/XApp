@@ -116,7 +116,7 @@ class _SchemScreenState extends State<SchemScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                BrandLogo(name: b.name, size: 46),
+                BrandLogo(name: b.name, size: 56),
                 const SizedBox(height: 8),
                 Text(b.name,
                     maxLines: 1,

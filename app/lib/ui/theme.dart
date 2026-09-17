@@ -11,12 +11,12 @@ class XTheme {
   static const _dText = Color(0xFFEAEEF7);
   static const _dTextDim = Color(0xFF8A93A8);
 
-  // فاتح (أبيض)
-  static const _lBg = Color(0xFFF4F6FB);
+  // فاتح (أبيض) — خلفية رمادية فاتحة حتى تبرز البطاقات البيضاء
+  static const _lBg = Color(0xFFEDF0F7);
   static const _lSurface = Color(0xFFFFFFFF);
-  static const _lSurface2 = Color(0xFFECEFF6);
-  static const _lText = Color(0xFF141A2A);
-  static const _lTextDim = Color(0xFF5D6679);
+  static const _lSurface2 = Color(0xFFE4E8F2);
+  static const _lText = Color(0xFF10141F);
+  static const _lTextDim = Color(0xFF4E576C);
 
   static Color bg = _dBg;
   static Color surface = _dSurface;
@@ -146,11 +146,19 @@ class GlassCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: XTheme.surface.withOpacity(.75),
+        color: XTheme.surface.withOpacity(XTheme.isLight ? 1 : .75),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
             color: (XTheme.isLight ? Colors.black : Colors.white)
-                .withOpacity(.06)),
+                .withOpacity(XTheme.isLight ? .10 : .06)),
+        boxShadow: XTheme.isLight
+            ? [
+                BoxShadow(
+                    color: Colors.black.withOpacity(.06),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4))
+              ]
+            : null,
       ),
       child: Material(
         color: Colors.transparent,

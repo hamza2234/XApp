@@ -1,9 +1,48 @@
 import 'package:flutter/material.dart';
 import 'theme.dart';
 
+/// عملة ذهبية أنيقة لرصيد بطاقات المخططات
+class CoinIcon extends StatelessWidget {
+  const CoinIcon({super.key, this.size = 20});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size, height: size,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: [Color(0xFFFFE29A), Color(0xFFF5B942), Color(0xFFB8860B)],
+          begin: Alignment.topLeft, end: Alignment.bottomRight),
+        boxShadow: [
+          BoxShadow(color: Color(0x66F5B942), blurRadius: 6, spreadRadius: 0)
+        ],
+      ),
+      child: Center(
+        child: Container(
+          width: size * .78, height: size * .78,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: const Color(0xFF8A6410), width: size * .07),
+          ),
+          child: Center(
+            child: Text('X',
+                style: TextStyle(
+                    fontSize: size * .46,
+                    fontWeight: FontWeight.w900,
+                    color: const Color(0xFF6B4C08),
+                    height: 1)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// شعار شركة حقيقي من الأصول، أو حرف احتياطي إن لم يوجد
 class BrandLogo extends StatelessWidget {
-  const BrandLogo({super.key, required this.name, this.size = 46});
+  const BrandLogo({super.key, required this.name, this.size = 56});
   final String name;
   final double size;
 
@@ -62,13 +101,10 @@ class BrandLogo extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: _available.contains(k)
           ? ClipRRect(
-              borderRadius: BorderRadius.circular(13),
-              child: Padding(
-                padding: const EdgeInsets.all(3),
-                child: Image.asset('assets/brands/$k.jpg',
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, __, ___) => _letter(color)),
-              ),
+              borderRadius: BorderRadius.circular(15),
+              child: Image.asset('assets/brands/$k.jpg',
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => _letter(color)),
             )
           : _letter(color),
     );

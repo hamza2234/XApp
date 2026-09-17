@@ -170,7 +170,7 @@ interface XSettings {
   updateMessage: string           // رسالة شاشة التحديث الإجباري
   updateUrl: string               // رابط زر التحديث
   updateImageUrl: string          // صورة شاشة التحديث
-  packages: { cards: number; price: string; days: number }[]  // باقات بطاقات المخططات
+  packages: { cards: number; price: string; days: number; desc: string }[]  // باقات بطاقات المخططات
 }
 
 const DEFAULT_SETTINGS: XSettings = {
@@ -186,9 +186,9 @@ const DEFAULT_SETTINGS: XSettings = {
   updateUrl: '',
   updateImageUrl: '',
   packages: [
-    { cards: 150, price: '3$', days: 60 },
-    { cards: 300, price: '5$', days: 150 },
-    { cards: 500, price: '7$', days: 365 },
+    { cards: 150, price: '3$', days: 60, desc: 'صالحة لغاية شهرين' },
+    { cards: 300, price: '5$', days: 150, desc: 'صالحة لغاية 5 أشهر' },
+    { cards: 500, price: '7$', days: 365, desc: 'صالحة لغاية سنة كاملة' },
   ]
 }
 
@@ -273,6 +273,7 @@ async function rateLimit(env: Env, request: Request, bucket: string, limit: numb
   const used = Number(await env.QUOTA.get(key)) || 0
   if (used >= limit) {
     await noteAbuse(env, request, `ratelimit:${bucket}`)
+    await logSecurity(env, request, 'rate_limited', `bucket=${bucket} limit=${limit}/${window}s`)
     throw new HttpError(429, 'طلبات كثيرة جداً — تم الحظر مؤقتاً')
   }
   await env.QUOTA.put(key, String(used + 1), { expirationTtl: window })

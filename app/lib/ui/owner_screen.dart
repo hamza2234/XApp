@@ -5,6 +5,7 @@ import '../core/api.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'theme.dart';
+import 'brand_logo.dart';
 
 /// لوحة تحكم المالك — تظهر فقط لحساب role=owner
 /// التحكم: حصة الزائر، الإصدارات، المستخدمون، الطلبات، سجل الأمان، الإعلانات
@@ -458,6 +459,64 @@ class _SettingsTabState extends State<_SettingsTab> {
           ),
         ),
         const SizedBox(height: 12),
+        // محرر باقات البطاقات — السعر والصلاحية والوصف والعدد
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                const CoinIcon(size: 20),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('باقات بطاقات المخططات',
+                      style:
+                          TextStyle(fontWeight: FontWeight.w900)),
+                ),
+                IconButton(
+                  tooltip: 'إضافة باقة',
+                  icon: Icon(Icons.add_circle,
+                      color: XTheme.cyan, size: 22),
+                  onPressed: () => _packageDialog(-1),
+                ),
+              ]),
+              Text('تظهر للمستخدم عند ضغط زر + لشراء البطاقات',
+                  style: TextStyle(
+                      color: XTheme.textDim, fontSize: 11)),
+              const SizedBox(height: 6),
+              ...s.packages.asMap().entries.map((e) {
+                final i = e.key;
+                final p = e.value;
+                return ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const CoinIcon(size: 18),
+                  title: Text('${p.cards} بطاقة — ${p.price}',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w800, fontSize: 13.5)),
+                  subtitle: Text(
+                      '${p.days > 0 ? '${p.days} يوم' : 'بلا انتهاء'}${p.desc.isNotEmpty ? ' • ${p.desc}' : ''}',
+                      style: TextStyle(
+                          color: XTheme.textDim, fontSize: 11)),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: Icon(Icons.edit_outlined,
+                              size: 19, color: XTheme.accent),
+                          onPressed: () => _packageDialog(i)),
+                      IconButton(
+                          icon: Icon(Icons.delete_outline,
+                              size: 19, color: XTheme.danger),
+                          onPressed: () =>
+                              setState(() => s.packages.removeAt(i))),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
         GlassCard(
           child: TextField(
             controller: _telegram,
@@ -496,6 +555,79 @@ class _SettingsTabState extends State<_SettingsTab> {
           ),
         ),
       ],
+    );
+  }
+
+  /// حوار تحرير/إضافة باقة — index -1 = باقة جديدة
+  void _packageDialog(int index) {
+    final p = index >= 0 ? _s!.packages[index] : XPackage();
+    final cards = TextEditingController(text: index >= 0 ? '${p.cards}' : '');
+    final price = TextEditingController(text: p.price);
+    final days = TextEditingController(text: index >= 0 ? '${p.days}' : '');
+    final desc = TextEditingController(text: p.desc);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Text(index >= 0 ? 'تحرير باقة' : 'باقة جديدة',
+            style: const TextStyle(
+                fontWeight: FontWeight.w900, fontSize: 17)),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+                controller: cards,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'عدد البطاقات')),
+            const SizedBox(height: 10),
+            TextField(
+                controller: price,
+                decoration: const InputDecoration(
+                    labelText: 'السعر (مثال: 3\$)')),
+            const SizedBox(height: 10),
+            TextField(
+                controller: days,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'الصلاحية بالأيام (0 = بلا انتهاء)')),
+            const SizedBox(height: 10),
+            TextField(
+                controller: desc,
+                decoration: const InputDecoration(
+                    labelText: 'الوصف (مثال: صالحة شهرين)')),
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: XTheme.accent,
+                foregroundColor: Colors.white),
+            onPressed: () {
+              final c = int.tryParse(cards.text) ?? 0;
+              if (c <= 0) return;
+              final np = XPackage(
+                  cards: c,
+                  price: price.text.trim(),
+                  days: int.tryParse(days.text) ?? 0,
+                  desc: desc.text.trim());
+              setState(() {
+                if (index >= 0) {
+                  _s!.packages[index] = np;
+                } else {
+                  _s!.packages.add(np);
+                }
+              });
+              Navigator.pop(ctx);
+            },
+            child: const Text('حفظ'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -826,6 +958,7 @@ class _SecurityTabState extends State<_SecurityTab> {
     'bad_signature': ('توقيع مزوّر', XTheme.danger),
     'missing_signature': ('طلب بلا توقيع', XTheme.danger),
     'stale_signature': ('توقيع منتهي', XTheme.gold),
+    'rate_limited': ('هجوم طلبات مكثفة', XTheme.danger),
     'device_mismatch': ('حساب من جهاز غريب', XTheme.danger),
     'device_farm': ('مزرعة أجهزة', XTheme.danger),
     'bad_login': ('دخول فاشل', XTheme.gold),
@@ -834,6 +967,8 @@ class _SecurityTabState extends State<_SecurityTab> {
     'non_owner_admin_attempt': ('محاولة وصول للوحة', XTheme.danger),
     'guest_token_device_mismatch': ('توكن زائر مسروق', XTheme.danger),
     'banned_ip_hit': ('وصول من IP محظور', XTheme.gold),
+    'banned_device_hit': ('وصول من جهاز محظور', XTheme.danger),
+    'device_banned': ('حظر جهاز', XTheme.danger),
   };
 
   @override
@@ -892,6 +1027,30 @@ class _SecurityTabState extends State<_SecurityTab> {
                                   color: XTheme.textDim, fontSize: 10)),
                         ]),
                   ),
+                  // حظر فوري للجهاز المهاجم من نفس البطاقة
+                  if ((e['device_id'] ?? '').toString().isNotEmpty)
+                    IconButton(
+                      tooltip: 'حظر هذا الجهاز',
+                      icon: Icon(Icons.gpp_bad_rounded,
+                          color: XTheme.danger, size: 22),
+                      onPressed: () async {
+                        try {
+                          await widget.api.banDevice(
+                              e['device_id'].toString(),
+                              'ban_from_security:${e['reason']}');
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text('تم حظر الجهاز')));
+                          }
+                        } on ApiException catch (ex) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(ex.message)));
+                          }
+                        }
+                      },
+                    ),
                 ],
               ),
             ),

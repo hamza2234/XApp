@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/api.dart';
 import '../core/store.dart';
 import 'theme.dart';
+import 'brand_logo.dart';
 import 'compat_screen.dart';
 import 'schem_screen.dart';
 import 'owner_screen.dart';
@@ -86,7 +87,7 @@ class _ShellState extends State<Shell> {
                 onTap: _showPackages,
                 child: Chip(
                   visualDensity: VisualDensity.compact,
-                  avatar: Icon(Icons.bolt, size: 16, color: XTheme.gold),
+                  avatar: const CoinIcon(size: 17),
                   label: Text(
                       '${(_quotaLimit - _quotaUsed).clamp(0, _quotaLimit)}/$_quotaLimit',
                       style: const TextStyle(fontWeight: FontWeight.w800)),
@@ -103,11 +104,10 @@ class _ShellState extends State<Shell> {
                 onTap: _showCardsInfo,
                 child: Chip(
                   visualDensity: VisualDensity.compact,
-                  avatar: Icon(Icons.confirmation_number_outlined,
-                      size: 16, color: XTheme.cyan),
+                  avatar: const CoinIcon(size: 17),
                   label: Text('$_cards',
                       style: const TextStyle(fontWeight: FontWeight.w800)),
-                  backgroundColor: XTheme.cyan.withOpacity(.12),
+                  backgroundColor: XTheme.gold.withOpacity(.14),
                   side: BorderSide.none,
                 ),
               ),
@@ -335,13 +335,17 @@ class _ShellState extends State<Shell> {
   void _showPackages() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: XTheme.surface,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
       builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: EdgeInsets.only(
+                left: 20, right: 20, top: 20,
+                bottom: 20 + MediaQuery.of(ctx).viewInsets.bottom),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(
                 width: 40, height: 4,
                 decoration: BoxDecoration(
@@ -361,11 +365,14 @@ class _ShellState extends State<Shell> {
               final cards = (p['cards'] as num?)?.toInt() ?? 0;
               final price = p['price']?.toString() ?? '';
               final days = (p['days'] as num?)?.toInt() ?? 0;
-              final period = days >= 365
-                  ? 'سنة كاملة'
-                  : days >= 150
-                      ? '5 أشهر'
-                      : 'شهران';
+              final desc = p['desc']?.toString() ?? '';
+              final period = desc.isNotEmpty
+                  ? desc
+                  : days >= 365
+                      ? 'صالحة سنة كاملة'
+                      : days >= 150
+                          ? 'صالحة 5 أشهر'
+                          : 'صالحة شهرين';
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: GlassCard(
@@ -422,6 +429,7 @@ class _ShellState extends State<Shell> {
               );
             }),
           ]),
+          ),
         ),
       ),
     );

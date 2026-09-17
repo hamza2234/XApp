@@ -120,7 +120,8 @@ class XSettings {
     this.updateMessage = '',
     this.updateUrl = '',
     this.updateImageUrl = '',
-  });
+    List<XPackage>? packages,
+  }) : packages = packages ?? [];
   int guestFileQuota;
   int minVersion;
   List<int> blockedVersions;
@@ -132,6 +133,7 @@ class XSettings {
   String updateMessage;
   String updateUrl;
   String updateImageUrl;
+  List<XPackage> packages;
 
   factory XSettings.fromJson(Map<String, dynamic> j) => XSettings(
         guestFileQuota: (j['guestFileQuota'] as num?)?.toInt() ?? 5,
@@ -146,6 +148,15 @@ class XSettings {
         updateMessage: j['updateMessage']?.toString() ?? '',
         updateUrl: j['updateUrl']?.toString() ?? '',
         updateImageUrl: j['updateImageUrl']?.toString() ?? '',
+        packages: ((j['packages'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((p) => XPackage(
+                  cards: (p['cards'] as num?)?.toInt() ?? 0,
+                  price: p['price']?.toString() ?? '',
+                  days: (p['days'] as num?)?.toInt() ?? 0,
+                  desc: p['desc']?.toString() ?? '',
+                ))
+            .toList(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -160,5 +171,22 @@ class XSettings {
         'updateMessage': updateMessage,
         'updateUrl': updateUrl,
         'updateImageUrl': updateImageUrl,
+        'packages': packages
+            .map((p) => {
+                  'cards': p.cards,
+                  'price': p.price,
+                  'days': p.days,
+                  'desc': p.desc,
+                })
+            .toList(),
       };
+}
+
+/// باقة بطاقات مخططات — يتحكم بها المالك من اللوحة
+class XPackage {
+  XPackage({this.cards = 0, this.price = '', this.days = 0, this.desc = ''});
+  int cards;
+  String price;
+  int days;
+  String desc;
 }

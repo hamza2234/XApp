@@ -266,15 +266,13 @@ class _CompatScreenState extends State<CompatScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          BrandLogo(name: b.displayName, size: 46),
+          BrandLogo(name: b.displayName, size: 56),
           const SizedBox(height: 8),
           Text(b.displayName,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                   fontWeight: FontWeight.w800, fontSize: 13)),
-          Text('${b.models} موديل',
-              style: TextStyle(color: XTheme.textDim, fontSize: 10)),
         ],
       ),
     );
