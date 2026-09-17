@@ -31,18 +31,21 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     'INCASSABLE': ('ضد الكسر', Icons.verified_outlined, Color(0xFFF5B942)),
   };
 
-  @override
-  void initState() {
-    super.initState();
-    _search('');
-  }
-
   void _onQuery(String v) {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 350), () => _search(v));
   }
 
   Future<void> _search(String q) async {
+    if (q.trim().isEmpty) {
+      // لا نتائج قبل الكتابة — صندوق بحث نظيف
+      setState(() {
+        _results = null;
+        _loading = false;
+        _error = null;
+      });
+      return;
+    }
     setState(() {
       _loading = true;
       _error = null;
@@ -149,7 +152,18 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ]),
       );
     }
-    final list = _results ?? [];
+    if (_results == null) {
+      return Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.manage_search, size: 54,
+              color: XTheme.textDim.withOpacity(.5)),
+          const SizedBox(height: 10),
+          Text('اكتب موديل الجهاز للبحث',
+              style: TextStyle(color: XTheme.textDim)),
+        ]),
+      );
+    }
+    final list = _results!;
     if (list.isEmpty) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -219,24 +233,50 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             spacing: 7,
             runSpacing: 7,
             children: r.models
-                .map((m) => Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 11, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: XTheme.accent.withOpacity(.1),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                            color: XTheme.accent.withOpacity(.22)),
-                      ),
-                      child: Text(m,
-                          style: const TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700)),
-                    ))
+                .map((m) => _modelChip(m))
                 .toList(),
           ),
         ],
       ),
     );
+  }
+
+  /// رقاقة موديل — تُلوّن الجزء المطابق لكلمة البحث بلون مميز
+  Widget _modelChip(String m) {
+    final q = _q.text.trim().toLowerCase();
+    final match =
+        q.isNotEmpty && m.toLowerCase().contains(q);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        color: match
+            ? XTheme.accent.withOpacity(.28)
+            : XTheme.accent.withOpacity(.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: match
+                ? XTheme.accent.withOpacity(.65)
+                : XTheme.accent.withOpacity(.22)),
+      ),
+      child: Text.rich(_highlighted(m, q),
+          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+    );
+  }
+
+  TextSpan _highlighted(String text, String q) {
+    if (q.isEmpty) return TextSpan(text: text);
+    final lower = text.toLowerCase();
+    final idx = lower.indexOf(q);
+    if (idx < 0) return TextSpan(text: text);
+    return TextSpan(children: [
+      TextSpan(text: text.substring(0, idx)),
+      TextSpan(
+          text: text.substring(idx, idx + q.length),
+          style: TextStyle(
+              color: XTheme.accent,
+              fontWeight: FontWeight.w900,
+              backgroundColor: XTheme.accent.withOpacity(.18))),
+      TextSpan(text: text.substring(idx + q.length)),
+    ]);
   }
 }

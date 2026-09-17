@@ -24,6 +24,21 @@ class _CompatScreenState extends State<CompatScreen>
   String? _error;
   bool _locked = false;
   String _filter = '';
+
+  /// ترتيب مخصص: إنفنكس أولاً ثم الكبار ثم الفرعيات ثم الباقي أبجدياً
+  static const _priority = [
+    'infinix', 'honor', 'huawei', 'samsung',
+    'oppo', 'poco', 'redmi', 'realme', 'vivo',
+  ];
+
+  int _brandOrder(CompatBrand a, CompatBrand b) {
+    int rank(CompatBrand x) {
+      final i = _priority.indexOf(x.displayName.toLowerCase());
+      return i < 0 ? 100 : i;
+    }
+    final r = rank(a).compareTo(rank(b));
+    return r != 0 ? r : a.displayName.compareTo(b.displayName);
+  }
   final _pageCtrl = PageController(viewportFraction: .92);
   int _adIndex = 0;
 
@@ -47,7 +62,7 @@ class _CompatScreenState extends State<CompatScreen>
         _brands = (results[0] as List)
             .map((e) => CompatBrand.fromJson(e))
             .toList()
-          ..sort((a, b) => a.displayName.compareTo(b.displayName));
+          ..sort(_brandOrder);
         _ads = (((results[1] as Map)['announcements'] as List?) ?? [])
             .map((e) => Announcement.fromJson(e))
             .toList();

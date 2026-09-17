@@ -437,8 +437,8 @@ async function mirrorSearchCompat(
   const binds: (string | number)[] = []
   if (opts.brandFile) { binds.push(opts.brandFile); clauses.push(`brand_file = ?${binds.length}`) }
   if (opts.type) { binds.push(opts.type); clauses.push(`component_type = ?${binds.length}`) }
-  if (opts.keyword) { binds.push(`%${opts.keyword.toLowerCase()}%`); clauses.push(`search_text LIKE ?${binds.length}`) }
-  if (opts.query) { binds.push(`%${opts.query.toLowerCase()}%`); clauses.push(`search_text LIKE ?${binds.length}`) }
+  if (opts.keyword) { binds.push(`%${opts.keyword.toLowerCase()}%`); clauses.push(`LOWER(data) LIKE ?${binds.length}`) }
+  if (opts.query) { binds.push(`%${opts.query.toLowerCase()}%`); clauses.push(`LOWER(data) LIKE ?${binds.length}`) }
   binds.push(opts.limit)
   return mrows(await db.prepare(
     `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')} LIMIT ?${binds.length}`
