@@ -7,7 +7,8 @@ import 'external_link.dart';
 ///
 /// يُقرأ الرابط من الإعدادات المشتركة، فيتبعه تغيير المالك مباشرة بدل
 /// قيمة مثبتة في الكود.
-Future<void> showSubscribeDialog(BuildContext context, {String? telegram}) {
+Future<void> showSubscribeDialog(BuildContext context,
+    {String? telegram, String? title, String? body}) {
   final link = telegram ?? AppConfig.instance.telegram;
   return showModalBottomSheet(
     context: context,
@@ -33,12 +34,13 @@ Future<void> showSubscribeDialog(BuildContext context, {String? telegram}) {
                 color: XTheme.gold, size: 32),
           ),
           const SizedBox(height: 16),
-          const Text('انتهت حصة العرض اليومية',
+          Text(title ?? 'انتهت حصتك المجانية',
               style:
-                  TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
+                  const TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
           const SizedBox(height: 8),
           Text(
-            'للتصفح وفتح المخططات بلا حدود، أنشئ حساباً بالتواصل مع المالك عبر تيليجرام',
+            body ??
+                'انتهت حصتك المجانية اليوم ولا توجد عملات في رصيدك. اشترِ باقة أو تواصل مع المالك عبر تيليجرام',
             textAlign: TextAlign.center,
             style: TextStyle(color: XTheme.textDim, fontSize: 13.5),
           ),

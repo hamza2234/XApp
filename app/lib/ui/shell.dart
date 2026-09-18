@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../core/api.dart';
 import '../core/config.dart';
 import '../core/app_config.dart';
@@ -23,12 +24,16 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int _tab = 0;
-  int _quotaUsed = 0;
-  int _quotaLimit = -1;
-  int? _cards;
+  // العدّاد الموحّد: منحة يومية + رصيد عملات، مصدره /v1/me وحده.
+  int _freeLeft = 0;
+  int _freeLimit = 0;
+  int _coins = 0;
   int _cardExpiry = 0;
   // الإعدادات المشتركة: رابط تيليجرام والباقات من مصدر واحد.
   AppConfig get _cfg => AppConfig.instance;
+
+  /// ما تبقّى فعلاً = المجاني اليومي + العملات. رقم واحد يُعرض ويُخصم.
+  int get _totalLeft => _freeLeft + _coins;
 
   @override
   void initState() {
@@ -64,13 +69,27 @@ class _ShellState extends State<Shell> {
       ]);
       await _cfg.applyBootstrap(results[1]);
       final m = results[0];
+      // الخادم الجديد يرسل wallet؛ والقديم quota/cards/compatQuota. نقرأ
+      // الجديد أولاً ونرجع للقديم عند غيابه كي لا يظهر صفر خاطئ.
+      final w = m['wallet'] as Map?;
+      if (!mounted) return;
+      if (w != null) {
+        setState(() {
+          _freeLeft = (w['freeLeft'] as num?)?.toInt() ?? 0;
+          _freeLimit = (w['freeLimit'] as num?)?.toInt() ?? 0;
+          _coins = (w['coins'] as num?)?.toInt() ?? 0;
+          _cardExpiry = (w['expiresAt'] as num?)?.toInt() ?? 0;
+        });
+        return;
+      }
       final q = m['quota'] as Map?;
       final c = m['cards'] as Map?;
-      if (!mounted) return;
       setState(() {
-        _quotaUsed = (q?['used'] as num?)?.toInt() ?? 0;
-        _quotaLimit = (q?['limit'] as num?)?.toInt() ?? -1;
-        _cards = c == null ? null : (c['balance'] as num?)?.toInt() ?? 0;
+        final limit = (q?['limit'] as num?)?.toInt() ?? 0;
+        final used = (q?['used'] as num?)?.toInt() ?? 0;
+        _freeLimit = limit < 0 ? 0 : limit;
+        _freeLeft = limit < 0 ? 0 : (limit - used).clamp(0, limit);
+        _coins = (c?['balance'] as num?)?.toInt() ?? 0;
         _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
       });
     } catch (_) {}
@@ -97,25 +116,11 @@ class _ShellState extends State<Shell> {
                   color: Colors.white)),
         ),
         actions: [
-          // شريحة الحصة/البطاقات — قابلة للضغط لفتح الباقات
-          if (isGuest && _quotaLimit > 0)
-            Padding(
-              padding: const EdgeInsets.only(left: 4),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(20),
-                onTap: _showPackages,
-                child: Chip(
-                  visualDensity: VisualDensity.compact,
-                  avatar: const CoinIcon(size: 17),
-                  label: Text(
-                      '${(_quotaLimit - _quotaUsed).clamp(0, _quotaLimit)}/$_quotaLimit',
-                      style: const TextStyle(fontWeight: FontWeight.w800)),
-                  backgroundColor: XTheme.gold.withOpacity(.12),
-                  side: BorderSide.none,
-                ),
-              ),
-            ),
-          if (!isGuest && !isOwner && _cards != null)
+          // العدّاد الموحّد — رقم واحد للجميع (زائر ومسجّل ومشترك): ما تبقّى
+          // من المنحة اليومية + العملات. كان هناك ثلاثة عدّادات (توافقات،
+          // مخططات، عملات) فيرى المستخدم أرقاماً متضاربة؛ الآن مرجع واحد لما
+          // يُعرض وما يُخصم.
+          if (!isOwner)
             Padding(
               padding: const EdgeInsets.only(left: 4),
               child: InkWell(
@@ -124,9 +129,10 @@ class _ShellState extends State<Shell> {
                 child: Chip(
                   visualDensity: VisualDensity.compact,
                   avatar: const CoinIcon(size: 17),
-                  label: Text('$_cards',
+                  label: Text('$_totalLeft',
                       style: const TextStyle(fontWeight: FontWeight.w800)),
-                  backgroundColor: XTheme.gold.withOpacity(.14),
+                  backgroundColor: XTheme.gold.withOpacity(
+                      _totalLeft > 0 ? .14 : .06),
                   side: BorderSide.none,
                 ),
               ),
@@ -227,6 +233,7 @@ class _ShellState extends State<Shell> {
               }, highlight: true),
             if (!isGuest && !isOwner)
               _item(Icons.verified_user_outlined, 'حساب مفعّل', null),
+            _deviceIdTile(),
             const SizedBox(height: 8),
             // تبديل الثيم — أسود / أبيض
             Padding(
@@ -266,7 +273,7 @@ class _ShellState extends State<Shell> {
             }),
             Padding(
               padding: const EdgeInsets.all(14),
-              child: Text('X • إصدار 1.0.0',
+              child: Text('$kAppName • إصدار $kAppVersionName',
                   style: TextStyle(color: XTheme.textDim, fontSize: 11)),
             ),
           ],
@@ -290,6 +297,62 @@ class _ShellState extends State<Shell> {
     );
   }
 
+  /// معرّف الجهاز: يُعرض للجميع (زائر ومسجّل ومالك) لأنه الهوية التي
+  /// يُطلب إرسالها للمالك عند تفعيل الحساب أو شحن البطاقات. زر النسخ
+  /// يجعل إرساله في تيليجرام بلا أخطاء كتابة.
+  Widget _deviceIdTile() {
+    final id = widget.store.deviceId;
+    if (id.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
+      child: InkWell(
+        onTap: () => _copyDeviceId(id),
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
+          decoration: BoxDecoration(
+            color: XTheme.surface2,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: XTheme.textDim.withOpacity(.18)),
+          ),
+          child: Row(children: [
+            Icon(Icons.phone_android, size: 19, color: XTheme.cyan),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('معرّف جهازك',
+                      style: TextStyle(
+                          fontSize: 12, color: XTheme.textDim)),
+                  const SizedBox(height: 3),
+                  Text(id,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: XTheme.text,
+                          letterSpacing: .3)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(Icons.copy_rounded, size: 18, color: XTheme.cyan),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _copyDeviceId(String id) async {
+    await Clipboard.setData(ClipboardData(text: id));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('تم نسخ معرّف الجهاز')),
+    );
+  }
+
   /// معلومات رصيد البطاقات + تاريخ الصلاحية
   void _showCardsInfo() {
     final exp = _cardExpiry > 0
@@ -303,32 +366,43 @@ class _ShellState extends State<Shell> {
         shape:
             RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Row(children: [
-          Icon(Icons.confirmation_number_outlined, color: XTheme.cyan),
+          Icon(Icons.account_balance_wallet_outlined, color: XTheme.cyan),
           const SizedBox(width: 8),
-          const Text('بطاقاتك',
+          const Text('رصيدك',
               style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
         ]),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text('$_cards',
+          // الرقم الكبير هو ما تبقّى فعلاً، لأن الخصم يقع على المجاني أولاً
+          // ثم على العملات — فلا يفاجأ المستخدم بأن رصيده أكبر مما يُخصم.
+          Text('$_totalLeft',
               style: TextStyle(
                   fontSize: 40,
                   fontWeight: FontWeight.w900,
-                  color: expired || (_cards ?? 0) <= 0
+                  color: expired || _totalLeft <= 0
                       ? XTheme.danger
                       : XTheme.cyan)),
-          Text('بطاقة عرض مخططات',
+          Text('عملية متبقية',
               style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+          const SizedBox(height: 12),
+          _walletRow('منحة اليوم', '$_freeLeft / $_freeLimit', XTheme.accent),
+          const SizedBox(height: 6),
+          _walletRow('عملات مشحونة', '$_coins',
+              _coins > 0 ? XTheme.gold : XTheme.textDim),
           const SizedBox(height: 10),
           Text(
             exp == null
-                ? 'بلا تاريخ انتهاء'
+                ? 'عملاتك بلا تاريخ انتهاء'
                 : (expired
-                    ? 'انتهت الصلاحية في ${exp.toLocal().toString().split(' ').first}'
-                    : 'صالحة حتى ${exp.toLocal().toString().split(' ').first}'),
+                    ? 'انتهت صلاحية العملات في ${exp.toLocal().toString().split(' ').first}'
+                    : 'عملاتك صالحة حتى ${exp.toLocal().toString().split(' ').first}'),
             style: TextStyle(
                 color: expired ? XTheme.danger : XTheme.textDim,
                 fontSize: 12),
           ),
+          const SizedBox(height: 6),
+          Text('المنحة تتجدد كل يوم — تُخصم من المخططات والتوافقات معاً',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: XTheme.textDim, fontSize: 11)),
         ]),
         actions: [
           TextButton(
@@ -348,6 +422,16 @@ class _ShellState extends State<Shell> {
       ),
     );
   }
+
+  Widget _walletRow(String label, String value, Color color) => Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(color: XTheme.textDim, fontSize: 13)),
+          Text(value,
+              style: TextStyle(
+                  color: color, fontSize: 14, fontWeight: FontWeight.w800)),
+        ],
+      );
 
   /// باقات البطاقات — الشراء عبر تيليجرام برسالة جاهزة
   void _showPackages() {

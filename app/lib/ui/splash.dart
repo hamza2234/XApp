@@ -35,7 +35,7 @@ class _SplashScreenState extends State<SplashScreen>
 
   /// أقصى عدد محاولات تلقائية قبل إظهار زر إعادة المحاولة — بدل حلقة
   /// صامتة لا تنتهي كانت تُظهر «تعذر الاتصال» بلا مخرج عند أول تشغيل.
-  static const _maxAutoRetries = 3;
+  static const _maxAutoRetries = 5;
 
   @override
   void initState() {
@@ -122,12 +122,23 @@ class _SplashScreenState extends State<SplashScreen>
     } catch (e) {
       if (!mounted) return;
       _attempt++;
-      final retriable = _isNetworkError(e) && _attempt < _maxAutoRetries;
+      final retriable = (_isNetworkError(e) ||
+              // 429 و5xx أخطاء مؤقتة من الخادم: كانت تُعرض «تعذر الاتصال
+              // تحقق من الإنترنت» بلا محاولة ثانية، فيظن المستخدم أن شبكته
+              // معطلة ويرفض إعادة المحاولة يدوياً.
+              (e is ApiException &&
+                  (e.status == 429 || e.status >= 500))) &&
+          _attempt < _maxAutoRetries;
       setState(() {
         _offline = !retriable;
+        // خطأ الخادم الحقيقي (403 حظر، 401 جلسة) يجب أن يظهر بنصه:
+        // إخفاؤه خلف «تحقق من الإنترنت» يجعل المحظور يظن أن شبكته معطلة
+        // ويعيد المحاولة بلا فائدة بدل التواصل مع المالك.
         _status = retriable
             ? 'إعادة المحاولة (${_attempt + 1}/$_maxAutoRetries)…'
-            : 'تعذر الاتصال بالخادم — تحقق من الإنترنت ثم أعد المحاولة';
+            : (e is ApiException && e.message.trim().isNotEmpty)
+                ? e.message
+                : 'تعذر الاتصال بالخادم — تحقق من الإنترنت ثم أعد المحاولة';
       });
       if (retriable) {
         // تراجع تدريجي: يمنح الشبكة الضعيفة عند أول تشغيل وقتاً للاستقرار.
@@ -213,6 +224,18 @@ class _SplashScreenState extends State<SplashScreen>
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 26, vertical: 12)),
+              ),
+              const SizedBox(height: 10),
+              // المالك قد يكون جهازه محظوراً أو جلسته منتهية: بدون هذا الزر
+              // لا يجد طريقاً للوحة التحكم لإلغاء الحظر، فيبقى خارج تطبيقه.
+              TextButton.icon(
+                onPressed: () => openAuth(context, widget.api, widget.store)
+                    .then((_) {
+                  if (mounted) _retry();
+                }),
+                icon: const Icon(Icons.admin_panel_settings_outlined, size: 18),
+                label: const Text('دخول المالك'),
+                style: TextButton.styleFrom(foregroundColor: XTheme.gold),
               ),
             ] else ...[
               Text(_status,

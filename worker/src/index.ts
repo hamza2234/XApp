@@ -159,23 +159,25 @@ async function xUserByName(XDB: D1Database, username: string): Promise<XUser | n
 }
 
 interface XSettings {
-  guestFileQuota: number          // عدد الملفات التي يفتحها الزائر يومياً
+  dailyFreeQuota: number          // المنحة اليومية الواحدة لكل مستخدم (زائر أو مسجل أو مشترك)
+  guestFileQuota: number          // مهجور: يُعاد كتابته من dailyFreeQuota للتوافق مع النسخ القديمة
   minVersion: number              // أدنى إصدار مسموح
   blockedVersions: number[]       // إصدارات موقوفة تحديداً
   telegramLink: string
   schematicsLocked: boolean       // قفل المخططات كلياً عن الزوار
   compatLocked: boolean           // قفل التوافقات عن الزوار
-  compatSearchCost: number        // ثمن البحث الواحد في التوافقات بالبطاقات للمشتركين (0 = مجاني)
-  guestCompatQuota: number        // عدد بحوث التوافقات المجانية للزائر يومياً (عدّاد مستقل عن الملفات)
+  compatSearchCost: number        // ثمن دخول الشركة في التوافقات بالعملات (0 = مجاني)
+  guestCompatQuota: number        // مهجور: كان حصة مستقلة للتوافقات، صار نسخة من dailyFreeQuota
   appLocked: boolean              // قفل التطبيق كلياً (صيانة)
   lockMessage: string
   updateMessage: string           // رسالة شاشة التحديث الإجباري
   updateUrl: string               // رابط زر التحديث
   updateImageUrl: string          // صورة شاشة التحديث
-  packages: { cards: number; price: string; days: number; desc: string }[]  // باقات بطاقات المخططات
+  packages: { cards: number; price: string; days: number; desc: string }[]  // باقات العملات
 }
 
 const DEFAULT_SETTINGS: XSettings = {
+  dailyFreeQuota: 5,
   guestFileQuota: 5,
   minVersion: 1,
   blockedVersions: [],
@@ -183,7 +185,7 @@ const DEFAULT_SETTINGS: XSettings = {
   schematicsLocked: false,
   compatLocked: false,
   compatSearchCost: 1,
-  guestCompatQuota: 3,
+  guestCompatQuota: 5,
   appLocked: false,
   lockMessage: '',
   updateMessage: 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
@@ -199,7 +201,29 @@ const DEFAULT_SETTINGS: XSettings = {
 async function xSettings(XDB: D1Database): Promise<XSettings> {
   const row = await XDB.prepare("SELECT data FROM x_settings WHERE id = 'main'").first<{ data: string }>()
   if (!row) return { ...DEFAULT_SETTINGS }
-  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(row.data) } } catch { return { ...DEFAULT_SETTINGS } }
+  try {
+    const raw = JSON.parse(row.data) as Partial<XSettings>
+    return normalizeSettings({ ...DEFAULT_SETTINGS, ...raw }, raw)
+  } catch { return { ...DEFAULT_SETTINGS } }
+}
+
+/**
+ * المنحة اليومية صارت واحدة لكل المستخدمين، وكانت منفصلة: حصة للملفات
+ * وحصة للتوافقات. صفّ قديم بلا الحقل الجديد يحمل الرقمين، وأخذ أحدهما فقط
+ * يغيّر ما اعتاده المالك — نأخذ الأكبر. أما 0 فيبقى 0: إلغاء المنحة قرار
+ * صريح من المالك لا يُستبدل بالافتراضي.
+ */
+function normalizeSettings(s: XSettings, raw: Partial<XSettings>): XSettings {
+  if (raw.dailyFreeQuota === undefined) {
+    const legacy = Math.max(Number(raw.guestFileQuota) || 0, Number(raw.guestCompatQuota) || 0)
+    if (legacy > 0) s.dailyFreeQuota = Math.min(1000, legacy)
+  }
+  s.dailyFreeQuota = Math.max(0, Math.min(1000, Math.floor(Number(s.dailyFreeQuota) || 0)))
+  // الحقلان المهجوران يبقيان معروضين في bootstrap بنفس القيمة كي لا تظن
+  // نسخة قديمة من التطبيق أن المالك ألغى المنحة.
+  s.guestFileQuota = s.dailyFreeQuota
+  s.guestCompatQuota = s.dailyFreeQuota
+  return s
 }
 
 async function logSecurity(env: Env, request: Request, reason: string, detail = ''): Promise<void> {
@@ -215,8 +239,15 @@ async function logSecurity(env: Env, request: Request, reason: string, detail = 
 
 // ============================== Security layer ==============================
 
-async function noteAbuse(env: Env, request: Request, reason: string): Promise<void> {
+/**
+ * عدّ الإساءة. `severity` يفصل الخطأ البشري عن محاولات التجاوز:
+ * كلمة مرور خاطئة متكررة تعني مستخدماً نسِي كلمته، لا مهاجماً — وكانت
+ * 15 محاولة كافية لحظر جهازه نهائياً. الخطر الحقيقي (توقيع مزوّر) وحده
+ * يستحق الحظر التلقائي.
+ */
+async function noteAbuse(env: Env, request: Request, reason: string, severity: 'low' | 'high' = 'high'): Promise<void> {
   const addr = ip(request)
+  if (severity === 'low') return
   try {
     // عدّاد إساءة للجهاز أيضاً — تغيير IP/البروكسي لا يحمي المتلاعب
     const dev = deviceOf(request)
@@ -232,9 +263,11 @@ async function noteAbuse(env: Env, request: Request, reason: string): Promise<vo
       const key = `abuse:${addr}`
       const count = Number(await env.QUOTA.get(key)) || 0
       await env.QUOTA.put(key, String(count + 1), { expirationTtl: 600 })
-      if (count + 1 >= 20) {
-        const hard = await env.QUOTA.get(`hardban:${addr}`)
-        await env.QUOTA.put(`hardban:${addr}`, 'repeat', { expirationTtl: hard ? DAY : 3600 })
+      // الحظر بعد 20 إساءة كان يضرب عناوين CGNAT المشتركة: جهاز واحد مسيء
+      // يحجب جيرانه كلهم. صار التسجيل أولاً، والحظر عند 60 إساءة في نفس
+      // النافذة القصيرة — رقم لا يبلغه مستخدم شرعي.
+      if (count + 1 >= 60) {
+        await env.QUOTA.put(`hardban:${addr}`, 'repeat', { expirationTtl: 3600 })
         await logSecurity(env, request, 'ip_hardban', `reason=${reason} strikes=${count + 1}`)
       }
     }
@@ -264,11 +297,25 @@ async function banDevice(env: Env, deviceId: string, reason: string, request?: R
   if (request) await logSecurity(env, request, 'device_banned', reason)
 }
 
-/** فحص حظر الجهاز — يعمل على كل طلب /v1/ قبل أي شيء آخر */
+/**
+ * قراءة من KV لا تُسقط الطلب عند تعطّل KV.
+ *
+ * كانت أي مشكلة مؤقتة في KV تُفشل كل طلب قبل وصوله للخادم، فيرى المستخدم
+ * «تعذر الاتصال» وهو متصل. فقدان فحص الحظر لدقائق أهون من تعطيل التطبيق كله.
+ */
+async function kvGet(env: Env, key: string): Promise<string | null> {
+  try {
+    return await env.QUOTA.get(key)
+  } catch {
+    return null
+  }
+}
+
 async function assertDeviceAllowed(env: Env, request: Request): Promise<void> {
   const dev = deviceOf(request)
   if (!dev) return
-  if (await env.QUOTA.get(`devban:${dev}`)) {
+  if (await kvGet(env, `devban:${dev}`)) {
+    if (await hasOwnerSession(env, request)) return
     await logSecurity(env, request, 'banned_device_hit')
     throw new HttpError(403, 'تم حظر هذا الجهاز نهائياً — تواصل مع الدعم')
   }
@@ -276,24 +323,61 @@ async function assertDeviceAllowed(env: Env, request: Request): Promise<void> {
 
 async function assertIpClean(env: Env, request: Request): Promise<void> {
   const addr = ip(request)
-  if (await env.QUOTA.get(`hardban:${addr}`)) {
+  if (await kvGet(env, `hardban:${addr}`)) {
+    if (await hasOwnerSession(env, request)) return
     await logSecurity(env, request, 'banned_ip_hit')
     throw new HttpError(403, 'تم حظر هذا العنوان — تواصل مع الدعم')
   }
-  if (Number(await env.QUOTA.get(`abuse:${addr}`)) >= 20) {
+  if (Number(await kvGet(env, `abuse:${addr}`)) >= 20) {
+    if (await hasOwnerSession(env, request)) return
     throw new HttpError(403, 'تم حظر هذا الطلب مؤقتاً')
   }
 }
 
+/**
+ * هل يحمل الطلب جلسة مالك صالحة؟
+ *
+ * بدون هذا الاستثناء يبقى المالك خارج التطبيق نهائياً إذا حُظر جهازه أو
+ * عنوانه (بنقرة خاطئة على زر الحظر، أو حظر تلقائي بسبب أخطاء اختبار):
+ * لا يستطيع الوصول إلى صفحة إلغاء الحظر لأن فحص الحظر يسبق المصادقة.
+ * الجلسة تُوقَّع بـ X_JWT_SECRET فلا يمكن تزويرها.
+ */
+async function hasOwnerSession(env: Env, request: Request): Promise<boolean> {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim()
+  if (!token) return false
+  try {
+    const payload = await verifyJwt(token, env.X_JWT_SECRET)
+    return payload.role === 'owner'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * حدّ المعدل مفتاحه الجهاز لا العنوان.
+ *
+ * مشغّلو الجوال يستخدمون CGNAT: آلاف المستخدمين بلا علاقة بينهم يظهرون
+ * بالعنوان نفسه. حدّ لكل عنوان كان يعني أن آخر من يفتح التطبيق من ذلك
+ * العنوان يُرفض بـ 429 في أول تشغيل، ويُعرض له «تعذر الاتصال». الحدّ لكل
+ * جهاز يمنع الجهاز المسيء دون معاقبة جيرانه.
+ *
+ * العناوين بلا معرّف جهاز (أدوات آلية غالباً) تبقى على الحدّ بالعنوان.
+ */
 async function rateLimit(env: Env, request: Request, bucket: string, limit: number, window: number): Promise<void> {
-  const key = `rl:${bucket}:${ip(request)}`
-  const used = Number(await env.QUOTA.get(key)) || 0
-  if (used >= limit) {
-    await noteAbuse(env, request, `ratelimit:${bucket}`)
+  const dev = deviceOf(request)
+  const key = dev ? `rl:${bucket}:d:${dev}` : `rl:${bucket}:${ip(request)}`
+  const used = Number(await kvGet(env, key)) || 0
+  if (used + 1 > limit) {
+    // لا يُحتسب تجاوز الحدّ في رصيد الإساءة: مستخدم شرعي على عنوان مشترك
+    // قد يبلغه بسهولة، واحتسابه كان يحوّله إلى حظر كامل بعد 20 مرة.
     await logSecurity(env, request, 'rate_limited', `bucket=${bucket} limit=${limit}/${window}s`)
     throw new HttpError(429, 'طلبات كثيرة جداً — تم الحظر مؤقتاً')
   }
-  await env.QUOTA.put(key, String(used + 1), { expirationTtl: window })
+  try {
+    await env.QUOTA.put(key, String(used + 1), { expirationTtl: window })
+  } catch {
+    // تعذّر العدّ لا يمنع الطلب — الحدّ الحقيقي يُفرض عند الخصم من الرصيد.
+  }
 }
 
 /** توقيع التطبيق: X-App-Sig = HMAC(X_SIG_SECRET, deviceId|ts|method|path) */
@@ -311,9 +395,14 @@ async function verifySignature(env: Env, request: Request): Promise<void> {
     throw new HttpError(403, 'انتهت صلاحية التوقيع')
   }
   const url = new URL(request.url)
+  // البصمة جزء من التوقيع حين تُرسل: بغير ذلك يكفي تبديل ترويسة البصمة
+  // لأخذ منحة يومية جديدة بلا حد. وعند غيابها نقبل صيغة التوقيع القديمة،
+  // فمعرّف الجهاز نفسه صار البصمة الدائمة في النسخ الجديدة.
+  const fp = request.headers.get('x-device-fp')?.trim() ?? ''
+  const legacy = `${deviceOf(request)}|${ts}|${request.method}|${url.pathname}${url.search}`
   const expected = await hmacHex(
     env.X_SIG_SECRET,
-    `${deviceOf(request)}|${ts}|${request.method}|${url.pathname}${url.search}`
+    fp ? `${deviceOf(request)}|${fp}|${ts}|${request.method}|${url.pathname}${url.search}` : legacy
   )
   if (sig !== expected) {
     await noteAbuse(env, request, 'bad_signature')
@@ -322,7 +411,15 @@ async function verifySignature(env: Env, request: Request): Promise<void> {
   }
 }
 
-/** جهاز واحد يتظاهر بعدة أجهزة من نفس IP = مزرعة حسابات */
+/**
+ * كشف مزرعة الأجهزة: عدة أجهزة تتشارك عنواناً واحداً.
+ *
+ * العتبة كانت 30 جهازاً في اليوم، وهي منخفضة جداً لأن مشغّلي الجوال
+ * يستخدمون CGNAT: عشرات المستخدمين الحقيقيين يظهرون بالعنوان نفسه خلال
+ * ساعات، فيُحظر العنوان كله ويمنع من لم يذنب. صار الكشف يسجّل للمالك أولاً،
+ * ولا يحظر إلا بعد تكرار التجاوز في نوافذ متعددة — أي سلوك ثابت لا صدفة
+ * ازدحام عابرة.
+ */
 async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
   const dev = deviceOf(request)
   const addr = ip(request)
@@ -331,12 +428,16 @@ async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
   const list = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
   if (list.includes(dev)) return
   list.push(dev)
-  if (list.length > 30) {
-    await env.QUOTA.put(`hardban:${addr}`, 'device-farm', { expirationTtl: DAY })
-    await logSecurity(env, request, 'device_farm', `devices=${list.length}`)
-    throw new HttpError(403, 'تم حظر هذا العنوان — تواصل مع الدعم')
+  if (list.length > 400) {
+    const strikes = Number(await env.QUOTA.get(`farmstrikes:${addr}`)) || 0
+    await env.QUOTA.put(`farmstrikes:${addr}`, String(strikes + 1), { expirationTtl: 7 * DAY })
+    await logSecurity(env, request, 'device_farm', `devices=${list.length} strikes=${strikes + 1}`)
+    if (strikes + 1 >= 3) {
+      await env.QUOTA.put(`hardban:${addr}`, 'device-farm', { expirationTtl: DAY })
+      throw new HttpError(403, 'تم حظر هذا العنوان — تواصل مع الدعم')
+    }
   }
-  await env.QUOTA.put(key, JSON.stringify(list.slice(-60)), { expirationTtl: DAY })
+  await env.QUOTA.put(key, JSON.stringify(list.slice(-500)), { expirationTtl: DAY })
 }
 
 /** ربط الحساب بجهاز واحد — أي جهاز آخر يُرفض ويُسجَّل */
@@ -401,38 +502,136 @@ function versionGate(request: Request, settings: XSettings): Response | null {
   return null
 }
 
-/** حصة فتح ملفات المخططات — زائر: حصة يومية؛ مشترك: بطاقات برصيد وصلاحية */
-async function consumeFileQuota(
-  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings
-): Promise<number> {
-  if (caller.role === 'owner') return Number.MAX_SAFE_INTEGER
+/**
+ * بصمة الجهاز الدائمة — أساس المنحة اليومية.
+ *
+ * معرّف الجهاز كان يُولَّد داخل التطبيق ويُخزَّن مع بياناته، فمسح البيانات
+ * يمحوه ويعود المستخدم بمنحة جديدة. البصمة تأتي من النظام (ANDROID_ID)
+ * وتُخزَّن في التخزين الأصلي، فتبقى بعد مسح البيانات وبعد تبديل الحساب.
+ *
+ * ولا تُقبل من العميل بلا تحقق: التوقيع يشملها (انظر verifySignature)، فتبديلها
+ * في الطلب يكسر التوقيع. وهي داخل خادم واحد لكل الأدوار، فيتشارك الزائر
+ * والمشترك والمسجّل المنحة نفسها على الجهاز نفسه.
+ */
+function fingerprint(request: Request): string {
+  const fp = request.headers.get('x-device-fp')?.trim() ?? ''
+  if (/^[0-9a-f]{16,64}$/i.test(fp)) return `fp:${fp.toLowerCase()}`
+  // نسخ قديمة لا ترسل بصمة: معرّف الجهاز أفضل من لا شيء، ثم العنوان كحل أخير.
+  const dev = deviceOf(request)
+  return dev ? `dev:${dev}` : `ip:${ip(request)}`
+}
+
+/**
+ * مفتاح محفظة الزائر: بصمة الجهاز مع ترحيل المحفظة القديمة.
+ *
+ * كانت المحافظ مفتاحها معرّف الجهاز المخزَّن في بيانات التطبيق، فمسحها يفقد
+ * الرصيد. البصمة أدوم، فننقل الرصيد عند أول ظهور لها بدل إضاعته.
+ */
+async function walletKey(env: Env, fp: string, dev: string): Promise<string> {
+  if (!fp.startsWith('fp:') || !dev) return fp
+  const mine = await env.XDB.prepare(
+    'SELECT 1 AS x FROM x_guest_wallets WHERE device_id = ?1'
+  ).bind(fp).first()
+  if (mine) return fp
+  await env.XDB.prepare(
+    `INSERT OR IGNORE INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
+     SELECT ?1, balance, expires_at, created_at, updated_at FROM x_guest_wallets WHERE device_id = ?2`
+  ).bind(fp, dev).run()
+  return fp
+}
+
+/** مفتاح الهوية لهذا الطلب — يُحسب مرة ويُمرَّر لكل عمليات الخصم والعرض. */
+async function walletOf(env: Env, request: Request): Promise<string> {
+  return walletKey(env, fingerprint(request), deviceOf(request))
+}
+
+/**
+ * خصم من عملات الهوية: حساب المسجّل من x_users، ومحفظة الزائر من جدولها.
+ * يُعيد الرصيد بعد الخصم، أو null إذا لم يكفِ الرصيد.
+ */
+async function spendCoins(
+  env: Env, caller: Caller, fp: string, cost: number
+): Promise<number | null> {
+  const now = Date.now()
   if (caller.role === 'user') {
-    // خصم ذري من الرصيد — شرط الرصيد والصلاحية داخل UPDATE نفسه لمنع التلاعب/السباق
-    const now = Date.now()
     const row = await env.XDB.prepare(
-      `UPDATE x_users SET quota_balance = quota_balance - 1
-       WHERE id = ?1 AND quota_balance > 0
+      `UPDATE x_users SET quota_balance = quota_balance - ?3
+       WHERE id = ?1 AND quota_balance >= ?3
          AND (quota_expires_at = 0 OR quota_expires_at > ?2)
        RETURNING quota_balance`
-    ).bind(caller.uid, now).first<{ quota_balance: number }>()
-    if (row) return row.quota_balance
+    ).bind(caller.uid, now, cost).first<{ quota_balance: number }>()
+    return row ? row.quota_balance : null
+  }
+  const w = await env.XDB.prepare(
+    `UPDATE x_guest_wallets SET balance = balance - ?3
+     WHERE device_id = ?1 AND balance >= ?3
+       AND (expires_at = 0 OR expires_at > ?2)
+     RETURNING balance`
+  ).bind(fp, now, cost).first<{ balance: number }>()
+  return w ? w.balance : null
+}
+
+/** سبب نفاد الرصيد: رسالة دقيقة تفرّق بين انتهاء الصلاحية ونفاده. */
+async function emptyReason(env: Env, caller: Caller, fp: string): Promise<HttpError> {
+  const now = Date.now()
+  if (caller.role === 'user') {
     const u = await xUser(env.XDB, caller.uid)
     if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
-      throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
+      return new HttpError(402, 'انتهت صلاحية عملاتك — جدّد باقتك عبر التواصل مع المالك')
     }
-    throw new HttpError(402, 'لا توجد بطاقات متبقية — اشترِ باقة جديدة من المالك')
+    return new HttpError(402, 'انتهت حصتك المجانية ولا توجد عملات — اشترِ باقة من المالك')
   }
-  const dev = caller.uid.replace(/^guest_/, '')
-  const key = `fq:${dev}:${today()}`
-  const seenKey = `fqseen:${dev}:${today()}`
-  const used = Number(await env.QUOTA.get(key)) || 0
-  const limit = settings.guestFileQuota > 0 ? settings.guestFileQuota : 0
-  if (used >= limit) {
-    throw new HttpError(429, 'انتهت حصة العرض اليومية — تواصل مع المالك لإنشاء حساب بلا حدود')
+  const wallet = await env.XDB.prepare(
+    'SELECT balance, expires_at FROM x_guest_wallets WHERE device_id = ?1'
+  ).bind(fp).first<{ balance: number; expires_at: number }>()
+  if (wallet && wallet.expires_at > 0 && wallet.expires_at <= now) {
+    return new HttpError(402, 'انتهت صلاحية عملاتك — تواصل مع المالك للتجديد')
   }
-  ctx.waitUntil(env.QUOTA.put(key, String(used + 1), { expirationTtl: DAY }))
-  ctx.waitUntil(env.QUOTA.put(seenKey, '1', { expirationTtl: DAY }))
-  return limit - used - 1
+  return new HttpError(402,
+    'انتهت حصتك المجانية ولا توجد عملات — تواصل مع المالك لإنشاء حساب أو شحن رصيد')
+}
+
+/**
+ * خصم موحّد: المنحة اليومية أولاً ثم العملات.
+ *
+ * الترتيب واحد لفتح المخططات ودخول شركة في التوافقات: العدّاد واحد والعملات
+ * واحدة، فلا يفاجأ المستخدم بأن رصيده في الشريط لا يطابق ما يُخصم فعلاً.
+ */
+async function chargeOne(
+  env: Env, caller: Caller, fp: string, settings: XSettings
+): Promise<{ freeLeft: number; balance: number; source: string }> {
+  if (caller.role === 'owner') return { freeLeft: -1, balance: -1, source: 'owner' }
+
+  const freeLeft = await takeDailyFree(env.XDB, fp, settings.dailyFreeQuota)
+  if (freeLeft >= 0) return { freeLeft, balance: -1, source: 'free' }
+
+  const cost = Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+  const balance = await spendCoins(env, caller, fp, cost)
+  if (balance === null) throw await emptyReason(env, caller, fp)
+  return { freeLeft: 0, balance, source: 'coins' }
+}
+
+/**
+ * فتح ملف مخطط مع إعفاء إعادة الفتح.
+ *
+ * يُخصم مرة واحدة لكل (جهاز + ملف + يوم). إعادة فتح نفس المخطط — وهو سلوك
+ * طبيعي جداً في الاستعمال — كانت تُخصم في كل مرة وتستنزف المنحة على ملف
+ * واحد. المفاتيح في KV بصلاحية يومين كي لا تتراكم.
+ */
+async function consumeFileOnce(
+  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
+  fp: string, fileKey: string
+): Promise<number> {
+  const digest = await hmacHex(settings.telegramLink || 'x-file', `${fp}|${fileKey}|${today()}`)
+  const seenKey = `fo:${fp}:${digest.slice(0, 32)}`
+  const cached = await kvGet(env, seenKey)
+  if (cached) return Number(cached)
+
+  const r = await chargeOne(env, caller, fp, settings)
+  const left = r.source === 'free' ? r.freeLeft : r.balance
+  ctx.waitUntil(env.QUOTA.put(seenKey, String(left), { expirationTtl: 2 * DAY })
+    .catch(() => {}))
+  return left
 }
 
 // ============================== Mirror reads (READ-ONLY) ==============================
@@ -490,85 +689,72 @@ async function compatBrandFiles(db: D1Database): Promise<string[]> {
 
 // ---------- تحصيل التوافقات ----------
 
-/** ثمن البحث الواحد بالمكوّنات — للمشتركين فقط. المالك يضبطه؛ 0 يعني مجاني. */
-function compatCost(settings: XSettings): number {
-  const c = Number(settings.compatSearchCost)
-  return Number.isFinite(c) && c >= 0 ? Math.min(1000, Math.floor(c)) : 1
+// الثمن والمنحة صارا في chargeOne: عدّاد واحد وعملة واحدة للمخططات والتوافقات.
+
+/**
+ * حصة مجانية ذرّية في D1.
+ *
+ * عدّاد KV لا يصلح للحصص: القراءة ثم الكتابة عمليتان منفصلتان، فطلبان
+ * متقاربان يقرآن نفس القيمة فيُمنحان بحثاً زائداً. هنا الزيادة والشرط داخل
+ * UPDATE واحد، فلا سباق ولا تجاوز حتى مع الطلبات المتزامنة.
+ *
+ * يُعيد ما تبقّى، أو -1 إذا نفدت الحصة (أو كانت صفراً).
+ */
+async function takeDailyFree(
+  db: D1Database, fp: string, limit: number
+): Promise<number> {
+  if (!(limit > 0)) return -1
+  const row = await db.prepare(
+    `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'all', 1)
+     ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + 1 WHERE used < ?3
+     RETURNING used`
+  ).bind(fp, today(), limit).first<{ used: number }>()
+  // لا صف يعني أن الشرط لم يتحقق: الحصة مستنفدة فعلاً.
+  return row ? Math.max(0, limit - row.used) : -1
 }
 
-/** عدد بحوث التوافقات المجانية اليومية للزائر. 0 يعني مقفلة تماماً. */
-function guestCompatLimit(settings: XSettings): number {
-  const n = Number(settings.guestCompatQuota)
-  return Number.isFinite(n) && n > 0 ? Math.min(1000, Math.floor(n)) : 0
+/** ما استُهلك اليوم من المنحة — للعرض في /v1/me. */
+async function dailyFreeUsed(db: D1Database, fp: string): Promise<number> {
+  const row = await db.prepare(
+    "SELECT used FROM x_quota_daily WHERE uid = ?1 AND day = ?2 AND kind = 'all'"
+  ).bind(fp, today()).first<{ used: number }>()
+  return row?.used ?? 0
 }
 
 /**
- * يخصم ثمن بحث توافقات واحد لكل (مستخدم + شركة + نوع + نص) في نافذة قصيرة.
- * إعادة البحث نفسه — أو التنقل بين النتائج — لا تُخصم مرتين، فلا يُستنزف
- * المشترك وهو يتصفح، بينما كل استعلام جديد يُحاسَب. هذا يمنع أيضاً سحب
- * التوافقات آلياً: كل نص جديد يكلّف.
+ * فتح شركة في التوافقات — نقطة الخصم الوحيدة.
  *
- * المستخدم المشترك: يُخصم من بطاقاته (رصيد + صلاحية).
- * الزائر: عدّاد مجاني يومي مستقل عن ملفات المخططات (guestCompatQuota)،
- *        وليس حصة الملفات — الخلط بينهما كان يُنهي "الحصة" بلا علاقة.
- * المالك: بلا خصم.
+ * الخصم مرتبط بـ(الجهاز + الشركة + اليوم)، لا بنص البحث: المستخدم كان
+ * يُحاسَب مع كل حرف يكتبه ويُحاسَب مرة أخرى عند كل تصفية، فيُستنزف قبل أن
+ * يرى نتيجة. الآن يدفع مرة واحدة عند دخول الشركة، ويتنقّل بين الأنواع
+ * والنصوص والنتائج بلا خصم. الخروج من الشركة والعودة لا يُعيد الخصم في
+ * اليوم نفسه، فيبقى الاستعمال الطبيعي بلا مفاجآت.
+ *
+ * وهو أيضاً ما يمنع سحب التوافقات آلياً: كل شركة تُكلّف مرة، فسحب الكتالوغ
+ * كاملاً يتطلب دفع ثمن كل شركة — بخلاف الخصم على النص الذي كان يمكن
+ * تجاوزه باستعلام واحد واسع.
  */
-async function chargeCompatSearch(
+async function ensureCompatOpen(
   env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
-  brandRef: string, type: string, q: string
-): Promise<{ remaining: number; charged: boolean }> {
+  fp: string, brandRef: string
+): Promise<{ freeLeft: number; balance: number; charged: boolean; source: string }> {
   if (caller.role === 'owner') {
-    return { remaining: Number.MAX_SAFE_INTEGER, charged: false }
-  }
-  if (caller.role === 'user') {
-    const cost = compatCost(settings)
-    if (cost === 0) return { remaining: Number.MAX_SAFE_INTEGER, charged: false }
-  } else if (guestCompatLimit(settings) === 0) {
-    throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
+    return { freeLeft: -1, balance: -1, charged: false, source: 'owner' }
   }
 
-  const digest = await hmacHex(settings.telegramLink || 'x-compat', `${caller.uid}|${brandRef}|${type}|${q}`)
-  const seenKey = `cq:${caller.uid}:${digest.slice(0, 32)}`
-  const cached = await env.QUOTA.get(seenKey)
+  const digest = await hmacHex(settings.telegramLink || 'x-compat', `${fp}|${brandRef}|${today()}`)
+  const seenKey = `co:${fp}:${digest.slice(0, 32)}`
+  const cached = await kvGet(env, seenKey)
   if (cached) {
-    // نفس البحث خلال النافذة — بلا خصم جديد. الرصيد المتبقي محفوظ مع البصمة
-    // كي لا يظهر للمستخدم رصيد خاطئ أو -1 بعد إعادة.
-    return { remaining: Number(cached), charged: false }
+    const c = JSON.parse(cached) as { freeLeft: number; balance: number; source: string }
+    return { freeLeft: c.freeLeft, balance: c.balance, charged: false, source: c.source }
   }
 
-  if (caller.role === 'user') {
-    // خصم ذري من الرصيد — الشرط داخل UPDATE نفسه فلا سباق ولا تجاوز.
-    const now = Date.now()
-    const row = await env.XDB.prepare(
-      `UPDATE x_users SET quota_balance = quota_balance - ?3
-       WHERE id = ?1 AND quota_balance >= ?3
-         AND (quota_expires_at = 0 OR quota_expires_at > ?2)
-       RETURNING quota_balance`
-    ).bind(caller.uid, now, compatCost(settings)).first<{ quota_balance: number }>()
-    if (!row) {
-      const u = await xUser(env.XDB, caller.uid)
-      if (u && u.quota_expires_at > 0 && u.quota_expires_at <= now) {
-        throw new HttpError(402, 'انتهت صلاحية بطاقاتك — جدّد باقتك عبر التواصل مع المالك')
-      }
-      throw new HttpError(402, 'لا توجد بطاقات متبقية — اشترِ باقة جديدة من المالك')
-    }
-    const remaining = row.quota_balance
-    ctx.waitUntil(env.QUOTA.put(seenKey, String(remaining), { expirationTtl: 900 }))
-    return { remaining, charged: true }
-  }
-
-  // زائر: عدّاد يومي مستقل. المفتاح منفصل عن fq: كي لا تتداخل الحصتان.
-  const dev = caller.uid.replace(/^guest_/, '')
-  const key = `fqcompat:${dev}:${today()}`
-  const limit = guestCompatLimit(settings)
-  const used = Number(await env.QUOTA.get(key)) || 0
-  if (used >= limit) {
-    throw new HttpError(429, 'انتهت حصة التوافقات المجانية اليوم — تواصل مع المالك للمتابعة')
-  }
-  const remaining = limit - used - 1
-  ctx.waitUntil(env.QUOTA.put(key, String(used + 1), { expirationTtl: DAY }))
-  ctx.waitUntil(env.QUOTA.put(seenKey, String(remaining), { expirationTtl: 900 }))
-  return { remaining, charged: true }
+  const r = await chargeOne(env, caller, fp, settings)
+  const snap = { freeLeft: r.freeLeft, balance: r.balance, source: r.source }
+  ctx.waitUntil(env.QUOTA.put(seenKey, JSON.stringify(snap), { expirationTtl: 2 * DAY })
+    .catch(() => {}))
+  return { ...snap, charged: true }
 }
 
 /**
@@ -743,9 +929,17 @@ export default {
       if (path === '/health') return json({ ok: true, ts: Date.now() })
 
       if (BLOCKED_UA.test(request.headers.get('user-agent') ?? '')) throw new HttpError(403, 'forbidden')
-      await assertIpClean(env, request)
-      await assertDeviceAllowed(env, request)
-      await trackDeviceFarm(env, request)
+      // مسارات المالك وتسجيل الدخول معفاة من فحص الحظر: بدون ذلك يبقى
+      // المالك خارج تطبيقه نهائياً إذا حُظر جهازه أو عنوانه (نقرة خاطئة على
+      // زر الحظر، أو حظر تلقائي)، لأنه لا يصل لصفحة إلغاء الحظر أصلاً —
+      // فحص الحظر يسبق المصادقة. بقية المسارات محمية كما هي، والوصول إلى
+      // /v1/owner/* يظل محكوماً بجلسة owner موقّعة.
+      const banExempt = path.startsWith('/v1/owner') || path === '/v1/auth/login'
+      if (!banExempt) {
+        await assertIpClean(env, request)
+        await assertDeviceAllowed(env, request)
+        await trackDeviceFarm(env, request)
+      }
 
       // توقيع التطبيق إلزامي لكل /v1/* — السكريبتات الخارجية تموت هنا
       if (path.startsWith('/v1/')) await verifySignature(env, request)
@@ -764,6 +958,8 @@ export default {
           ok: true,
           serverTime: Date.now(),
           settings: {
+            // المنحة اليومية الواحدة لكل الأدوار.
+            dailyFreeQuota: settings.dailyFreeQuota,
             guestFileQuota: settings.guestFileQuota,
             guestCompatQuota: settings.guestCompatQuota,
             compatSearchCost: settings.compatSearchCost,
@@ -798,7 +994,9 @@ export default {
       // ---------- المصادقة ----------
 
       if (path === '/v1/auth/guest' && request.method === 'POST') {
-        await rateLimit(env, request, 'guest', 10, 3600)
+        // 60 بدل 10: إنشاء الجلسة يحدث في كل فتح، والحدّ الضيّق كان يرفض
+        // المستخدم في أول تشغيل. المفتاح صار الجهاز فلا يضر أحداً بغيره.
+        await rateLimit(env, request, 'guest', 60, 3600)
         const dev = deviceOf(request)
         if (!dev) throw new HttpError(400, 'deviceId required')
         const token = await signJwt({ sub: `guest_${dev}`, role: 'guest', dev }, env.X_JWT_SECRET, 7 * DAY)
@@ -831,7 +1029,7 @@ export default {
         const body = await request.json() as { username?: string; password?: string }
         const user = await xUserByName(env.XDB, body.username?.trim() ?? '')
         if (!user || !(await verifyPassword(body.password ?? '', (user as any).password_hash ?? ''))) {
-          await noteAbuse(env, request, 'bad_login')
+          await noteAbuse(env, request, 'bad_login', 'low')
           await logSecurity(env, request, 'bad_login', `user=${body.username ?? ''}`)
           throw new HttpError(401, 'بيانات الدخول غير صحيحة')
         }
@@ -889,7 +1087,21 @@ export default {
         return json({ brands })
       }
 
-      // بحث التوافقات — نقطة واحدة محصّنة تُخصم منها العملة.
+      // دخول شركة: هنا يقع الخصم الوحيد. ينفصل عن البحث كي يدفع المستخدم
+      // مرة واحدة عند فتح الشركة ويُعرض له رصيده قبل أن يكتب أي حرف.
+      if (path === '/v1/data/compat/open' && request.method === 'POST') {
+        const body = await request.json() as { brand?: string }
+        const brandRef = String(body.brand ?? '').trim().slice(0, 80)
+        const fp = await walletOf(env, request)
+        const r = await ensureCompatOpen(env, ctx, caller, settings, fp, brandRef || 'all')
+        return json({
+          ok: true,
+          charged: r.charged, source: r.source,
+          remaining: r.freeLeft, balance: r.balance
+        }, 200, { 'cache-control': 'no-store' })
+      }
+
+      // بحث التوافقات — بعد دخول الشركة، بلا خصم إضافي.
       // POST لا GET: البحث فعل مكلّف لا يجوز أن يُخزَّن في الكاش أو يُستدعى
       // تلقائياً من متصفح/زاحف، ولا يظهر نصه في سجلات الوسطاء.
       if (path === '/v1/data/compat/search' && request.method === 'POST') {
@@ -929,8 +1141,10 @@ export default {
             200, { 'cache-control': 'no-store' })
         }
 
-        const { remaining, charged } = await chargeCompatSearch(
-          env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
+        // الخصم عند دخول الشركة أول مرة في اليوم — لا مع كل نص.
+        const fp = await walletOf(env, request)
+        const r = await ensureCompatOpen(
+          env, ctx, caller, settings, fp, brandRef || 'all')
 
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
@@ -939,8 +1153,9 @@ export default {
         })
         return json({
           records: results.map(d => ({ id: d.id, ...d.fields })),
-          types, charged,
-          remaining: remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining
+          types, charged: r.charged, source: r.source,
+          remaining: r.freeLeft,
+          balance: r.balance
         }, 200, {
           'cache-control': 'no-store',
           'x-content-type-options': 'nosniff'
@@ -974,8 +1189,9 @@ export default {
           brandFile = vb?.file
           keyword = vb?.key
         }
-        const { remaining, charged } = await chargeCompatSearch(
-          env, ctx, caller, settings, brandRef || 'all', type || 'all', q)
+        const fp = await walletOf(env, request)
+        const r = await ensureCompatOpen(
+          env, ctx, caller, settings, fp, brandRef || 'all')
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
@@ -983,40 +1199,61 @@ export default {
         })
         return json({
           records: results.map(d => ({ id: d.id, ...d.fields })),
-          charged,
-          remaining: remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining
+          charged: r.charged, source: r.source,
+          remaining: r.freeLeft,
+          balance: r.balance
         }, 200, {
           'cache-control': 'no-store',
-          'x-quota-remaining': String(remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining)
+          'x-quota-remaining': String(r.freeLeft)
         })
       }
 
       if (path === '/v1/me' && request.method === 'GET') {
-        const dev = caller.uid.replace(/^guest_/, '')
-        const used = caller.role === 'guest' ? Number(await env.QUOTA.get(`fq:${dev}:${today()}`)) || 0 : 0
-        const compatUsed = caller.role === 'guest'
-          ? Number(await env.QUOTA.get(`fqcompat:${dev}:${today()}`)) || 0
-          : 0
+        const fp = await walletOf(env, request)
+        const freeUsed = await dailyFreeUsed(env.XDB, fp)
+        const freeLimit = Math.max(0, Math.floor(Number(settings.dailyFreeQuota) || 0))
+        const wallet = caller.role === 'guest'
+          ? await env.XDB.prepare(
+              'SELECT balance, expires_at FROM x_guest_wallets WHERE device_id = ?1'
+            ).bind(fp).first<{ balance: number; expires_at: number }>()
+          : null
+        // رصيد واحد للجميع: بطاقات المشترك ومحفظة الزائر في نفس العدّاد،
+        // والمنحة اليومية تُضاف إليه في العرض كما تُخصم منه فعلاً.
+        const coins = caller.role === 'user'
+          ? auth.user?.quota_balance ?? 0
+          : caller.role === 'guest'
+            ? wallet?.balance ?? 0
+            : 0
+        const expiresAt = caller.role === 'user'
+          ? auth.user?.quota_expires_at ?? 0
+          : wallet?.expires_at ?? 0
+        const freeLeft = Math.max(0, freeLimit - freeUsed)
         return json({
           user: {
             id: caller.uid, role: caller.role,
             username: auth.user?.username ?? null,
             displayName: auth.user?.display_name ?? ''
           },
-          quota: caller.role === 'guest'
-            ? { used, limit: settings.guestFileQuota }
-            : { used: 0, limit: -1 },
-          compatQuota: caller.role === 'guest'
-            ? { used: compatUsed, limit: settings.guestCompatQuota }
-            : caller.role === 'user'
-              ? { used: 0, limit: -1, cost: settings.compatSearchCost }
-              : null,
-          cards: caller.role === 'user'
-            ? {
-                balance: auth.user?.quota_balance ?? 0,
-                expiresAt: auth.user?.quota_expires_at ?? 0
-              }
-            : null
+          // العدّاد الموحّد — مصدر واحد للشريط الأعلى في التطبيق.
+          wallet: {
+            freeLimit, freeUsed, freeLeft,
+            coins, expiresAt,
+            totalLeft: caller.role === 'owner' ? -1 : freeLeft + coins,
+            cost: Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+          },
+          // حقول قديمة تبقى للنسخ السابقة من التطبيق، بنفس أرقام العدّاد
+          // الموحّد كي لا ترى رقماً يخالف ما يُخصم.
+          quota: { used: freeUsed, limit: freeLimit },
+          compatQuota: caller.role === 'owner'
+            ? null
+            : {
+                used: freeUsed,
+                limit: freeLimit,
+                cost: Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+              },
+          cards: caller.role === 'owner'
+            ? null
+            : { balance: coins, expiresAt }
         })
       }
 
@@ -1078,7 +1315,13 @@ export default {
         // لا تُستهلك الحصة إلا إذا كان الملف موجوداً فعلاً
         const headObj = await env.SCHEMATICS.head(r2Key)
         if (!headObj) throw new HttpError(404, 'file not found')
-        const remaining = await consumeFileQuota(env, ctx, caller, settings)
+        const fp = await walletOf(env, request)
+        // إعادة فتح نفس الملف في اليوم نفسه لا تُخصم مرتين: المستخدم يغلق
+        // المخطط ليعود إليه بعد دقيقة، والخصم في كل مرة كان يستنزف رصيده على
+        // ملف واحد. لا يُمنع فتح ملفات أخرى — كل ملف جديد يُخصم مرة.
+        const remaining = caller.role === 'owner'
+          ? -1
+          : await consumeFileOnce(env, ctx, caller, settings, fp, r2Key)
 
         // كاش الحافة: النص المشفر ثابت لكل (ملف+إصدار) — فتح فوري في نفس المنطقة
         // حتى على إنترنت ضعيف. الفحص الأمني والحصة يسبقان الكاش دائماً.
@@ -1183,7 +1426,11 @@ export default {
         if (path === '/v1/owner/settings' && request.method === 'PUT') {
           const body = await request.json() as Partial<XSettings>
           const next: XSettings = {
-            guestFileQuota: Math.max(0, Math.min(10000, Number(body.guestFileQuota ?? settings.guestFileQuota) || 0)),
+            // المنحة اليومية الواحدة: تُطبَّق على الزوار والمسجّلين والمشتركين.
+            // الحقلان القديمان يُشتقّان منها ويُحفظان بنفس القيمة كي لا تظن
+            // نسخة قديمة من التطبيق أن المالك ألغى المنحة.
+            dailyFreeQuota: Math.max(0, Math.min(1000, Math.floor(Number(body.dailyFreeQuota ?? settings.dailyFreeQuota) || 0))),
+            guestFileQuota: 0,
             minVersion: Math.max(0, Number(body.minVersion ?? settings.minVersion) || 0),
             blockedVersions: Array.isArray(body.blockedVersions)
               ? body.blockedVersions.map(Number).filter(Number.isSafeInteger) : settings.blockedVersions,
@@ -1192,7 +1439,7 @@ export default {
             schematicsLocked: body.schematicsLocked ?? settings.schematicsLocked,
             compatLocked: body.compatLocked ?? settings.compatLocked,
             compatSearchCost: Math.max(0, Math.min(1000, Math.floor(Number(body.compatSearchCost ?? settings.compatSearchCost) || 0))),
-            guestCompatQuota: Math.max(0, Math.min(1000, Math.floor(Number(body.guestCompatQuota ?? settings.guestCompatQuota) || 0))),
+            guestCompatQuota: 0,
             appLocked: body.appLocked ?? settings.appLocked,
             lockMessage: typeof body.lockMessage === 'string' ? body.lockMessage.slice(0, 300) : settings.lockMessage,
             updateMessage: typeof body.updateMessage === 'string' ? body.updateMessage.slice(0, 500) : settings.updateMessage,
@@ -1253,6 +1500,40 @@ export default {
           return json({ ok: true })
         }
 
+        // محافظ الزوار: عملات يشتريها الزائر بلا حساب، مفتاحها معرّف الجهاز.
+        if (path === '/v1/owner/wallets' && request.method === 'GET') {
+          const rows = await env.XDB.prepare(
+            `SELECT w.device_id, w.balance, w.expires_at, w.updated_at,
+                    (SELECT app_version FROM x_installs i
+                      WHERE i.device_id = w.device_id
+                      ORDER BY last_seen DESC LIMIT 1) app_version
+             FROM x_guest_wallets w ORDER BY w.updated_at DESC LIMIT 500`
+          ).all()
+          return json({ wallets: rows.results ?? [] })
+        }
+
+        if (path === '/v1/owner/wallets' && request.method === 'POST') {
+          const body = await request.json() as {
+            deviceId?: string; coins?: number; days?: number
+          }
+          const dev = body.deviceId?.trim() ?? ''
+          if (!dev || dev.length > 100) throw new HttpError(400, 'معرّف الجهاز مطلوب')
+          const coins = Math.max(0, Math.min(100000, Math.floor(Number(body.coins) || 0)))
+          const days = Math.max(0, Math.min(3650, Math.floor(Number(body.days) || 0)))
+          if (coins <= 0) throw new HttpError(400, 'عدد العملات مطلوب')
+          const now = new Date().toISOString()
+          // شحن تراكمي: إعادة الشحن تضيف للرصيد ولا تُصفّره.
+          await env.XDB.prepare(
+            `INSERT INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(device_id) DO UPDATE SET
+               balance = balance + ?2,
+               expires_at = ?3,
+               updated_at = ?4`
+          ).bind(dev, coins, days > 0 ? Date.now() + days * DAY * 1000 : 0, now).run()
+          return json({ ok: true })
+        }
+
         // حظر الأجهزة: عرض/حظر/فك
         if (path === '/v1/owner/bans' && request.method === 'GET') {
           const rows = await env.XDB.prepare(
@@ -1268,6 +1549,17 @@ export default {
           const addr = body.ip?.trim() ?? ''
           if (!dev && !addr) throw new HttpError(400, 'deviceId أو ip مطلوب')
           if (dev.length > 100 || addr.length > 64) throw new HttpError(400, 'قيمة طويلة جداً')
+          // لا تحظر نفسك: زر الحظر في تبويب الأمان يعرض جهاز المالك وعنوانه
+          // أيضاً، ونقرة واحدة كانت تكفي لقفل التطبيق على المالك نفسه بلا
+          // أي طريق للرجوع من داخل التطبيق.
+          const selfDev = deviceOf(request)
+          const selfAddr = ip(request)
+          if (dev && selfDev && dev === selfDev) {
+            throw new HttpError(400, 'لا يمكنك حظر جهازك الحالي')
+          }
+          if (addr && selfAddr !== 'unknown' && addr === selfAddr) {
+            throw new HttpError(400, 'لا يمكنك حظر عنوانك الحالي')
+          }
           if (dev) await banDevice(env, dev, reason, request)
           if (addr) await banIp(env, addr, reason, request)
           return json({ ok: true })

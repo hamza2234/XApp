@@ -9,6 +9,14 @@ import '../core/store.dart';
 import 'theme.dart';
 import 'brand_logo.dart';
 
+/// نسخ معرّف الجهاز — يُستخدم من عدة تبويبات في لوحة المالك.
+Future<void> copyDeviceId(BuildContext context, String value) async {
+  await Clipboard.setData(ClipboardData(text: value));
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('تم نسخ معرّف الجهاز')));
+}
+
 /// لوحة تحكم المالك — تظهر فقط لحساب role=owner
 /// التحكم: حصة الزائر، الإصدارات، المستخدمون، الطلبات، سجل الأمان، الإعلانات
 class OwnerScreen extends StatefulWidget {
@@ -24,7 +32,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('لوحة تحكم المالك'),
@@ -37,6 +45,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
               Tab(text: 'عام', icon: Icon(Icons.analytics_outlined, size: 18)),
               Tab(text: 'الإعدادات', icon: Icon(Icons.tune, size: 18)),
               Tab(text: 'المستخدمون', icon: Icon(Icons.people_outline, size: 18)),
+              Tab(text: 'محافظ الزوار', icon: Icon(Icons.account_balance_wallet_outlined, size: 18)),
               Tab(text: 'الإعلانات', icon: Icon(Icons.campaign_outlined, size: 18)),
               Tab(text: 'الحظر', icon: Icon(Icons.gpp_bad_outlined, size: 18)),
               Tab(text: 'الأمان', icon: Icon(Icons.security, size: 18)),
@@ -47,6 +56,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
           _OverviewTab(api: widget.api),
           _SettingsTab(api: widget.api),
           _UsersTab(api: widget.api),
+          _WalletsTab(api: widget.api),
           _AnnouncementsTab(api: widget.api),
           _BansTab(api: widget.api),
           _SecurityTab(api: widget.api),
@@ -172,6 +182,13 @@ class _OverviewTabState extends State<_OverviewTab> {
                                       color: XTheme.textDim, fontSize: 10)),
                             ]),
                       ),
+                      if ((r['device_id'] ?? '').toString().isNotEmpty)
+                        IconButton(
+                            tooltip: 'نسخ معرّف الجهاز',
+                            onPressed: () =>
+                                copyDeviceId(context, '${r['device_id']}'),
+                            icon: Icon(Icons.copy_rounded,
+                                size: 18, color: XTheme.cyan)),
                       IconButton(
                           onPressed: () => _act(r['id'], 'approve'),
                           icon: Icon(Icons.check_circle,
@@ -283,8 +300,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                   'desc': p.desc,
                 })
             .toList(),
-        guestQuota: saved.guestFileQuota,
-        guestCompatQuota: saved.guestCompatQuota,
+        dailyFree: saved.dailyFreeQuota,
       );
       setState(() {
         _s = saved;
@@ -314,21 +330,23 @@ class _SettingsTabState extends State<_SettingsTab> {
               Row(children: [
                 Icon(Icons.bolt, color: XTheme.gold, size: 20),
                 SizedBox(width: 8),
-                Text('ملفات المخططات للزائر يومياً',
+                Text('المنحة اليومية للجميع',
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
               const SizedBox(height: 6),
-              Text('عدد ملفات المخططات التي يفتحها الزائر كل يوم',
+              Text(
+                  'عدد العمليات المجانية يومياً لكل مستخدم — زائر ومسجّل ومشترك. '
+                  'عدّاد واحد يُخصم منه فتح المخططات ودخول الشركات في التوافقات.',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(
                   child: Slider(
-                    value: s.guestFileQuota.toDouble().clamp(0, 50),
+                    value: s.dailyFreeQuota.toDouble().clamp(0, 50),
                     max: 50,
                     divisions: 50,
                     onChanged: (v) =>
-                        setState(() => s.guestFileQuota = v.round()),
+                        setState(() => s.dailyFreeQuota = v.round()),
                   ),
                 ),
                 Container(
@@ -337,7 +355,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                   decoration: BoxDecoration(
                       color: XTheme.gold.withOpacity(.12),
                       borderRadius: BorderRadius.circular(10)),
-                  child: Text('${s.guestFileQuota}',
+                  child: Text('${s.dailyFreeQuota}',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                           fontWeight: FontWeight.w900,
@@ -345,6 +363,9 @@ class _SettingsTabState extends State<_SettingsTab> {
                           fontSize: 17)),
                 ),
               ]),
+              if (s.dailyFreeQuota == 0)
+                Text('صفر يعني بلا منحة مجانية — العملات وحدها تعمل',
+                    style: TextStyle(color: XTheme.danger, fontSize: 11.5)),
             ],
           ),
         ),
@@ -428,64 +449,20 @@ class _SettingsTabState extends State<_SettingsTab> {
                 s.compatLocked,
                 (v) => setState(() => s.compatLocked = v)),
             const Divider(height: 20),
-            // حصة الزائر للتوافقات: عدّاد مستقل تماماً عن ملفات المخططات،
-            // فمن ينفد رصيده في أحدهما لا يفقد الآخر.
+            // ثمن دخول الشركة — نفس عملة المنحة والعملات، يضبطه المالك.
             Row(children: [
               Expanded(
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('بحوث التوافقات للزائر يومياً',
-                          style: TextStyle(fontWeight: FontWeight.w800)),
-                      const SizedBox(height: 4),
-                      Text(
-                          s.guestCompatQuota == 0
-                              ? 'مقفلة عن الزوار — للمشتركين فقط'
-                              : 'يجرّب الزائر ${s.guestCompatQuota} بحثاً كل يوم بلا بطاقات',
-                          style: TextStyle(
-                              color: XTheme.textDim, fontSize: 12)),
-                    ]),
-              ),
-              IconButton(
-                onPressed: s.guestCompatQuota <= 0
-                    ? null
-                    : () => setState(() => s.guestCompatQuota--),
-                icon: const Icon(Icons.remove_circle_outline, size: 20),
-              ),
-              Container(
-                width: 46,
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                decoration: BoxDecoration(
-                    color: XTheme.cyan.withOpacity(.12),
-                    borderRadius: BorderRadius.circular(10)),
-                child: Text('${s.guestCompatQuota}',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        color: XTheme.cyan,
-                        fontSize: 16)),
-              ),
-              IconButton(
-                onPressed: s.guestCompatQuota >= 100
-                    ? null
-                    : () => setState(() => s.guestCompatQuota++),
-                icon: const Icon(Icons.add_circle_outline, size: 20),
-              ),
-            ]),
-            const Divider(height: 20),
-            // ثمن البحث — نفس عملة بطاقات المخططات، يضبطه المالك.
-            Row(children: [
-              Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('ثمن البحث للمشتركين',
+                      Text('ثمن دخول الشركة',
                           style: TextStyle(fontWeight: FontWeight.w800)),
                       const SizedBox(height: 4),
                       Text(
                           s.compatSearchCost == 0
-                              ? 'مجاني للمشتركين — بلا خصم من البطاقات'
-                              : 'يُخصم ${s.compatSearchCost} من بطاقات المشترك لكل بحث جديد',
+                              ? 'مجاني — بلا خصم'
+                              : 'يُخصم ${s.compatSearchCost} من العملات عند دخول شركة '
+                                  'بعد نفاد المنحة اليومية',
                           style: TextStyle(
                               color: XTheme.textDim, fontSize: 12)),
                     ]),
@@ -996,6 +973,13 @@ class _UsersTabState extends State<_UsersTab> {
                                 color: XTheme.cyan, fontSize: 11)),
                       ]),
                 ),
+                if ((u['device_id'] ?? '').toString().isNotEmpty)
+                  IconButton(
+                      tooltip: 'نسخ معرّف الجهاز',
+                      onPressed: () =>
+                          copyDeviceId(context, '${u['device_id']}'),
+                      icon: Icon(Icons.copy_rounded,
+                          size: 18, color: XTheme.cyan)),
                 if (!isOwner)
                   PopupMenuButton<String>(
                     icon: Icon(Icons.more_vert,
@@ -1585,6 +1569,209 @@ class _BansTabState extends State<_BansTab> {
                                     style: TextStyle(
                                         color: XTheme.ok,
                                         fontSize: 12)),
+                              ),
+                            ]),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+      ),
+    ]);
+  }
+}
+
+// ============ محافظ الزوار ============
+
+/// محافظ الزوار: عملات تُشحن لجهاز بلا حساب.
+///
+/// الزائر لم يكن له رصيد إطلاقاً، فكانت حصته المجانية إن نفدت يتوقف تماماً
+/// حتى لو دفع. هذه الشاشة تمنحه رصيداً بمفتاح الجهاز — نفس المفتاح الذي
+/// يعتمد عليه الخادم في الخصم.
+class _WalletsTab extends StatefulWidget {
+  const _WalletsTab({required this.api});
+  final Api api;
+  @override
+  State<_WalletsTab> createState() => _WalletsTabState();
+}
+
+class _WalletsTabState extends State<_WalletsTab> {
+  List<dynamic>? _rows;
+  final _dev = TextEditingController();
+  final _coins = TextEditingController(text: '5');
+  final _days = TextEditingController(text: '30');
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _dev.dispose();
+    _coins.dispose();
+    _days.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final w = await widget.api.ownerWallets();
+      if (mounted) setState(() => _rows = w);
+    } catch (_) {
+      if (mounted) setState(() => _rows = []);
+    }
+  }
+
+  Future<void> _grant() async {
+    final dev = _dev.text.trim();
+    final coins = int.tryParse(_coins.text.trim()) ?? 0;
+    if (dev.isEmpty || coins <= 0) return;
+    final days = int.tryParse(_days.text.trim()) ?? 0;
+    try {
+      await widget.api.grantWallet(dev, coins, days);
+      _dev.clear();
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('فشل الشحن: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.all(14),
+        child: GlassCard(
+          padding: const EdgeInsets.all(12),
+          child: Column(children: [
+            Text(
+              'شحن عملات لزائر بمعرّف جهازه. الزائر بلا حساب، فيُعرَّف بجهازه — '
+              'انسخ المعرّف من تبويب «الحظر» أو من طلبات الشراء.',
+              style: TextStyle(color: XTheme.textDim, fontSize: 11.5),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _dev,
+              decoration: const InputDecoration(
+                  hintText: 'معرّف الجهاز', isDense: true),
+              textDirection: TextDirection.ltr,
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _coins,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      hintText: 'عدد العملات', isDense: true),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _days,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      hintText: 'أيام الصلاحية (0=بلا حد)', isDense: true),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _grant,
+                icon: const Icon(Icons.add_card, size: 18),
+                label: const Text('شحن الرصيد'),
+              ),
+            ),
+          ]),
+        ),
+      ),
+      Expanded(
+        child: _rows == null
+            ? Center(child: CircularProgressIndicator(color: XTheme.accent))
+            : _rows!.isEmpty
+                ? Center(
+                    child: Text('لا محافظ بعد',
+                        style: TextStyle(color: XTheme.textDim)))
+                : RefreshIndicator(
+                    onRefresh: _load,
+                    color: XTheme.accent,
+                    child: ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
+                      itemCount: _rows!.length,
+                      itemBuilder: (context, i) {
+                        final w = _rows![i];
+                        final bal = (w['balance'] as num?)?.toInt() ?? 0;
+                        final exp = (w['expires_at'] as num?)?.toInt() ?? 0;
+                        final expired =
+                            exp > 0 && exp <= DateTime.now().millisecondsSinceEpoch;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: GlassCard(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            child: Row(children: [
+                              Icon(Icons.account_balance_wallet_outlined,
+                                  color: bal > 0 ? XTheme.gold : XTheme.textDim,
+                                  size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '${w['device_id']}',
+                                      style: const TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w700),
+                                      textDirection: TextDirection.ltr,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    Text(
+                                      expired
+                                          ? 'منتهية الصلاحية'
+                                          : exp > 0
+                                              ? 'صالحة حتى ${DateTime.fromMillisecondsSinceEpoch(exp).toLocal().toString().split(' ').first}'
+                                              : 'بلا تاريخ انتهاء',
+                                      style: TextStyle(
+                                          fontSize: 10.5,
+                                          color: expired
+                                              ? XTheme.danger
+                                              : XTheme.textDim),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Text('$bal',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 15,
+                                      color: bal > 0
+                                          ? XTheme.gold
+                                          : XTheme.danger)),
+                              const SizedBox(width: 6),
+                              IconButton(
+                                tooltip: 'نسخ معرّف الجهاز',
+                                onPressed: () =>
+                                    copyDeviceId(context, '${w['device_id']}'),
+                                icon: const Icon(Icons.copy_rounded, size: 18),
+                              ),
+                              IconButton(
+                                tooltip: 'شحن 5 عملات',
+                                onPressed: () async {
+                                  await widget.api.grantWallet(
+                                      '${w['device_id']}', 5, 0);
+                                  _load();
+                                },
+                                icon: const Icon(Icons.add, size: 18),
                               ),
                             ]),
                           ),

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- خلفية الأيقونة التكيّفية: نفس تدرّج الرسم كي لا يظهر إطار مختلف
+         عن الشكل القديم على أندرويد 8+. -->
+    <color name="ic_launcher_background">#141A29</color>
+</resources>

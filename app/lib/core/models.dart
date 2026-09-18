@@ -113,14 +113,13 @@ class Announcement {
 
 class XSettings {
   XSettings({
-    this.guestFileQuota = 5,
+    this.dailyFreeQuota = 5,
     this.minVersion = 1,
     this.blockedVersions = const [],
     this.telegramLink = '',
     this.schematicsLocked = false,
     this.compatLocked = false,
     this.compatSearchCost = 1,
-    this.guestCompatQuota = 3,
     this.appLocked = false,
     this.lockMessage = '',
     this.updateMessage = '',
@@ -128,18 +127,17 @@ class XSettings {
     this.updateImageUrl = '',
     List<XPackage>? packages,
   }) : packages = packages ?? [];
-  int guestFileQuota;
+  /// المنحة اليومية الواحدة — تُخصم منها المخططات والتوافقات معاً،
+  /// ولكل الأدوار (زائر ومسجّل ومشترك).
+  int dailyFreeQuota;
   int minVersion;
   List<int> blockedVersions;
   String telegramLink;
   bool schematicsLocked;
   bool compatLocked;
 
-  /// ثمن البحث الواحد في التوافقات بالمكوّنات — 0 يعني مجاني.
+  /// ثمن دخول الشركة في التوافقات بالعملات.
   int compatSearchCost;
-
-  /// عدد بحوث التوافقات المجانية للزائر يومياً — عدّاد مستقل عن ملفات المخططات.
-  int guestCompatQuota;
   bool appLocked;
   String lockMessage;
   String updateMessage;
@@ -148,7 +146,12 @@ class XSettings {
   List<XPackage> packages;
 
   factory XSettings.fromJson(Map<String, dynamic> j) => XSettings(
-        guestFileQuota: (j['guestFileQuota'] as num?)?.toInt() ?? 5,
+        // الخادم الجديد يرسل dailyFreeQuota؛ والقديم يرسل الحقلين المنفصلين
+        // فأخذ الأكبر يحفظ ما اعتاده المالك.
+        dailyFreeQuota: (j['dailyFreeQuota'] as num?)?.toInt() ??
+            [j['guestFileQuota'], j['guestCompatQuota']]
+                .whereType<num>()
+                .fold<int>(5, (a, b) => b.toInt() > a ? b.toInt() : a),
         minVersion: (j['minVersion'] as num?)?.toInt() ?? 1,
         blockedVersions:
             ((j['blockedVersions'] as List?) ?? []).map((e) => (e as num).toInt()).toList(),
@@ -156,7 +159,6 @@ class XSettings {
         schematicsLocked: j['schematicsLocked'] == true,
         compatLocked: j['compatLocked'] == true,
         compatSearchCost: (j['compatSearchCost'] as num?)?.toInt() ?? 1,
-        guestCompatQuota: (j['guestCompatQuota'] as num?)?.toInt() ?? 3,
         appLocked: j['appLocked'] == true,
         lockMessage: j['lockMessage']?.toString() ?? '',
         updateMessage: j['updateMessage']?.toString() ?? '',
@@ -174,14 +176,13 @@ class XSettings {
       );
 
   Map<String, dynamic> toJson() => {
-        'guestFileQuota': guestFileQuota,
+        'dailyFreeQuota': dailyFreeQuota,
         'minVersion': minVersion,
         'blockedVersions': blockedVersions,
         'telegramLink': telegramLink,
         'schematicsLocked': schematicsLocked,
         'compatLocked': compatLocked,
         'compatSearchCost': compatSearchCost,
-        'guestCompatQuota': guestCompatQuota,
         'appLocked': appLocked,
         'lockMessage': lockMessage,
         'updateMessage': updateMessage,
@@ -207,13 +208,35 @@ class XPackage {
   String desc;
 }
 
-/// نتيجة بحث توافقات: السجلات + الأنواع المتوفرة + حالة الخصم.
+/// نتيجة دخول شركة في التوافقات — الخصم يقع هنا مرة واحدة في اليوم.
+class CompatOpenResult {
+  const CompatOpenResult({
+    this.charged = false,
+    this.remaining = -1,
+    this.balance = -1,
+    this.source = '',
+  });
+
+  final bool charged;
+
+  /// ما تبقّى من المنحة اليومية، أو -1 إذا غير معروف.
+  final int remaining;
+
+  /// رصيد العملات المتبقي، أو -1 إذا غير معروف.
+  final int balance;
+
+  /// من أين خُصم: free (المنحة اليومية) أو coins (العملات) أو غير ذلك.
+  final String source;
+}
+
 class CompatSearchResult {
   const CompatSearchResult({
     required this.records,
     required this.types,
     this.charged = false,
     this.remaining = -1,
+    this.balance = -1,
+    this.source = '',
   });
 
   final List<dynamic> records;
@@ -222,6 +245,12 @@ class CompatSearchResult {
   final List<String> types;
   final bool charged;
 
-  /// ما تبقّى من البطاقات، أو -1 إذا كان غير محدود/غير معروف.
+  /// ما تبقّى من الحصة المجانية اليومية، أو -1 إذا لا حصة/غير معروف.
   final int remaining;
+
+  /// رصيد العملات المتبقي، أو -1 إذا لا رصيد/غير معروف.
+  final int balance;
+
+  /// من أين خُصم: free (الحصة المجانية) أو coins (العملات) أو غير ذلك.
+  final String source;
 }

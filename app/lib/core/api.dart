@@ -4,7 +4,6 @@ import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart' as cg;
 import 'package:http/http.dart' as http;
 import 'config.dart';
-import 'app_config.dart';
 import 'models.dart';
 import 'store.dart';
 
@@ -35,12 +34,19 @@ class Api {
 
   Map<String, String> _sign(String method, String pathWithQuery) {
     final ts = DateTime.now().millisecondsSinceEpoch.toString();
-    final payload = '${store.deviceId}|$ts|$method|$pathWithQuery';
+    final dev = store.deviceId;
+    final fp = store.fingerprint;
+    // البصمة داخل التوقيع حين تتوفر: تُربط بالطلب فلا يستطيع أحد تبديلها
+    // للحصول على منحة يومية جديدة.
+    final payload = fp.isEmpty
+        ? '$dev|$ts|$method|$pathWithQuery'
+        : '$dev|$fp|$ts|$method|$pathWithQuery';
     final sig = Hmac(sha256, utf8.encode(SigKey.secret))
         .convert(utf8.encode(payload))
         .toString();
     return {
-      'x-device-id': store.deviceId,
+      'x-device-id': dev,
+      if (fp.isNotEmpty) 'x-device-fp': fp,
       'x-app-ts': ts,
       'x-app-sig': sig,
       'x-app-version': '$kAppVersion',
@@ -59,24 +65,24 @@ class Api {
   }
 
   Future<Map<String, dynamic>> get(String path,
-      {Map<String, String>? query}) async {
+      {Map<String, String>? query, Duration? timeout}) async {
     final uri = _uri(path, query);
     final pq = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
     final res = await http
         .get(uri, headers: _sign('GET', pq))
-        .timeout(const Duration(seconds: 30));
+        .timeout(timeout ?? const Duration(seconds: 30));
     return _decode(res);
   }
 
   Future<Map<String, dynamic>> post(String path, Map<String, dynamic> body,
-      {Map<String, String>? query}) async {
+      {Map<String, String>? query, Duration? timeout}) async {
     final uri = _uri(path, query);
     final pq = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
     final res = await http
         .post(uri,
             headers: {..._sign('POST', pq), 'Content-Type': 'application/json'},
             body: jsonEncode(body))
-        .timeout(const Duration(seconds: 30));
+        .timeout(timeout ?? const Duration(seconds: 30));
     return _decode(res);
   }
 
@@ -151,14 +157,20 @@ class Api {
 
   // ===== واجهات جاهزة =====
 
-  Future<Map<String, dynamic>> bootstrap() => get('/v1/bootstrap');
+  /// مهلة الإقلاع قصيرة عمداً: أول تشغيل على شبكة ضعيفة يجب أن يُظهر زر
+  /// إعادة المحاولة بسرعة بدل تدوير 30 ثانية × 5 محاولات.
+  static const _bootTimeout = Duration(seconds: 12);
+
+  Future<Map<String, dynamic>> bootstrap() =>
+      get('/v1/bootstrap', timeout: _bootTimeout);
 
   Future<void> registerInstall() => post('/v1/install', {
         'installId': store.deviceId,
         'appVersion': '$kAppVersion',
-      });
+      }, timeout: _bootTimeout);
 
-  Future<Map<String, dynamic>> guest() => post('/v1/auth/guest', {});
+  Future<Map<String, dynamic>> guest() =>
+      post('/v1/auth/guest', {}, timeout: _bootTimeout);
 
   Future<Map<String, dynamic>> login(String username, String password) =>
       post('/v1/auth/login', {'username': username, 'password': password});
@@ -177,57 +189,37 @@ class Api {
   Future<List<dynamic>> compatBrands() async =>
       (await get('/v1/data/brands'))['brands'] as List;
 
+  /// دخول شركة: هنا يقع الخصم الوحيد (مرة لكل شركة في اليوم).
+  /// يُستدعى عند فتح شاشة الشركة، فيرى المستخدم رصيده قبل أن يكتب أي حرف.
+  Future<CompatOpenResult> openCompat(String? brand) async {
+    final j = await post('/v1/data/compat/open',
+        {'brand': brand ?? ''}, timeout: const Duration(seconds: 20));
+    return CompatOpenResult(
+      charged: j['charged'] == true,
+      remaining: (j['remaining'] as num?)?.toInt() ?? -1,
+      balance: (j['balance'] as num?)?.toInt() ?? -1,
+      source: '${j['source'] ?? ''}',
+    );
+  }
+
   /// بحث التوافقات — يتم على الخادم داخل نطاق الشركة والنوع.
   /// لا نجلب ملف الشركة كاملاً بعد الآن: كان ذلك ~65KB و0.9 ثانية لكل دخول،
   /// وهو ما كان يسبب إحساس «تحميل كل التوافقات»، وكان يسمح بسحب البيانات.
-  /// يُعيد السجلات + أنواع القطع المتوفرة + ما إذا خُصمت عملة.
+  /// ولا يخصم: الخصم وقع عند دخول الشركة (openCompat).
   Future<CompatSearchResult> searchCompatCharged(String q,
       {String? brand, String? type}) async {
     final body = <String, dynamic>{'q': q};
     if (brand != null && brand.isNotEmpty) body['brand'] = brand;
     if (type != null && type.isNotEmpty) body['type'] = type;
-    try {
-      // الخادم المحصّن: يفرض الحصة ويخصم بنفسه، فهو المرجع الأول دائماً.
-      final j = await post('/v1/data/compat/search', body);
-      return CompatSearchResult(
-        records: (j['records'] as List?) ?? const [],
-        types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
-        charged: j['charged'] == true,
-        remaining: (j['remaining'] as num?)?.toInt() ?? -1,
-      );
-    } on ApiException catch (e) {
-      // 404 يعني أن الخادم المنشور لم يُحدَّث بعد. نخدم التوافقات من المسار
-      // القديم مع فرض الحصة على الجهاز، فلا تتعطّل الخدمة ولا تُترك مفتوحة.
-      if (!e.serverOutdated) rethrow;
-      return _compatViaLegacy(q, brand: brand, type: type);
-    }
-  }
-
-  /// مسار مؤقت للخوادم التي لم تُحدَّث: يقرأ من المسار القديم ثم يفرض حصة
-  /// الزائر محلياً. لا يحمي من إعادة تثبيت التطبيق — الحماية الكاملة تأتي
-  /// بنشر الخادم. غايته ألا يتوقف التطبيق ولا يبقى بلا أي حد.
-  Future<CompatSearchResult> _compatViaLegacy(String q,
-      {String? brand, String? type}) async {
-    if (store.isGuest) {
-      final limit = AppConfig.instance.guestCompatQuota;
-      if (limit <= 0 || store.compatUsedToday() >= limit) {
-        throw ApiException(429, 'انتهت بحوثك المجانية اليوم — تواصل مع المالك');
-      }
-    }
-    final params = <String, String>{'q': q};
-    if (brand != null && brand.isNotEmpty) params['brand'] = brand;
-    if (type != null && type.isNotEmpty) params['type'] = type;
-    final j = await get('/v1/data/compatibility', query: params);
-    final records = (j['records'] as List?) ?? const [];
-    if (store.isGuest) {
-      final left = await store.recordCompatSearch(
-          AppConfig.instance.guestCompatQuota);
-      return CompatSearchResult(
-          records: records, types: const [], charged: true, remaining: left);
-    }
-    // المشترك: الخادم القديم لا يخصم، فلا ندّعي خصماً لم يحدث.
+    final j = await post('/v1/data/compat/search', body);
     return CompatSearchResult(
-        records: records, types: const [], charged: false, remaining: -1);
+      records: (j['records'] as List?) ?? const [],
+      types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
+      charged: j['charged'] == true,
+      remaining: (j['remaining'] as num?)?.toInt() ?? -1,
+      balance: (j['balance'] as num?)?.toInt() ?? -1,
+      source: '${j['source'] ?? ''}',
+    );
   }
 
   Future<List<dynamic>> searchCompat(String q,
@@ -283,6 +275,16 @@ class Api {
   /// شحن بطاقات مخططات لمستخدم — يضيف للرصيد ويحدد الصلاحية
   Future<void> grantQuota(String id, int cards, int days) =>
       post('/v1/owner/users/$id/quota', {'cards': cards, 'days': days});
+
+  /// محافظ الزوار: عملات لزائر بلا حساب، مفتاحها معرّف الجهاز.
+  Future<List<dynamic>> ownerWallets() async =>
+      (await get('/v1/owner/wallets'))['wallets'] as List;
+  Future<void> grantWallet(String deviceId, int coins, int days) =>
+      post('/v1/owner/wallets', {
+        'deviceId': deviceId,
+        'coins': coins,
+        'days': days,
+      });
   Future<List<dynamic>> ownerBans() async =>
       (await get('/v1/owner/bans'))['bans'] as List;
   Future<void> banDevice(String deviceId, String reason) =>

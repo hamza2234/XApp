@@ -15,33 +15,30 @@ class AppConfig extends ChangeNotifier {
 
   static const _kTelegram = 'cfg_telegram';
   static const _kPackages = 'cfg_packages';
-  static const _kQuota = 'cfg_guest_quota';
-  static const _kCompatQuota = 'cfg_guest_compat_quota';
+  static const _kDailyFree = 'cfg_daily_free';
 
   // لا رابط مثبت في الكود: الوجهة يحددها المالك من لوحته فقط. رابط مثبت
   // سابقاً كان يوجّه المستخدمين لحساب آخر عند تعطّل الشبكة أو نسيان الضبط.
   String _telegram = '';
   List<dynamic> _packages = const [];
-  int _guestQuota = 5;
-  int _guestCompatQuota = 3;
+  int _dailyFree = 5;
   bool _loadedFromCache = false;
 
   /// رابط تواصل المالك. فارغ يعني أن المالك لم يضبطه بعد.
   String get telegram => _telegram;
   bool get hasTelegram => _telegram.isNotEmpty;
   List<dynamic> get packages => _packages;
-  int get guestQuota => _guestQuota;
 
-  /// حصة الزائر المجانية لبحوث التوافقات — عدّاد مستقل عن ملفات المخططات.
-  int get guestCompatQuota => _guestCompatQuota;
+  /// المنحة اليومية الواحدة — تُطبَّق على المخططات والتوافقات معاً، ولكل
+  /// الأدوار (زائر ومسجّل ومشترك). لا عدّاد ثانٍ ولا عملة ثانية.
+  int get dailyFreeQuota => _dailyFree;
   bool get loadedFromCache => _loadedFromCache;
 
   /// يُحمّل من الذاكرة المحلية — يعمل بلا شبكة ويسد فجوة أول تشغيل.
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     _telegram = p.getString(_kTelegram) ?? '';
-    _guestQuota = p.getInt(_kQuota) ?? 5;
-    _guestCompatQuota = p.getInt(_kCompatQuota) ?? 3;
+    _dailyFree = p.getInt(_kDailyFree) ?? 5;
     final raw = p.getString(_kPackages);
     if (raw != null) {
       try {
@@ -61,50 +58,45 @@ class AppConfig extends ChangeNotifier {
     if (s is! Map) return;
     final tg = (s['telegramLink'] ?? '').toString().trim();
     final pk = s['packages'] is List ? s['packages'] as List : _packages;
-    final quota = (s['guestFileQuota'] as num?)?.toInt() ?? _guestQuota;
-    final compatQuota =
-        (s['guestCompatQuota'] as num?)?.toInt() ?? _guestCompatQuota;
-    await _apply(
-        tg: tg,
-        packages: pk,
-        guestQuota: quota,
-        guestCompatQuota: compatQuota);
+    // الخادم الجديد يرسل dailyFreeQuota؛ والقديم يرسل الحقلين المنفصلين
+    // فأخذ الأكبر يحفظ ما اعتاده المالك حتى بعد التحديث.
+    final legacy = [
+      (s['guestFileQuota'] as num?)?.toInt(),
+      (s['guestCompatQuota'] as num?)?.toInt(),
+    ].whereType<int>();
+    final quota = (s['dailyFreeQuota'] as num?)?.toInt() ??
+        (legacy.isEmpty ? _dailyFree : legacy.reduce((a, b) => a > b ? a : b));
+    await _apply(tg: tg, packages: pk, dailyFree: quota);
   }
 
   /// بعد حفظ المالك للإعدادات، يُحدَّث فوراً بلا انتظار دورة تحديث.
   Future<void> applyOwnerSettings({
     String? telegram,
     List<dynamic>? packages,
-    int? guestQuota,
-    int? guestCompatQuota,
+    int? dailyFree,
   }) =>
       _apply(
           tg: telegram ?? _telegram,
           packages: packages ?? _packages,
-          guestQuota: guestQuota ?? _guestQuota,
-          guestCompatQuota: guestCompatQuota ?? _guestCompatQuota);
+          dailyFree: dailyFree ?? _dailyFree);
 
   Future<void> _apply({
     required String tg,
     required List<dynamic> packages,
-    required int guestQuota,
-    required int guestCompatQuota,
+    required int dailyFree,
   }) async {
     // رابط فارغ من الخادم لا يمحو رابطاً صالحاً محفوظاً.
     final nextTg = tg.trim().isEmpty ? _telegram : tg.trim();
     final changed = nextTg != _telegram ||
         !listEquals(_pkgKeys(packages), _pkgKeys(_packages)) ||
-        guestQuota != _guestQuota ||
-        guestCompatQuota != _guestCompatQuota;
+        dailyFree != _dailyFree;
     _telegram = nextTg;
     _packages = packages;
-    _guestQuota = guestQuota;
-    _guestCompatQuota = guestCompatQuota;
+    _dailyFree = dailyFree;
 
     final p = await SharedPreferences.getInstance();
     await p.setString(_kTelegram, _telegram);
-    await p.setInt(_kQuota, _guestQuota);
-    await p.setInt(_kCompatQuota, _guestCompatQuota);
+    await p.setInt(_kDailyFree, _dailyFree);
     await p.setString(_kPackages, jsonEncode(_packages));
 
     if (changed) notifyListeners();

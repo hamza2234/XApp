@@ -1,23 +1,50 @@
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 /// تخزين محلي آمن للجلسة والجهاز.
 /// التوكن والهوية لا تغادران الجهاز إلا عبر الطلبات الموقّعة.
 class Store {
-  Store._(this._p);
+  Store._(this._p, this._fingerprint);
   final SharedPreferences _p;
 
-  static Future<Store> init() async =>
-      Store._(await SharedPreferences.getInstance());
+  static const _channel = MethodChannel('x_app/device');
+
+  /// بصمة الجهاز الأصلية (ANDROID_ID) — تُقرأ من النظام لا من بيانات التطبيق.
+  final String? _fingerprint;
+
+  static Future<Store> init() async {
+    final p = await SharedPreferences.getInstance();
+    return Store._(p, await _readFingerprint());
+  }
+
+  static Future<String?> _readFingerprint() async {
+    try {
+      final fp = await _channel.invokeMethod<String>('fingerprint');
+      final v = (fp ?? '').trim().toLowerCase();
+      return RegExp(r'^[0-9a-f]{16,64}$').hasMatch(v) ? v : null;
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      // اختبارات Dart بلا قناة أصلية — الحصص تُفرض على الخادم في كل حال.
+      return null;
+    }
+  }
 
   static const _kDevice = 'x_device_id';
   static const _kToken = 'x_token';
   static const _kUser = 'x_user';
   static const _kInstallSent = 'x_install_sent';
 
-  /// هوية الجهاز — تُولَّد مرة واحدة وتبقى ثابتة (تُستخدم للتوقيع والحصص).
+  /// بصمة الجهاز للتوقيع وربط المنحة — فارغة إن لم تتوفر.
+  String get fingerprint => _fingerprint ?? '';
+
+  /// هوية الجهاز: البصمة الأصلية أولاً كي تبقى بعد مسح البيانات، وإلا
+  /// المعرّف المخزَّن (نسخ/أجهزة بلا بصمة) ثم معرّف جديد يُولَّد مرة واحدة.
   String get deviceId {
+    final fp = _fingerprint;
+    if (fp != null) return fp;
     var id = _p.getString(_kDevice);
     if (id == null) {
       id = const Uuid().v4().replaceAll('-', '').substring(0, 24);

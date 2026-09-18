@@ -57,13 +57,13 @@ class CompatBrandScreen extends StatefulWidget {
 }
 
 class _CompatBrandScreenState extends State<CompatBrandScreen> {
-  /// مهلة قبل إرسال الطلب بعد آخر ضغطة مفتاح. كل طلب جديد يُخصم من
-  /// بطاقات المشترك، فالمهلة القصيرة كانت تكلّف بطاقة لكل وقفة قصيرة أثناء
-  /// الكتابة. 600ms يجعل كتابة الموديل المتصلة طلباً واحداً — وإعادة البحث
-  /// نفسه مجانية داخل نافذة الخادم (15 دقيقة).
+  /// مهلة قبل إرسال الطلب بعد آخر ضغطة مفتاح.
+  ///
+  /// لا تخصم شيئاً الآن: الخصم وقع عند فتح الشركة. بقاؤها لأن كل ضغطة مفتاح
+  /// طلب شبكة، وتجميع الكتابة المتصلة في طلب واحد أرحم على الإنترنت الضعيف.
   static const _debounce = Duration(milliseconds: 600);
 
-  /// أقل طول استعلام: حرف واحد يطابق كل شيء تقريباً فيُخصم بلا فائدة.
+  /// أقل طول استعلام: حرف واحد يطابق كل شيء تقريباً بلا فائدة.
   static const _minQuery = 2;
 
   final _q = TextEditingController();
@@ -81,7 +81,41 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   bool _quotaEmpty = false;
   List<CompatRecord> _records = const [];
   int _remaining = -1;
+  int _balance = -1;
+  String _source = '';
   bool _searched = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // الدخول يخصم هنا — قبل أن يكتب المستخدم أي حرف، فيرى رصيده أولاً.
+    _open();
+  }
+
+  Future<void> _open() async {
+    try {
+      final r = await widget.api.openCompat(widget.brand.ref);
+      if (!mounted) return;
+      setState(() {
+        _charged = r.charged;
+        _remaining = r.remaining;
+        _balance = r.balance;
+        _source = r.source;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        // 402/429 = نفد الرصيد، ويُعرض كحالة حصة لا كخطأ شبكة.
+        _quotaEmpty = e.quotaExhausted;
+        _locked = e.forbidden;
+        _error = e.quotaExhausted ? null : e.message;
+      });
+      if (e.quotaExhausted) await showSubscribeDialog(context);
+    } catch (_) {
+      // تعذّر الدخول: نترك البحث يعمل ويخصم الخادم بنفسه عند أول نص، فلا
+      // يُمنع المستخدم من شاشة قد تعمل.
+    }
+  }
 
   @override
   void dispose() {
@@ -136,6 +170,8 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _searched = true;
         _charged = r.charged;
         _remaining = r.remaining;
+        _balance = r.balance;
+        _source = r.source;
         _records = r.records.map((e) => CompatRecord.fromJson(e)).toList();
       });
     } on ApiException catch (e) {
@@ -254,33 +290,42 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     );
   }
 
-  /// شريحة الرصيد: تظهر فقط بعد خصم فعلي حتى يعرف المستخدم ثمن بحثه.
-  /// الزائر له حصة يومية مجانية لا بطاقات، فالصياغة تختلف كي لا تُوهمه بأنه
-  /// اشترى شيئاً أو بأن رصيده انتهى دائماً.
+  /// شريط الرصيد: عدّاد واحد = منحة اليوم + العملات، مطابق لما في الشريط
+  /// العلوي. كان يعرض عدّادين منفصلين فيظهر رقمان متضاربان لنفس المستخدم.
   Widget _quotaChip() {
-    final guest = widget.store?.isGuest ?? false;
-    final ok = _remaining > 0;
-    final left = guest
-        ? (ok ? 'بحوثك المجانية اليوم: $_remaining' : 'آخر بحث مجاني اليوم')
-        : (ok ? 'البطاقات المتبقية: $_remaining' : 'آخر بطاقاتك');
-    final spent = guest ? 'خُصم بحث من حصتك' : 'خُصمت بطاقة لهذا البحث';
+    final total = _remaining < 0 ? _balance : _remaining + (_balance < 0 ? 0 : _balance);
+    final ok = total > 0;
+    final parts = <String>[
+      if (_remaining >= 0) 'مجاني $_remaining',
+      if (_balance >= 0) 'عملات $_balance',
+    ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
       child: Row(children: [
-        Icon(guest ? Icons.hourglass_bottom : Icons.monetization_on_outlined,
+        Icon(Icons.account_balance_wallet_outlined,
             size: 15, color: ok ? XTheme.gold : XTheme.danger),
         const SizedBox(width: 6),
-        Text(left,
+        Text(ok ? 'المتبقي: $total' : 'لا يوجد رصيد متبقٍ',
             style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w700,
                 color: ok ? XTheme.gold : XTheme.danger)),
-        if (_charged) ...[
+        if (parts.isNotEmpty) ...[
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(parts.join(' + '),
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: XTheme.textDim)),
+          ),
+        ] else
           const Spacer(),
-          Text(spent,
+        if (_charged)
+          Text(
+              _source == 'coins'
+                  ? 'خُصمت عملة عند دخول الشركة'
+                  : 'خُصم من منحة اليوم عند الدخول',
               style:
                   TextStyle(fontSize: 11, color: XTheme.textDim.withOpacity(.8))),
-        ],
       ]),
     );
   }
