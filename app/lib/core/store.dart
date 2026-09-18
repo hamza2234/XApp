@@ -45,6 +45,36 @@ class Store {
   bool get isOwner => user?['role'] == 'owner';
   bool get hasSession => token != null;
 
+  static const _kCompatDay = 'x_compat_day';
+  static const _kCompatUsed = 'x_compat_used';
+
+  /// عدّاد بحوث التوافقات المجانية لليوم الحالي.
+  ///
+  /// هذا فرض على الجهاز، لا على الخادم. وجوده لأن الخادم المنشور لا يفرض
+  /// حصة التوافقات إطلاقاً، فبدونه يستطيع الزائر سحب كل التوافقات مجاناً.
+  /// حين يُنشر الخادم المحصّن يتقدّم فرضه على هذا تلقائياً، لأن كل رد يحمل
+  /// `remaining` الحقيقي. فائدتان هنا: منع السحب المجاني فوراً، ومنع إغراق
+  /// الشبكة بطلبات مرفوضة.
+  int compatUsedToday() {
+    if (_p.getString(_kCompatDay) != _today()) return 0;
+    return _p.getInt(_kCompatUsed) ?? 0;
+  }
+
+  /// يسجّل بحثاً استُهلك من حصة اليوم. يُعيد عدد ما تبقّى.
+  Future<int> recordCompatSearch(int limit) async {
+    final used = compatUsedToday() + 1;
+    await _p.setString(_kCompatDay, _today());
+    await _p.setInt(_kCompatUsed, used);
+    final left = limit - used;
+    return left < 0 ? 0 : left;
+  }
+
+  static String _today() {
+    final n = DateTime.now();
+    return '${n.year}-${n.month.toString().padLeft(2, '0')}-'
+        '${n.day.toString().padLeft(2, '0')}';
+  }
+
   Future<void> clearSession() async {
     await _p.remove(_kToken);
     await _p.remove(_kUser);

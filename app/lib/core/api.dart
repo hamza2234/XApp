@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart' as cg;
 import 'package:http/http.dart' as http;
 import 'config.dart';
+import 'app_config.dart';
 import 'models.dart';
 import 'store.dart';
 
@@ -185,15 +186,48 @@ class Api {
     final body = <String, dynamic>{'q': q};
     if (brand != null && brand.isNotEmpty) body['brand'] = brand;
     if (type != null && type.isNotEmpty) body['type'] = type;
-    // بلا مسار تراجع إلى القراءة العامة: كان يمنح كل السجلات بلا خصم
-    // عند أي 404، فيُبطل نظام العملات كله.
-    final j = await post('/v1/data/compat/search', body);
+    try {
+      // الخادم المحصّن: يفرض الحصة ويخصم بنفسه، فهو المرجع الأول دائماً.
+      final j = await post('/v1/data/compat/search', body);
+      return CompatSearchResult(
+        records: (j['records'] as List?) ?? const [],
+        types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
+        charged: j['charged'] == true,
+        remaining: (j['remaining'] as num?)?.toInt() ?? -1,
+      );
+    } on ApiException catch (e) {
+      // 404 يعني أن الخادم المنشور لم يُحدَّث بعد. نخدم التوافقات من المسار
+      // القديم مع فرض الحصة على الجهاز، فلا تتعطّل الخدمة ولا تُترك مفتوحة.
+      if (!e.serverOutdated) rethrow;
+      return _compatViaLegacy(q, brand: brand, type: type);
+    }
+  }
+
+  /// مسار مؤقت للخوادم التي لم تُحدَّث: يقرأ من المسار القديم ثم يفرض حصة
+  /// الزائر محلياً. لا يحمي من إعادة تثبيت التطبيق — الحماية الكاملة تأتي
+  /// بنشر الخادم. غايته ألا يتوقف التطبيق ولا يبقى بلا أي حد.
+  Future<CompatSearchResult> _compatViaLegacy(String q,
+      {String? brand, String? type}) async {
+    if (store.isGuest) {
+      final limit = AppConfig.instance.guestCompatQuota;
+      if (limit <= 0 || store.compatUsedToday() >= limit) {
+        throw ApiException(429, 'انتهت بحوثك المجانية اليوم — تواصل مع المالك');
+      }
+    }
+    final params = <String, String>{'q': q};
+    if (brand != null && brand.isNotEmpty) params['brand'] = brand;
+    if (type != null && type.isNotEmpty) params['type'] = type;
+    final j = await get('/v1/data/compatibility', query: params);
+    final records = (j['records'] as List?) ?? const [];
+    if (store.isGuest) {
+      final left = await store.recordCompatSearch(
+          AppConfig.instance.guestCompatQuota);
+      return CompatSearchResult(
+          records: records, types: const [], charged: true, remaining: left);
+    }
+    // المشترك: الخادم القديم لا يخصم، فلا ندّعي خصماً لم يحدث.
     return CompatSearchResult(
-      records: (j['records'] as List?) ?? const [],
-      types: ((j['types'] as List?) ?? const []).map((e) => '$e').toList(),
-      charged: j['charged'] == true,
-      remaining: (j['remaining'] as num?)?.toInt() ?? -1,
-    );
+        records: records, types: const [], charged: false, remaining: -1);
   }
 
   Future<List<dynamic>> searchCompat(String q,
