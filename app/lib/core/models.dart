@@ -126,7 +126,20 @@ class XSettings {
     this.updateUrl = '',
     this.updateImageUrl = '',
     List<XPackage>? packages,
-  }) : packages = packages ?? [];
+    this.chatEnabled = true,
+    this.chatReadOnly = false,
+    this.chatTheme = 'bubble',
+    this.chatWelcome = '',
+    this.chatMaxLength = 1000,
+    this.chatImagesEnabled = true,
+    this.chatWriteScope = 'registered',
+    this.chatMediaScope = 'subscribers',
+    this.chatMaxMediaMb = 12,
+    this.chatMediaSeconds = 120,
+    this.chatPollMs = 4000,
+    List<ChatRoom>? chatRooms,
+  })  : packages = packages ?? [],
+        chatRooms = chatRooms ?? [];
   /// المنحة اليومية الواحدة — تُخصم منها المخططات والتوافقات معاً،
   /// ولكل الأدوار (زائر ومسجّل ومشترك).
   int dailyFreeQuota;
@@ -144,6 +157,24 @@ class XSettings {
   String updateUrl;
   String updateImageUrl;
   List<XPackage> packages;
+
+  /// إعدادات الدردشة — يحرّرها المالك من تبويب الدردشة في اللوحة.
+  bool chatEnabled;
+  bool chatReadOnly;
+  String chatTheme;
+  String chatWelcome;
+  int chatMaxLength;
+  bool chatImagesEnabled;
+
+  /// all | registered | subscribers
+  String chatWriteScope;
+
+  /// subscribers | none
+  String chatMediaScope;
+  int chatMaxMediaMb;
+  int chatMediaSeconds;
+  int chatPollMs;
+  List<ChatRoom> chatRooms;
 
   factory XSettings.fromJson(Map<String, dynamic> j) => XSettings(
         // الخادم الجديد يرسل dailyFreeQuota؛ والقديم يرسل الحقلين المنفصلين
@@ -173,6 +204,21 @@ class XSettings {
                   desc: p['desc']?.toString() ?? '',
                 ))
             .toList(),
+        chatEnabled: j['chatEnabled'] != false,
+        chatReadOnly: j['chatReadOnly'] == true,
+        chatTheme: j['chatTheme']?.toString() ?? 'bubble',
+        chatWelcome: j['chatWelcome']?.toString() ?? '',
+        chatMaxLength: (j['chatMaxLength'] as num?)?.toInt() ?? 1000,
+        chatImagesEnabled: j['chatImagesEnabled'] != false,
+        chatWriteScope: j['chatWriteScope']?.toString() ?? 'registered',
+        chatMediaScope: j['chatMediaScope']?.toString() ?? 'subscribers',
+        chatMaxMediaMb: (j['chatMaxMediaMb'] as num?)?.toInt() ?? 12,
+        chatMediaSeconds: (j['chatMediaSeconds'] as num?)?.toInt() ?? 120,
+        chatPollMs: (j['chatPollMs'] as num?)?.toInt() ?? 4000,
+        chatRooms: ((j['chatRooms'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => ChatRoom.fromJson(e.cast<String, dynamic>()))
+            .toList(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -195,6 +241,20 @@ class XSettings {
                   'days': p.days,
                   'desc': p.desc,
                 })
+            .toList(),
+        'chatEnabled': chatEnabled,
+        'chatReadOnly': chatReadOnly,
+        'chatTheme': chatTheme,
+        'chatWelcome': chatWelcome,
+        'chatMaxLength': chatMaxLength,
+        'chatImagesEnabled': chatImagesEnabled,
+        'chatWriteScope': chatWriteScope,
+        'chatMediaScope': chatMediaScope,
+        'chatMaxMediaMb': chatMaxMediaMb,
+        'chatMediaSeconds': chatMediaSeconds,
+        'chatPollMs': chatPollMs,
+        'chatRooms': chatRooms
+            .map((r) => {'id': r.id, 'name': r.name, 'icon': r.icon})
             .toList(),
       };
 }
@@ -253,4 +313,258 @@ class CompatSearchResult {
 
   /// من أين خُصم: free (الحصة المجانية) أو coins (العملات) أو غير ذلك.
   final String source;
+}
+
+// ══════════════════════════ الدردشة ══════════════════════════
+
+/// قسم دردشة — معرّف واسم وأيقونة، يعدّلها المالك من لوحته.
+class ChatRoom {
+  const ChatRoom({required this.id, required this.name, required this.icon});
+  final String id;
+  final String name;
+  final String icon;
+
+  factory ChatRoom.fromJson(Map<String, dynamic> j) => ChatRoom(
+        id: j['id']?.toString() ?? '',
+        name: j['name']?.toString() ?? '',
+        icon: j['icon']?.toString() ?? 'chat',
+      );
+}
+
+/// كاتب الرسالة: كنية وصورة شخصية من ملف الدردشة.
+class ChatAuthor {
+  const ChatAuthor({this.id = '', this.nickname = '', this.avatarUrl = ''});
+  final String id;
+  final String nickname;
+  final String avatarUrl;
+
+  /// الاسم المعروض: الكنية إن وُجدت، وإلا «عضو».
+  String get label => nickname.trim().isEmpty ? 'عضو' : nickname.trim();
+
+  factory ChatAuthor.fromJson(Map<String, dynamic> j) => ChatAuthor(
+        id: j['id']?.toString() ?? '',
+        nickname: j['nickname']?.toString() ?? '',
+        avatarUrl: j['avatarUrl']?.toString() ?? '',
+      );
+}
+
+/// رسالة دردشة: نص أو صورة أو صوت أو فيديو، مع من رآها.
+class ChatMessage {
+  const ChatMessage({
+    required this.id,
+    required this.roomId,
+    required this.kind,
+    required this.body,
+    required this.mediaUrl,
+    required this.mediaMime,
+    required this.mediaSize,
+    required this.at,
+    required this.mine,
+    required this.author,
+    this.seenBy = const [],
+    this.pending = false,
+    this.failed = false,
+  });
+
+  final String id;
+  final String roomId;
+
+  /// text | image | audio | video | system
+  final String kind;
+  final String body;
+  final String mediaUrl;
+  final String mediaMime;
+  final int mediaSize;
+  final int at;
+  final bool mine;
+  final ChatAuthor author;
+
+  /// من رأى الرسالة (حتى 8 صور مصغّرة).
+  final List<ChatAuthor> seenBy;
+
+  /// أُرسلت محلياً ولم يتأكد وصولها بعد — تُعرض باهتة.
+  final bool pending;
+  final bool failed;
+
+  bool get isText => kind == 'text' || kind == 'system';
+  bool get isImage => kind == 'image';
+  bool get isAudio => kind == 'audio';
+  bool get isVideo => kind == 'video';
+
+  DateTime get time => DateTime.fromMillisecondsSinceEpoch(at);
+
+  ChatMessage copyWith({
+    List<ChatAuthor>? seenBy,
+    bool? pending,
+    bool? failed,
+  }) =>
+      ChatMessage(
+        id: id,
+        roomId: roomId,
+        kind: kind,
+        body: body,
+        mediaUrl: mediaUrl,
+        mediaMime: mediaMime,
+        mediaSize: mediaSize,
+        at: at,
+        mine: mine,
+        author: author,
+        seenBy: seenBy ?? this.seenBy,
+        pending: pending ?? this.pending,
+        failed: failed ?? this.failed,
+      );
+
+  factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
+        id: j['id']?.toString() ?? '',
+        roomId: j['roomId']?.toString() ?? '',
+        kind: j['kind']?.toString() ?? 'text',
+        body: j['body']?.toString() ?? '',
+        mediaUrl: j['mediaUrl']?.toString() ?? '',
+        mediaMime: j['mediaMime']?.toString() ?? '',
+        mediaSize: (j['mediaSize'] as num?)?.toInt() ?? 0,
+        at: (j['at'] as num?)?.toInt() ?? 0,
+        mine: j['mine'] == true,
+        author: ChatAuthor.fromJson(
+            (j['author'] as Map?)?.cast<String, dynamic>() ?? const {}),
+        seenBy: ((j['seenBy'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => ChatAuthor.fromJson(e.cast<String, dynamic>()))
+            .toList(),
+      );
+}
+
+/// حالة الدردشة كما يراها المستخدم الحالي: الصلاحيات والأقسام والقيود.
+class ChatState {
+  const ChatState({
+    this.enabled = false,
+    this.readOnly = false,
+    this.theme = 'bubble',
+    this.welcome = '',
+    this.maxLength = 1000,
+    this.imagesEnabled = true,
+    this.writeScope = 'registered',
+    this.mediaScope = 'subscribers',
+    this.maxMediaMb = 12,
+    this.mediaSeconds = 120,
+    this.pollMs = 4000,
+    this.rooms = const [],
+    this.canWrite = false,
+    this.writeBlockedReason = '',
+    this.canSendMedia = false,
+    this.mediaBlockedReason = '',
+    this.isSubscriber = false,
+    this.myNickname = '',
+    this.myAvatarUrl = '',
+    this.notify = true,
+    this.role = 'guest',
+    this.muted = false,
+    this.kicked = false,
+    this.restrictionReason = '',
+  });
+
+  final bool enabled;
+  final bool readOnly;
+  final String theme;
+  final String welcome;
+  final int maxLength;
+  final bool imagesEnabled;
+  final String writeScope;
+  final String mediaScope;
+  final int maxMediaMb;
+  final int mediaSeconds;
+  final int pollMs;
+  final List<ChatRoom> rooms;
+  final bool canWrite;
+  final String writeBlockedReason;
+  final bool canSendMedia;
+  final String mediaBlockedReason;
+  final bool isSubscriber;
+  final String myNickname;
+  final String myAvatarUrl;
+  final bool notify;
+  final String role;
+  final bool muted;
+  final bool kicked;
+  final String restrictionReason;
+
+  factory ChatState.fromJson(Map<String, dynamic> j) {
+    final me = (j['me'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final rest =
+        (j['restriction'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return ChatState(
+      enabled: j['enabled'] == true,
+      readOnly: j['readOnly'] == true,
+      theme: j['theme']?.toString() ?? 'bubble',
+      welcome: j['welcome']?.toString() ?? '',
+      maxLength: (j['maxLength'] as num?)?.toInt() ?? 1000,
+      imagesEnabled: j['imagesEnabled'] != false,
+      writeScope: j['writeScope']?.toString() ?? 'registered',
+      mediaScope: j['mediaScope']?.toString() ?? 'subscribers',
+      maxMediaMb: (j['maxMediaMb'] as num?)?.toInt() ?? 12,
+      mediaSeconds: (j['mediaSeconds'] as num?)?.toInt() ?? 120,
+      pollMs: (j['pollMs'] as num?)?.toInt() ?? 4000,
+      rooms: ((j['rooms'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => ChatRoom.fromJson(e.cast<String, dynamic>()))
+          .toList(),
+      canWrite: j['canWrite'] == true,
+      writeBlockedReason: j['writeBlockedReason']?.toString() ?? '',
+      canSendMedia: j['canSendMedia'] == true,
+      mediaBlockedReason: j['mediaBlockedReason']?.toString() ?? '',
+      isSubscriber: j['isSubscriber'] == true,
+      myNickname: me['nickname']?.toString() ?? '',
+      myAvatarUrl: me['avatarUrl']?.toString() ?? '',
+      notify: me['notify'] != false,
+      role: me['role']?.toString() ?? 'guest',
+      muted: rest['muted'] == true,
+      kicked: rest['kicked'] == true,
+      restrictionReason: rest['reason']?.toString() ?? '',
+    );
+  }
+}
+
+/// صفحة رسائل من الخادم: الرسائل وهل توجد أقدم منها.
+class ChatPage {
+  const ChatPage({required this.messages, this.hasMore = false});
+  final List<ChatMessage> messages;
+  final bool hasMore;
+}
+
+/// إجراء إشراف على عضو: كتم أو طرد، وقد يكون مقيّداً بقسم واحد.
+class ChatAction {
+  const ChatAction({
+    required this.id,
+    required this.userId,
+    required this.kind,
+    required this.roomId,
+    required this.reason,
+    required this.until,
+    required this.active,
+    required this.username,
+  });
+
+  final String id;
+  final String userId;
+
+  /// mute | kick
+  final String kind;
+  final String roomId;
+  final String reason;
+  final int until;
+  final bool active;
+  final String username;
+
+  bool get isMute => kind == 'mute';
+  bool get isPermanent => until == 0;
+
+  factory ChatAction.fromJson(Map<String, dynamic> j) => ChatAction(
+        id: j['id']?.toString() ?? '',
+        userId: j['userId']?.toString() ?? '',
+        kind: j['kind']?.toString() ?? '',
+        roomId: j['roomId']?.toString() ?? '',
+        reason: j['reason']?.toString() ?? '',
+        until: (j['until'] as num?)?.toInt() ?? 0,
+        active: j['active'] == true,
+        username: j['username']?.toString() ?? '',
+      );
 }

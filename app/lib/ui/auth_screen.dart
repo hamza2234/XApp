@@ -4,6 +4,7 @@ import '../core/app_config.dart';
 import '../core/store.dart';
 import 'theme.dart';
 import 'external_link.dart';
+import 'privacy_sheet.dart';
 
 /// تسجيل الدخول / طلب حساب / متابعة كزائر
 /// إنشاء الحساب يتطلب تفعيل المالك — التواصل عبر تيليجرام.
@@ -19,6 +20,7 @@ class AuthScreen extends StatefulWidget {
 class _AuthScreenState extends State<AuthScreen> {
   bool _registerMode = false;
   bool _busy = false;
+  bool _agreed = false;
   String? _msg;
   bool _msgOk = false;
 
@@ -50,6 +52,12 @@ class _AuthScreenState extends State<AuthScreen> {
   Future<void> _doRegister() async {
     if (_user.text.trim().length < 3 || _pass.text.length < 6) {
       _set('اسم مستخدم (3+) وكلمة مرور (6+) مطلوبة');
+      return;
+    }
+    // الموافقة على السياسة شرط للتسجيل: التسجيل يحفظ بيانات مرتبطة بجهازك،
+    // ولا يصح بلا علمك. الدخول لحساب قائم لا يشترطها — الموافقة أُخذت سابقاً.
+    if (!_agreed) {
+      _set('يجب الموافقة على سياسة الخصوصية أولاً');
       return;
     }
     setState(() => _busy = true);
@@ -87,36 +95,40 @@ class _AuthScreenState extends State<AuthScreen> {
           child: Column(
             children: [
               const SizedBox(height: 30),
+              // الشعار بهالة متوهجة — أول ما تقع عليه العين
               Container(
-                width: 84, height: 84,
+                width: 88, height: 88,
                 decoration: BoxDecoration(
                     gradient: XTheme.gradient,
-                    borderRadius: BorderRadius.circular(26)),
+                    borderRadius: BorderRadius.circular(XTheme.rXl),
+                    boxShadow: XTheme.glow(XTheme.accent, strength: 1.2)),
                 child: const Center(
                     child: Text('MAPX',
                         style: TextStyle(
-                            fontSize: 20,
+                            fontSize: 21,
                             fontWeight: FontWeight.w900,
                             letterSpacing: .5,
                             color: Colors.white))),
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: 20),
               Text(_registerMode ? 'طلب حساب جديد' : 'تسجيل الدخول',
                   style: const TextStyle(
-                      fontSize: 24, fontWeight: FontWeight.w800)),
+                      fontSize: 24, fontWeight: FontWeight.w900)),
               const SizedBox(height: 6),
               Text(
                 _registerMode
                     ? 'الحساب يُفعَّل من المالك بعد الطلب'
                     : 'أدخل بياناتك للمتابعة بلا حدود',
-                style: TextStyle(color: XTheme.textDim),
+                style: TextStyle(color: XTheme.textDim, fontSize: 13.5),
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: 26),
               GlassCard(
+                padding: const EdgeInsets.all(18),
                 child: Column(
                   children: [
                     TextField(
                       controller: _user,
+                      textInputAction: TextInputAction.next,
                       decoration: const InputDecoration(
                           hintText: 'اسم المستخدم',
                           prefixIcon: Icon(Icons.person_outline)),
@@ -146,14 +158,48 @@ class _AuthScreenState extends State<AuthScreen> {
                             hintText: 'ملاحظة للمالك (اختياري)',
                             prefixIcon: Icon(Icons.note_alt_outlined)),
                       ),
+                      const SizedBox(height: 12),
                     ],
+                    // تظهر في الحالتين: إلزامية عند التسجيل، وللعلم عند الدخول.
+                    PrivacyConsentTile(
+                      accepted: _agreed,
+                      required: _registerMode,
+                      onChanged: (v) => setState(() => _agreed = v),
+                    ),
                     if (_msg != null) ...[
                       const SizedBox(height: 14),
-                      Text(_msg!,
-                          style: TextStyle(
-                              color: _msgOk ? XTheme.ok : XTheme.danger,
-                              fontSize: 13),
-                          textAlign: TextAlign.center),
+                      // رسالة داخل شريحة ملوّنة: الخطأ يُرى فوراً بدل نص أحمر عائم
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: (_msgOk ? XTheme.ok : XTheme.danger)
+                              .withOpacity(.10),
+                          borderRadius: BorderRadius.circular(XTheme.rSm),
+                          border: Border.all(
+                              color: (_msgOk ? XTheme.ok : XTheme.danger)
+                                  .withOpacity(.26)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                                _msgOk
+                                    ? Icons.check_circle_outline
+                                    : Icons.error_outline,
+                                size: 17,
+                                color: _msgOk ? XTheme.ok : XTheme.danger),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(_msg!,
+                                  style: TextStyle(
+                                      color:
+                                          _msgOk ? XTheme.ok : XTheme.danger,
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w600)),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                     const SizedBox(height: 20),
                     SizedBox(
@@ -161,7 +207,9 @@ class _AuthScreenState extends State<AuthScreen> {
                       child: DecoratedBox(
                         decoration: BoxDecoration(
                             gradient: XTheme.gradient,
-                            borderRadius: BorderRadius.circular(16)),
+                            borderRadius: BorderRadius.circular(XTheme.rMd),
+                            boxShadow:
+                                XTheme.glow(XTheme.accent, strength: .7)),
                         child: ElevatedButton(
                           onPressed:
                               _busy ? null : (_registerMode ? _doRegister : _login),
@@ -170,7 +218,8 @@ class _AuthScreenState extends State<AuthScreen> {
                             shadowColor: Colors.transparent,
                             padding: const EdgeInsets.symmetric(vertical: 16),
                             shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16)),
+                                borderRadius:
+                                    BorderRadius.circular(XTheme.rMd)),
                           ),
                           child: _busy
                               ? const SizedBox(
@@ -188,7 +237,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: 16),
               TextButton.icon(
                 onPressed: () => setState(() {
                   _registerMode = !_registerMode;
@@ -201,18 +250,20 @@ class _AuthScreenState extends State<AuthScreen> {
                     ? 'لديك حساب؟ سجّل دخولك'
                     : 'إنشاء حساب جديد (بطلب للمالك)'),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               GlassCard(
                 onTap: _openTelegram,
                 child: Row(
                   children: [
                     Container(
-                      width: 42, height: 42,
+                      width: 44, height: 44,
                       decoration: BoxDecoration(
                           color: const Color(0xFF229ED9).withOpacity(.15),
-                          borderRadius: BorderRadius.circular(12)),
+                          borderRadius: BorderRadius.circular(XTheme.rSm),
+                          border: Border.all(
+                              color: const Color(0xFF229ED9).withOpacity(.3))),
                       child: const Icon(Icons.send_rounded,
-                          color: Color(0xFF229ED9)),
+                          color: Color(0xFF229ED9), size: 21),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -220,7 +271,9 @@ class _AuthScreenState extends State<AuthScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text('تواصل مع المالك',
-                              style: TextStyle(fontWeight: FontWeight.w800)),
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w800, fontSize: 14)),
+                          const SizedBox(height: 2),
                           Text('عبر تيليجرام لتفعيل حسابك',
                               style: TextStyle(
                                   color: XTheme.textDim, fontSize: 12)),
@@ -232,7 +285,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               TextButton.icon(
                 onPressed: () => Navigator.of(context).pop(),
                 icon: const Icon(Icons.public, size: 18),

@@ -36,6 +36,8 @@ class Store {
   static const _kToken = 'x_token';
   static const _kUser = 'x_user';
   static const _kInstallSent = 'x_install_sent';
+  static const _kOwnerToken = 'x_owner_token';
+  static const _kOwnerTokenAt = 'x_owner_token_at';
 
   /// بصمة الجهاز للتوقيع وربط المنحة — فارغة إن لم تتوفر.
   String get fingerprint => _fingerprint ?? '';
@@ -71,6 +73,52 @@ class Store {
   bool get isGuest => (user?['role'] ?? 'guest') == 'guest';
   bool get isOwner => user?['role'] == 'owner';
   bool get hasSession => token != null;
+
+  /// جلسة المالك — منفصلة تماماً عن جلسة المستخدم.
+  ///
+  /// لماذا منفصلة؟ لأن جلسة المالك توقّعها الخادم بسرّ مستقل وتحمل
+  /// `typ=owner`، فسرقتها لا تفيد مهاجماً يحاول التظاهر بحساب عادي،
+  /// وسرقة جلسة عادية لا تفتح اللوحة. تنتهي بعد 12 ساعة ويُطلب الدخول
+  /// من جديد — فترة قصيرة مقصودة لأخطر حساب في النظام.
+  String? get ownerToken {
+    final t = _p.getString(_kOwnerToken);
+    if (t == null) return null;
+    final at = _p.getInt(_kOwnerTokenAt) ?? 0;
+    // انتهاء محلي عند 12 ساعة مطابق لعمر الرمز على الخادم.
+    if (DateTime.now().millisecondsSinceEpoch - at > 12 * 3600 * 1000) return null;
+    return t;
+  }
+
+  Future<void> setOwnerToken(String? t) async {
+    if (t == null) {
+      await _p.remove(_kOwnerToken);
+      await _p.remove(_kOwnerTokenAt);
+    } else {
+      await _p.setString(_kOwnerToken, t);
+      await _p.setInt(
+          _kOwnerTokenAt, DateTime.now().millisecondsSinceEpoch);
+    }
+  }
+
+  bool get hasOwnerSession => ownerToken != null;
+
+  /// إنهاء جلسة اللوحة من داخل اللوحة نفسها.
+  ///
+  /// ثابتة لأن قسم أمان اللوحة لا يحمل نسخة من `Store`؛ والجلسة كلها في
+  /// `SharedPreferences`، فمحوها لا يحتاج كائن التخزين.
+  static Future<void> clearOwnerSession() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_kOwnerToken);
+    await p.remove(_kOwnerTokenAt);
+    await p.remove(_kOwnerUnlockAt);
+  }
+
+  /// ختم زمني لآخر فتح ناجح للوحة المالك — يُستخدم لقفل البصمة.
+  static const _kOwnerUnlockAt = 'x_owner_unlock_at';
+
+  int get ownerUnlockedAt => _p.getInt(_kOwnerUnlockAt) ?? 0;
+  Future<void> markOwnerUnlocked() => _p.setInt(
+      _kOwnerUnlockAt, DateTime.now().millisecondsSinceEpoch);
 
   static const _kCompatDay = 'x_compat_day';
   static const _kCompatUsed = 'x_compat_used';

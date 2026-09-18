@@ -221,46 +221,71 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   /// حجم البيانات بلا بحث.
   Widget _typeSelector() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
-      child: Wrap(
-        spacing: 10,
-        runSpacing: 10,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 4),
+      child: Row(
         children: [
           for (final t in CompatTypeMeta.orderedTypes)
-            _typeChip(t, _type == t),
+            Expanded(child: _typeChip(t, _type == t)),
         ],
       ),
     );
   }
 
+  /// شريحة نوع واحدة — بطاقة صغيرة بأيقونة ملوّنة واسم.
+  ///
+  /// النوع المحدد يأخذ تدرّج لونه مع توهّج، فيبدو «مضغوطاً» فعلاً؛ وهذا
+  /// هو الفرق بين قائمة خيارات وشريط تحكّم.
   Widget _typeChip(String type, bool selected) {
     final meta = CompatTypeMeta.of(type);
-    return InkWell(
-      onTap: () => _selectType(type),
-      borderRadius: BorderRadius.circular(14),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected
-              ? meta.color.withOpacity(.18)
-              : XTheme.surface.withOpacity(.7),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-              color: selected
-                  ? meta.color.withOpacity(.65)
-                  : XTheme.textDim.withOpacity(.18),
-              width: selected ? 1.4 : 1),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: InkWell(
+        onTap: () => _selectType(type),
+        borderRadius: BorderRadius.circular(XTheme.rMd),
+        splashColor: meta.color.withOpacity(.12),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            gradient: selected
+                ? LinearGradient(
+                    colors: [
+                      meta.color.withOpacity(.26),
+                      meta.color.withOpacity(.10),
+                    ],
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                  )
+                : null,
+            color: selected ? null : XTheme.surface,
+            borderRadius: BorderRadius.circular(XTheme.rMd),
+            border: Border.all(
+                color: selected
+                    ? meta.color.withOpacity(.70)
+                    : XTheme.textDim.withOpacity(.16),
+                width: selected ? 1.5 : 1),
+            boxShadow: selected
+                ? XTheme.glow(meta.color, strength: .55)
+                : XTheme.shadow(lift: .5),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(meta.icon,
+                  size: selected ? 22 : 20,
+                  color: selected ? meta.color : XTheme.textDim),
+              const SizedBox(height: 6),
+              Text(meta.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+                      fontSize: 11.5,
+                      color: selected ? meta.color : XTheme.text)),
+            ],
+          ),
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(meta.icon, size: 19, color: meta.color),
-          const SizedBox(width: 8),
-          Text(meta.label,
-              style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 13.5,
-                  color: selected ? meta.color : XTheme.text)),
-        ]),
       ),
     );
   }
@@ -299,34 +324,39 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
       if (_remaining >= 0) 'مجاني $_remaining',
       if (_balance >= 0) 'عملات $_balance',
     ];
+    final c = ok ? XTheme.gold : XTheme.danger;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-      child: Row(children: [
-        Icon(Icons.account_balance_wallet_outlined,
-            size: 15, color: ok ? XTheme.gold : XTheme.danger),
-        const SizedBox(width: 6),
-        Text(ok ? 'المتبقي: $total' : 'لا يوجد رصيد متبقٍ',
-            style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w700,
-                color: ok ? XTheme.gold : XTheme.danger)),
-        if (parts.isNotEmpty) ...[
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(parts.join(' + '),
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11, color: XTheme.textDim)),
-          ),
-        ] else
-          const Spacer(),
-        if (_charged)
-          Text(
-              _source == 'coins'
-                  ? 'خُصمت عملة عند دخول الشركة'
-                  : 'خُصم من منحة اليوم عند الدخول',
-              style:
-                  TextStyle(fontSize: 11, color: XTheme.textDim.withOpacity(.8))),
-      ]),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: c.withOpacity(.09),
+          borderRadius: BorderRadius.circular(XTheme.rSm),
+          border: Border.all(color: c.withOpacity(.22)),
+        ),
+        child: Row(children: [
+          Icon(Icons.account_balance_wallet_outlined, size: 16, color: c),
+          const SizedBox(width: 7),
+          Text(ok ? 'المتبقي: $total' : 'لا يوجد رصيد متبقٍ',
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w800, color: c)),
+          if (parts.isNotEmpty) ...[
+            const SizedBox(width: 7),
+            Expanded(
+              child: Text(parts.join(' + '),
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: XTheme.textDim)),
+            ),
+          ] else
+            const Spacer(),
+          if (_charged)
+            Text(_source == 'coins' ? 'خُصمت عملة' : 'خُصم من منحة اليوم',
+                style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: XTheme.textDim.withOpacity(.85))),
+        ]),
+      ),
     );
   }
 
@@ -357,16 +387,16 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
       itemCount: _records.length + 1,
       itemBuilder: (context, i) {
         if (i == 0) {
+          // شريحة عدد النتائج — الحدّ الفاصل بين البحث وقائمته
           return Padding(
-            padding: const EdgeInsets.fromLTRB(4, 6, 4, 12),
+            padding: const EdgeInsets.fromLTRB(2, 4, 2, 12),
             child: Row(children: [
-              Icon(meta.icon, size: 17, color: meta.color),
+              StatusPill('${_records.length} نتيجة', color: meta.color,
+                  icon: meta.icon),
               const SizedBox(width: 8),
-              Text('${_records.length} نتيجة في ${meta.label}',
+              Text('في ${meta.label}',
                   style: TextStyle(
-                      color: meta.color,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800)),
+                      color: XTheme.textDim, fontSize: 12.5)),
             ]),
           );
         }
@@ -380,60 +410,41 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   Widget _recordCard(CompatRecord r, CompatTypeMeta meta, int index) {
     final models = CompatCatalog.rankModels(r, _query);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        children: [
-          GlassCard(
-            padding: const EdgeInsets.fromLTRB(14, 13, 14, 14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (r.subCategory != null && r.subCategory!.isNotEmpty) ...[
-                  Row(children: [
-                    Container(
-                      width: 3,
-                      height: 14,
-                      decoration: BoxDecoration(
-                        color: meta.color,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                    const SizedBox(width: 7),
-                    Expanded(
-                      child: Text(r.subCategory!,
-                          style: const TextStyle(
-                              color: XTheme.cyan,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700)),
-                    ),
-                  ]),
-                  const SizedBox(height: 10),
-                ],
-                Wrap(
-                  spacing: 7,
-                  runSpacing: 7,
-                  children: models.map((m) => _modelChip(m, meta)).toList(),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(children: [
-              Expanded(
-                child: Container(
-                  height: 1,
+      padding: const EdgeInsets.only(bottom: 10),
+      child: GlassCard(
+        accent: meta.color,
+        padding: const EdgeInsets.fromLTRB(16, 14, 18, 15),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (r.subCategory != null && r.subCategory!.isNotEmpty) ...[
+              Row(children: [
+                Container(
+                  width: 3,
+                  height: 14,
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [
-                      meta.color.withOpacity(index.isEven ? .28 : 0),
-                      meta.color.withOpacity(index.isEven ? 0 : .28),
-                    ]),
+                    color: meta.color,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-              ),
-            ]),
-          ),
-        ],
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(r.subCategory!,
+                      style: const TextStyle(
+                          color: XTheme.cyan,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800)),
+                ),
+              ]),
+              const SizedBox(height: 10),
+            ],
+            Wrap(
+              spacing: 7,
+              runSpacing: 7,
+              children: models.map((m) => _modelChip(m, meta)).toList(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -443,11 +454,13 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     final q = normalizeModel(_query);
     final hit = q.isNotEmpty && normalizeModel(m).contains(q);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
-        color: hit ? meta.color.withOpacity(.26) : meta.color.withOpacity(.09),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: meta.color.withOpacity(hit ? .7 : .2)),
+        color: hit ? meta.color.withOpacity(.22) : meta.color.withOpacity(.08),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+            color: meta.color.withOpacity(hit ? .60 : .18),
+            width: hit ? 1.3 : 1),
       ),
       child: Text.rich(_highlighted(m, q, meta),
           style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
@@ -471,16 +484,28 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   Widget _emptyView(String message, [IconData? icon, Color? color]) {
+    final c = color ?? XTheme.textDim;
     return Center(
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon ?? Icons.inbox_outlined,
-            size: 52, color: (color ?? XTheme.textDim).withOpacity(.55)),
-        const SizedBox(height: 12),
+        // الأيقونة داخل حلقة متدرّجة — شاشة الفراغ تبدو مقصودة لا معطّلة
+        Container(
+          width: 84, height: 84,
+          decoration: BoxDecoration(
+            color: c.withOpacity(.10),
+            shape: BoxShape.circle,
+            border: Border.all(color: c.withOpacity(.22)),
+          ),
+          child: Icon(icon ?? Icons.inbox_outlined, size: 38, color: c),
+        ),
+        const SizedBox(height: 16),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 40),
           child: Text(message,
               textAlign: TextAlign.center,
-              style: TextStyle(color: XTheme.textDim, height: 1.7)),
+              style: TextStyle(
+                  color: XTheme.textDim,
+                  height: 1.7,
+                  fontSize: 13.5)),
         ),
       ]),
     );
@@ -493,27 +518,43 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     final color = (_quotaEmpty || _locked) ? XTheme.gold : XTheme.danger;
     return Center(
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 44, color: color),
-        const SizedBox(height: 12),
+        Container(
+          width: 84, height: 84,
+          decoration: BoxDecoration(
+            color: color.withOpacity(.10),
+            shape: BoxShape.circle,
+            border: Border.all(color: color.withOpacity(.24)),
+          ),
+          child: Icon(icon, size: 36, color: color),
+        ),
+        const SizedBox(height: 16),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 40),
           child: Text(_error!,
               textAlign: TextAlign.center,
-              style: TextStyle(color: XTheme.textDim, height: 1.6)),
+              style: TextStyle(
+                  color: XTheme.textDim, height: 1.6, fontSize: 13.5)),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         if (_locked || _quotaEmpty)
           ElevatedButton.icon(
             onPressed: () => showSubscribeDialog(context),
             icon: const Icon(Icons.send_rounded, size: 18),
             label: const Text('تواصل مع المالك'),
             style: ElevatedButton.styleFrom(
-                backgroundColor: XTheme.accent, foregroundColor: Colors.white),
+              backgroundColor: XTheme.accent,
+              foregroundColor: Colors.white,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(XTheme.rMd)),
+            ),
           )
         else
-          TextButton(
+          TextButton.icon(
               onPressed: () => _search(_query.trim()),
-              child: const Text('إعادة المحاولة')),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('إعادة المحاولة')),
       ]),
     );
   }

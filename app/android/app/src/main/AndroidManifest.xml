@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- مطلوب لكل اتصال شبكي — التطبيق يعمل عبر Worker خارجي فقط -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- إشعارات إعلانات المالك — أندرويد 13+ يطلبها صراحةً.
+         POST_NOTIFICATIONS غير معلَنة تعني ألا يظهر أي إشعار أبداً. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- اهتزاز الإشعار: أندرويد 13+ يحتاج VIBRATE صراحةً مع POST_NOTIFICATIONS -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- تسجيل الرسائل الصوتية في الدردشة — يُطلب وقت التسجيل لا عند التثبيت -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
         android:label="MAPX"
         android:name="${applicationName}"

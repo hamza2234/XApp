@@ -7,6 +7,7 @@ import '../core/app_config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'theme.dart';
+import 'biometric_gate.dart';
 import 'brand_logo.dart';
 
 /// نسخ معرّف الجهاز — يُستخدم من عدة تبويبات في لوحة المالك.
@@ -32,7 +33,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 7,
+      length: 8,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('لوحة تحكم المالك'),
@@ -47,6 +48,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
               Tab(text: 'المستخدمون', icon: Icon(Icons.people_outline, size: 18)),
               Tab(text: 'محافظ الزوار', icon: Icon(Icons.account_balance_wallet_outlined, size: 18)),
               Tab(text: 'الإعلانات', icon: Icon(Icons.campaign_outlined, size: 18)),
+              Tab(text: 'الدردشة', icon: Icon(Icons.forum_outlined, size: 18)),
               Tab(text: 'الحظر', icon: Icon(Icons.gpp_bad_outlined, size: 18)),
               Tab(text: 'الأمان', icon: Icon(Icons.security, size: 18)),
             ],
@@ -58,6 +60,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
           _UsersTab(api: widget.api),
           _WalletsTab(api: widget.api),
           _AnnouncementsTab(api: widget.api),
+          _ChatTab(api: widget.api),
           _BansTab(api: widget.api),
           _SecurityTab(api: widget.api),
         ]),
@@ -617,18 +620,23 @@ class _SettingsTabState extends State<_SettingsTab> {
                 textAlign: TextAlign.center,
                 style: TextStyle(color: XTheme.ok)),
           ),
+        _OwnerPanelSecurity(),
+        const SizedBox(height: 18),
         SizedBox(
           width: double.infinity,
           child: DecoratedBox(
             decoration: BoxDecoration(
                 gradient: XTheme.gradient,
-                borderRadius: BorderRadius.circular(16)),
+                borderRadius: BorderRadius.circular(XTheme.rMd),
+                boxShadow: XTheme.glow(XTheme.accent, strength: .6)),
             child: ElevatedButton(
               onPressed: _saving ? null : _save,
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.transparent,
                 shadowColor: Colors.transparent,
                 padding: const EdgeInsets.symmetric(vertical: 15),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(XTheme.rMd)),
               ),
               child: Text(_saving ? 'جاري الحفظ…' : 'حفظ الإعدادات',
                   style: const TextStyle(
@@ -1783,3 +1791,933 @@ class _WalletsTabState extends State<_WalletsTab> {
     ]);
   }
 }
+
+// ============ الدردشة ============
+
+/// إشراف المالك على الدردشة: الرسائل، الأقسام، الكتم والطرد.
+///
+/// كل الإجراءات تُسجَّل في سجل الأمان، والمالك لا يمكن تقييده. الأقسام
+/// تُحفظ ضمن إعدادات التطبيق نفسها، فتبقى بعد إعادة النشر.
+class _ChatTab extends StatefulWidget {
+  const _ChatTab({required this.api});
+  final Api api;
+
+  @override
+  State<_ChatTab> createState() => _ChatTabState();
+}
+
+class _ChatTabState extends State<_ChatTab>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabs = TabController(length: 3, vsync: this)
+    ..addListener(() => setState(() {}));
+
+  List<dynamic>? _messages;
+  List<ChatAction>? _actions;
+  XSettings? _settings;
+  bool _saving = false;
+  String? _msg;
+  String _room = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final results = await Future.wait([
+        widget.api.ownerChatMessages(room: _room),
+        widget.api.ownerChatActions(),
+        widget.api.ownerSettings(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _messages = results[0] as List;
+        _actions = results[1] as List<ChatAction>;
+        _settings = XSettings.fromJson(
+            (results[2] as Map)['settings'] as Map<String, dynamic>);
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _messages = _messages ?? [];
+          _actions = _actions ?? [];
+        });
+      }
+    }
+  }
+
+  List<ChatRoom> get _rooms => _settings?.chatRooms ?? const [];
+
+  void _toast(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(m),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: XTheme.surface2,
+      ));
+  }
+
+  /// حفظ إعدادات الدردشة وحدها — لا يمس بقية الإعدادات.
+  Future<void> _saveChat({String? msg}) async {
+    final s = _settings;
+    if (s == null) return;
+    setState(() {
+      _saving = true;
+      _msg = null;
+    });
+    try {
+      final r = await widget.api.saveSettings({
+        'chatEnabled': s.chatEnabled,
+        'chatReadOnly': s.chatReadOnly,
+        'chatTheme': s.chatTheme,
+        'chatWelcome': s.chatWelcome,
+        'chatMaxLength': s.chatMaxLength,
+        'chatImagesEnabled': s.chatImagesEnabled,
+        'chatWriteScope': s.chatWriteScope,
+        'chatMediaScope': s.chatMediaScope,
+        'chatMaxMediaMb': s.chatMaxMediaMb,
+        'chatMediaSeconds': s.chatMediaSeconds,
+        'chatPollMs': s.chatPollMs,
+        'chatRooms': s.chatRooms
+            .map((r) => {'id': r.id, 'name': r.name, 'icon': r.icon})
+            .toList(),
+      });
+      if (!mounted) return;
+      setState(() {
+        _settings =
+            XSettings.fromJson(r['settings'] as Map<String, dynamic>);
+        _msg = msg ?? 'تم الحفظ';
+      });
+    } catch (_) {
+      if (mounted) setState(() => _msg = 'فشل الحفظ');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_settings == null) {
+      return Center(child: CircularProgressIndicator(color: XTheme.accent));
+    }
+    return Column(children: [
+      TabBar(
+        controller: _tabs,
+        labelColor: XTheme.accent,
+        unselectedLabelColor: XTheme.textDim,
+        indicatorColor: XTheme.accent,
+        labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5),
+        tabs: const [
+          Tab(text: 'الرسائل'),
+          Tab(text: 'الأعضاء المقيّدون'),
+          Tab(text: 'الإعدادات'),
+        ],
+      ),
+      if (_msg != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(_msg!,
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: _msg == 'تم الحفظ' ? XTheme.ok : XTheme.danger)),
+        ),
+      Expanded(
+        child: TabBarView(
+          controller: _tabs,
+          children: [_messagesView(), _restrictionsView(), _settingsView()],
+        ),
+      ),
+    ]);
+  }
+
+  // ── الرسائل: مراجعة وحذف ──
+
+  Widget _messagesView() {
+    final list = _messages ?? const [];
+    return Column(children: [
+      Container(
+        height: 40,
+        margin: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          reverse: true,
+          children: [
+            _roomChip('', 'الكل'),
+            for (final r in _rooms) _roomChip(r.id, r.name),
+          ],
+        ),
+      ),
+      const SizedBox(height: 8),
+      Expanded(
+        child: list.isEmpty
+            ? Center(
+                child: Text('لا رسائل',
+                    style: TextStyle(color: XTheme.textDim)))
+            : RefreshIndicator(
+                onRefresh: _load,
+                color: XTheme.accent,
+                child: ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
+                  itemCount: list.length,
+                  itemBuilder: (context, i) => _messageCard(list[i]),
+                ),
+              ),
+      ),
+    ]);
+  }
+
+  Widget _roomChip(String id, String name) => Padding(
+        padding: const EdgeInsets.only(left: 8),
+        child: GestureDetector(
+          onTap: () async {
+            setState(() => _room = id);
+            await _load();
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              gradient: _room == id ? XTheme.gradient : null,
+              color: _room == id ? null : XTheme.surface2,
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: Text(name,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: _room == id ? Colors.white : XTheme.text,
+                )),
+          ),
+        ),
+      );
+
+  Widget _messageCard(dynamic m) {
+    final kind = '${m['kind'] ?? 'text'}';
+    final media = '${m['mediaUrl'] ?? ''}';
+    final deleted = m['deleted'] == true;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: GlassCard(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(children: [
+          Icon(
+            kind == 'image'
+                ? Icons.image_outlined
+                : (kind == 'audio'
+                    ? Icons.mic_none
+                    : (kind == 'video'
+                        ? Icons.videocam_outlined
+                        : Icons.chat_bubble_outline)),
+            size: 19,
+            color: deleted ? XTheme.textDim : XTheme.cyan,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(m['nickname']?.toString().isNotEmpty == true
+                    ? m['nickname']
+                    : (m['username'] ?? 'عضو'),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w800, fontSize: 12.5)),
+                const SizedBox(height: 2),
+                Text(
+                  deleted
+                      ? 'محذوفة'
+                      : (media.isNotEmpty
+                          ? 'وسيط ($kind)'
+                          : (m['body'] ?? '').toString()),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: deleted ? XTheme.textDim : XTheme.text),
+                ),
+                if ('${m['roomId']}'.isNotEmpty)
+                  Text('قسم: ${m['roomId']}',
+                      style: TextStyle(
+                          fontSize: 10, color: XTheme.textDim)),
+              ],
+            ),
+          ),
+          // أزرار الإشراف على كاتب الرسالة
+          PopupMenuButton<String>(
+            tooltip: 'إجراء',
+            icon: Icon(Icons.more_vert, size: 18, color: XTheme.textDim),
+            onSelected: (v) async {
+              final uid = '${m['userId']}';
+              if (v == 'delete') {
+                await widget.api.ownerDeleteChatMessage('${m['id']}');
+                await _load();
+                return;
+              }
+              await _restrictDialog(uid,
+                  kind: v == 'mute' ? 'mute' : 'kick');
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'mute', child: Text('كتم العضو')),
+              const PopupMenuItem(value: 'kick', child: Text('طرد من الدردشة')),
+              if (!deleted)
+                const PopupMenuItem(value: 'delete', child: Text('حذف الرسالة')),
+            ],
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// حوار كتم/طرد: نطاق (كل الأقسام أو قسم)، مدة، وسبب يُعرض للعضو.
+  Future<void> _restrictDialog(String userId, {required String kind}) async {
+    String room = '';
+    String reason = '';
+    int minutes = 0;
+    final isMute = kind == 'mute';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: XTheme.surface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text(isMute ? 'كتم عضو' : 'طرد من الدردشة',
+              style: const TextStyle(fontWeight: FontWeight.w900)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                isMute
+                    ? 'المكتوم لا يستطيع الكتابة، ويمكنه القراءة.'
+                    : 'المطرود لا يستطيع الكتابة في القسم المحدد.',
+                style: TextStyle(fontSize: 12, color: XTheme.textDim),
+              ),
+              const SizedBox(height: 12),
+              Text('النطاق',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                initialValue: room,
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('كل الأقسام')),
+                  for (final r in _rooms)
+                    DropdownMenuItem(value: r.id, child: Text(r.name)),
+                ],
+                onChanged: (v) => setD(() => room = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              Text('المدة',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+              const SizedBox(height: 6),
+              Wrap(spacing: 6, children: [
+                for (final opt in const [
+                  (0, 'دائم'),
+                  (60, 'ساعة'),
+                  (1440, 'يوم'),
+                  (10080, 'أسبوع'),
+                ])
+                  ChoiceChip(
+                    label: Text(opt.$2,
+                        style: const TextStyle(fontSize: 11.5)),
+                    selected: minutes == opt.$1,
+                    onSelected: (_) => setD(() => minutes = opt.$1),
+                  ),
+              ]),
+              const SizedBox(height: 12),
+              TextField(
+                maxLength: 120,
+                decoration: const InputDecoration(
+                  hintText: 'سبب (يظهر للعضو)',
+                  isDense: true,
+                  counterText: '',
+                ),
+                onChanged: (v) => reason = v,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                try {
+                  await widget.api.ownerChatAction(
+                    userId: userId,
+                    kind: kind,
+                    room: room,
+                    reason: reason.trim(),
+                    minutes: minutes,
+                  );
+                  await _load();
+                  _toast(isMute ? 'تم الكتم' : 'تم الطرد');
+                } catch (e) {
+                  _toast('فشل الإجراء: $e');
+                }
+              },
+              style: FilledButton.styleFrom(
+                  backgroundColor:
+                      isMute ? XTheme.accent : XTheme.danger),
+              child: Text(isMute ? 'كتم' : 'طرد'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── الأعضاء المقيّدون ──
+
+  Widget _restrictionsView() {
+    final list = _actions ?? const <ChatAction>[];
+    if (list.isEmpty) {
+      return Center(
+          child: Text('لا عقوبات مسجّلة',
+              style: TextStyle(color: XTheme.textDim)));
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: XTheme.accent,
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
+        itemCount: list.length,
+        itemBuilder: (context, i) {
+          final a = list[i];
+          final color = a.active
+              ? (a.isMute ? XTheme.accent : XTheme.danger)
+              : XTheme.textDim;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: GlassCard(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(children: [
+                Icon(a.isMute ? Icons.volume_off : Icons.block,
+                    size: 19, color: color),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${a.username.isEmpty ? a.userId : a.username} • '
+                        '${a.isMute ? 'كتم' : 'طرد'}',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w800, fontSize: 12.5),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${a.roomId.isEmpty ? 'كل الأقسام' : a.roomId} • '
+                        '${a.isPermanent ? 'دائم' : 'حتى ${_untilText(a.until)}'}',
+                        style: TextStyle(
+                            fontSize: 11, color: XTheme.textDim),
+                      ),
+                      if (a.reason.isNotEmpty)
+                        Text(a.reason,
+                            style: TextStyle(
+                                fontSize: 11, color: XTheme.textDim)),
+                    ],
+                  ),
+                ),
+                StatusPill(a.active ? 'سارٍ' : 'منتهي', color: color),
+                IconButton(
+                  tooltip: 'رفع العقوبة',
+                  onPressed: () async {
+                    await widget.api.ownerClearChatAction(a.userId,
+                        kind: a.kind);
+                    await _load();
+                  },
+                  icon: Icon(Icons.undo, size: 18, color: XTheme.ok),
+                ),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  static String _untilText(int until) {
+    final d = DateTime.fromMillisecondsSinceEpoch(until);
+    final left = d.difference(DateTime.now());
+    if (left.isNegative) return 'منتهية';
+    if (left.inDays >= 1) return '${left.inDays} يوم';
+    if (left.inHours >= 1) return '${left.inHours} ساعة';
+    return '${left.inMinutes} دقيقة';
+  }
+
+  // ── إعدادات الدردشة ──
+
+  Widget _settingsView() {
+    final s = _settings!;
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle('حالة الدردشة', icon: Icons.tune),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('تشغيل الدردشة',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: Text('إيقافها يخفيها عن كل الأعضاء فوراً',
+                    style: TextStyle(color: XTheme.textDim, fontSize: 11)),
+                value: s.chatEnabled,
+                activeColor: XTheme.cyan,
+                onChanged: (v) => setState(() => s.chatEnabled = v),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('القراءة فقط',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: Text('يمنع الكتابة عن الجميع عدا المالك',
+                    style: TextStyle(color: XTheme.textDim, fontSize: 11)),
+                value: s.chatReadOnly,
+                activeColor: XTheme.cyan,
+                onChanged: (v) => setState(() => s.chatReadOnly = v),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('السماح برفع الصور',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: Text('الصور متاحة لكل من يستطيع الكتابة',
+                    style: TextStyle(color: XTheme.textDim, fontSize: 11)),
+                value: s.chatImagesEnabled,
+                activeColor: XTheme.cyan,
+                onChanged: (v) => setState(() => s.chatImagesEnabled = v),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle('من يشارك', icon: Icons.group_outlined),
+              Text('من يستطيع الكتابة',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                initialValue: s.chatWriteScope,
+                decoration: const InputDecoration(isDense: true),
+                items: const [
+                  DropdownMenuItem(
+                      value: 'all', child: Text('الجميع (زوار ومسجّلون)')),
+                  DropdownMenuItem(
+                      value: 'registered', child: Text('المسجّلون فقط')),
+                  DropdownMenuItem(
+                      value: 'subscribers', child: Text('المشتركون فقط')),
+                ],
+                onChanged: (v) =>
+                    setState(() => s.chatWriteScope = v ?? 'registered'),
+              ),
+              const SizedBox(height: 12),
+              Text('من يرسل الصوت والفيديو',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                initialValue: s.chatMediaScope,
+                decoration: const InputDecoration(isDense: true),
+                items: const [
+                  DropdownMenuItem(
+                      value: 'subscribers', child: Text('المشتركون فقط')),
+                  DropdownMenuItem(value: 'none', child: Text('موقوف')),
+                ],
+                onChanged: (v) =>
+                    setState(() => s.chatMediaScope = v ?? 'subscribers'),
+              ),
+              const SizedBox(height: 14),
+              _numField('أقصى طول للرسالة (حرف)', s.chatMaxLength, (v) {
+                setState(() => s.chatMaxLength = v);
+              }),
+              _numField('أقصى حجم للوسيط (MB)', s.chatMaxMediaMb, (v) {
+                setState(() => s.chatMaxMediaMb = v);
+              }),
+              _numField('أقصى مدة مقطع (ثانية)', s.chatMediaSeconds, (v) {
+                setState(() => s.chatMediaSeconds = v);
+              }),
+              _numField('زمن التحديث (مللي ثانية)', s.chatPollMs, (v) {
+                setState(() => s.chatPollMs = v);
+              }),
+              const SizedBox(height: 6),
+              Text(
+                'زمن التحديث يحدد كل كم يطلب التطبيق الرسائل الجديدة. القيمة '
+                'الأكبر توفّر بطارية وشبكة، والأصغر تجعل الوصول أسرع.',
+                style: TextStyle(fontSize: 11, color: XTheme.textDim),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle('المظهر والترحيب', icon: Icons.palette_outlined),
+              DropdownButtonFormField<String>(
+                initialValue: s.chatTheme,
+                decoration: const InputDecoration(
+                    labelText: 'سمة الفقاعات', isDense: true),
+                items: const [
+                  DropdownMenuItem(value: 'bubble', child: Text('فقاعات')),
+                  DropdownMenuItem(value: 'classic', child: Text('كلاسيكي')),
+                  DropdownMenuItem(value: 'neon', child: Text('نيون')),
+                  DropdownMenuItem(value: 'dark', child: Text('داكن')),
+                ],
+                onChanged: (v) => setState(() => s.chatTheme = v ?? 'bubble'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: TextEditingController(text: s.chatWelcome)
+                  ..selection = TextSelection.collapsed(
+                      offset: s.chatWelcome.length),
+                maxLength: 300,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'رسالة ترحيب تظهر أعلى الدردشة',
+                  isDense: true,
+                ),
+                onChanged: (v) => s.chatWelcome = v,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SectionTitle('أقسام الدردشة',
+                  icon: Icons.forum_outlined,
+                  trailing: IconButton(
+                    tooltip: 'إضافة قسم',
+                    onPressed: _addRoomDialog,
+                    icon: Icon(Icons.add_circle, color: XTheme.cyan),
+                  )),
+              if (s.chatRooms.isEmpty)
+                Text('لا أقسام — أضف قسماً ليظهر للأعضاء',
+                    style: TextStyle(fontSize: 12, color: XTheme.textDim)),
+              for (var i = 0; i < s.chatRooms.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(children: [
+                    Icon(Icons.drag_indicator,
+                        size: 18, color: XTheme.textDim),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('${s.chatRooms[i].name}  ·  '
+                          '${s.chatRooms[i].id}',
+                          style: const TextStyle(
+                              fontSize: 12.5, fontWeight: FontWeight.w700)),
+                    ),
+                    IconButton(
+                      tooltip: 'تعديل',
+                      onPressed: () => _addRoomDialog(index: i),
+                      icon: Icon(Icons.edit_outlined,
+                          size: 17, color: XTheme.cyan),
+                    ),
+                    IconButton(
+                      tooltip: 'حذف',
+                      onPressed: () => setState(() {
+                        s.chatRooms.removeAt(i);
+                      }),
+                      icon: Icon(Icons.delete_outline,
+                          size: 17, color: XTheme.danger),
+                    ),
+                  ]),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _saving ? null : () => _saveChat(),
+            icon: _saving
+                ? const SizedBox(
+                    width: 16, height: 16,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.save_outlined, size: 18),
+            label: const Text('حفظ إعدادات الدردشة',
+                style: TextStyle(fontWeight: FontWeight.w900)),
+            style: FilledButton.styleFrom(
+              backgroundColor: XTheme.accent,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(XTheme.rMd)),
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+      ],
+    );
+  }
+
+  Widget _numField(String label, int value, ValueChanged<int> onChanged) =>
+      Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: TextFormField(
+          initialValue: '$value',
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(labelText: label, isDense: true),
+          onChanged: (v) => onChanged(int.tryParse(v.trim()) ?? value),
+        ),
+      );
+
+  /// إضافة قسم أو تعديله. المعرّف لاتيني قصير لأنه يُخزَّن في كل رسالة.
+  Future<void> _addRoomDialog({int? index}) async {
+    final s = _settings!;
+    final existing = index == null ? null : s.chatRooms[index];
+    final id = TextEditingController(text: existing?.id ?? '');
+    final name = TextEditingController(text: existing?.name ?? '');
+    var icon = existing?.icon ?? 'chat';
+    final icons = const {
+      'chat': 'محادثة',
+      'build': 'صيانة',
+      'memory': 'قطع',
+      'store': 'بيع وشراء',
+      'help': 'مساعدة',
+      'sell': 'عروض',
+    };
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: XTheme.surface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text(index == null ? 'قسم جديد' : 'تعديل القسم',
+              style: const TextStyle(fontWeight: FontWeight.w900)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                decoration: const InputDecoration(
+                    labelText: 'اسم القسم', isDense: true),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: id,
+                enabled: index == null,
+                textDirection: TextDirection.ltr,
+                decoration: const InputDecoration(
+                  labelText: 'المعرّف (a-z، بلا مسافات)',
+                  isDense: true,
+                  helperText: 'يُستخدم داخلياً ويظهر في الروابط',
+                ),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: icon,
+                decoration: const InputDecoration(
+                    labelText: 'الأيقونة', isDense: true),
+                items: [
+                  for (final e in icons.entries)
+                    DropdownMenuItem(value: e.key, child: Text(e.value)),
+                ],
+                onChanged: (v) => setD(() => icon = v ?? 'chat'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+            ),
+            FilledButton(
+              onPressed: () {
+                final rid = id.text.trim().toLowerCase();
+                final rname = name.text.trim();
+                if (rname.isEmpty ||
+                    !RegExp(r'^[a-z0-9_]{2,20}$').hasMatch(rid)) {
+                  setD(() {});
+                  return;
+                }
+                setState(() {
+                  final room = ChatRoom(id: rid, name: rname, icon: icon);
+                  if (index == null) {
+                    // منع التكرار: معرّف مكرر يجعل رسائل قسمين تختلط.
+                    if (!s.chatRooms.any((r) => r.id == rid)) {
+                      s.chatRooms.add(room);
+                    }
+                  } else {
+                    s.chatRooms[index] = room;
+                  }
+                });
+                Navigator.pop(ctx);
+              },
+              style: FilledButton.styleFrom(backgroundColor: XTheme.accent),
+              child: const Text('حفظ'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============ أمان اللوحة ============
+
+/// قسم أمان لوحة المالك — قفل البصمة وإنهاء جلسة اللوحة.
+///
+/// الجلسة هنا منفصلة تماماً عن جلسة المستخدم العادي، ولها سرّها المستقل في
+/// الخادم. «إنهاء الجلسة» يمحو الرمز المحلي وختم الفتح معاً، فلا يبقى أثر
+/// يصلح لفتح اللوحة إن فُقد الهاتف.
+class _OwnerPanelSecurity extends StatefulWidget {
+  const _OwnerPanelSecurity();
+
+  @override
+  State<_OwnerPanelSecurity> createState() => _OwnerPanelSecurityState();
+}
+
+class _OwnerPanelSecurityState extends State<_OwnerPanelSecurity> {
+  bool? _available;
+  bool _enabled = false;
+  String? _msg;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final available = await BiometricLock.available;
+    final enabled = await BiometricLock.enabled;
+    if (!mounted) return;
+    setState(() {
+      _available = available;
+      _enabled = enabled;
+    });
+  }
+
+  Future<void> _toggle(bool v) async {
+    if (v) {
+      // لا نفعّل القفل بلا تحقق ناجح أولاً — وإلا أقفل المالك نفسه خارج
+      // اللوحة إن لم تكن بصمته مسجّلة فعلاً.
+      final ok = await BiometricLock.authenticate(
+          reason: 'تأكيد تفعيل قفل البصمة على لوحة المالك');
+      if (!ok) {
+        setState(() => _msg = 'لم ينجح التحقق — لم يُفعَّل القفل');
+        return;
+      }
+    }
+    await BiometricLock.setEnabled(v);
+    if (!mounted) return;
+    setState(() {
+      _enabled = v;
+      _msg = v ? 'قفل البصمة مفعّل' : 'قفل البصمة موقوف';
+    });
+  }
+
+  Future<void> _logout() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('إنهاء جلسة اللوحة؟',
+            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+        content: const Text(
+            'ستحتاج اسم المستخدم وكلمة المرور للدخول مرة أخرى. '
+            'لا يتأثر حسابك العادي ولا اشتراكك.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('إنهاء')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await Store.clearOwnerSession();
+    if (!mounted) return;
+    // نعود لبوابة الدخول: اللوحة الحالية صارت بلا جلسة صالحة.
+    Navigator.of(context).popUntil((r) => r.isFirst);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final available = _available ?? false;
+    return GlassCard(
+      accent: XTheme.cyan,
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SectionTitle('أمان اللوحة', icon: Icons.shield_moon_outlined),
+          Text(
+            'جلسة اللوحة منفصلة عن حسابك العادي، وكل ردودها مشفّرة بمفتاح '
+            'مشتق من الجلسة نفسها.',
+            style:
+                TextStyle(color: XTheme.textDim, fontSize: 11.5, height: 1.6),
+          ),
+          const SizedBox(height: 4),
+          if (available)
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('قفل بالبصمة',
+                  style:
+                      TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+              subtitle: Text('يُطلب عند كل فتح للوحة',
+                  style: TextStyle(color: XTheme.textDim, fontSize: 11)),
+              value: _enabled,
+              onChanged: _toggle,
+              activeColor: XTheme.cyan,
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'لا توجد بصمة مسجّلة على هذا الجهاز — سجّلها في إعدادات '
+                'الهاتف ثم أعد المحاولة.',
+                style: TextStyle(color: XTheme.textDim, fontSize: 11.5),
+              ),
+            ),
+          if (_msg != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 4),
+              child: Text(_msg!,
+                  style: const TextStyle(color: XTheme.ok, fontSize: 12)),
+            ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _logout,
+              icon: const Icon(Icons.logout_rounded, size: 18),
+              label: const Text('إنهاء جلسة اللوحة',
+                  style: TextStyle(fontWeight: FontWeight.w800)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: XTheme.danger,
+                side: BorderSide(color: XTheme.danger.withOpacity(.45)),
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(XTheme.rMd)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+

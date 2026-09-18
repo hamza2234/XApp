@@ -129,9 +129,21 @@ class _CompatScreenState extends State<CompatScreen>
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
               child: TextField(
                 onChanged: (v) => setState(() => _filter = v),
+                textInputAction: TextInputAction.search,
                 decoration: InputDecoration(
                   hintText: 'ابحث عن شركة…',
-                  prefixIcon: Icon(Icons.search, color: XTheme.textDim),
+                  prefixIcon:
+                      Icon(Icons.search_rounded, color: XTheme.textDim, size: 21),
+                  suffixIcon: _filter.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: Icon(Icons.close_rounded,
+                              size: 19, color: XTheme.textDim),
+                          onPressed: () {
+                            setState(() => _filter = '');
+                            FocusScope.of(context).unfocus();
+                          },
+                        ),
                   isDense: true,
                 ),
               ),
@@ -184,70 +196,104 @@ class _CompatScreenState extends State<CompatScreen>
 
   Widget _adBanner() {
     return SizedBox(
-      height: 118,
-      child: PageView.builder(
-        controller: _pageCtrl,
-        onPageChanged: (i) => setState(() => _adIndex = i),
-        itemCount: _ads.length,
-        itemBuilder: (context, i) {
-          final ad = _ads[i];
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-            child: GlassCard(
-              padding: EdgeInsets.zero,
-              onTap: () async {
-                if (ad.linkUrl.isNotEmpty) {
-                  await openExternal(context, ad.linkUrl);
-                }
-              },
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(20),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (ad.imageUrl.isNotEmpty)
-                      _adImage(ad.imageUrl)
-                    else
-                      Container(
-                          decoration:
-                              BoxDecoration(gradient: XTheme.gradient)),
-                    Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            Colors.black.withOpacity(.72),
-                            Colors.transparent
-                          ],
-                          begin: Alignment.bottomCenter,
-                          end: Alignment.topCenter,
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      right: 16, left: 16, bottom: 12,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+      height: 148,
+      child: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageCtrl,
+              onPageChanged: (i) => setState(() => _adIndex = i),
+              itemCount: _ads.length,
+              itemBuilder: (context, i) {
+                final ad = _ads[i];
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                  child: GlassCard(
+                    padding: EdgeInsets.zero,
+                    onTap: () async {
+                      if (ad.linkUrl.isNotEmpty) {
+                        await openExternal(context, ad.linkUrl);
+                      }
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(XTheme.rLg),
+                      child: Stack(
+                        fit: StackFit.expand,
                         children: [
-                          Text(ad.title,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 15,
-                                  color: Colors.white)),
-                          if (ad.subtitle.isNotEmpty)
-                            Text(ad.subtitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: Colors.white70, fontSize: 12)),
+                          if (ad.imageUrl.isNotEmpty)
+                            _adImage(ad.imageUrl)
+                          else
+                            Container(
+                                decoration:
+                                    BoxDecoration(gradient: XTheme.gradient)),
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  Colors.black.withOpacity(.74),
+                                  Colors.black.withOpacity(.10),
+                                ],
+                                begin: Alignment.bottomCenter,
+                                end: Alignment.topCenter,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: 16, left: 16, bottom: 13,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(ad.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 15,
+                                        color: Colors.white)),
+                                if (ad.subtitle.isNotEmpty)
+                                  Text(ad.subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 12)),
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                );
+              },
+            ),
+          ),
+          // نقاط المؤشّر: بلاها لا يعرف المستخدم أن هناك إعلانات أخرى
+          if (_ads.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  for (var i = 0; i < _ads.length; i++)
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 240),
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      // النقطة النشطة أعرض — تمييز بلا لون إضافي
+                      width: i == _adIndex ? 18 : 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        gradient: i == _adIndex ? XTheme.gradient : null,
+                        color: i == _adIndex
+                            ? null
+                            : XTheme.textDim.withOpacity(.35),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                ],
               ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
@@ -283,13 +329,26 @@ class _CompatScreenState extends State<CompatScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          BrandLogo(name: b.displayName, size: 56),
-          const SizedBox(height: 8),
+          // الشعار في حاوية مستديرة فاتحة — يفصل الشعارات الفاتحة عن
+          // خلفية البطاقة بلا إطار ثقيل.
+          Container(
+            padding: const EdgeInsets.all(9),
+            decoration: BoxDecoration(
+              color: XTheme.isLight
+                  ? Colors.white
+                  : Colors.white.withOpacity(.06),
+              shape: BoxShape.circle,
+              border: Border.all(
+                  color: XTheme.textDim.withOpacity(.12)),
+            ),
+            child: BrandLogo(name: b.displayName, size: 46),
+          ),
+          const SizedBox(height: 9),
           Text(b.displayName,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                  fontWeight: FontWeight.w800, fontSize: 13)),
+                  fontWeight: FontWeight.w800, fontSize: 12.5)),
         ],
       ),
     );

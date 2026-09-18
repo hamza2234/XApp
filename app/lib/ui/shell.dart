@@ -3,12 +3,15 @@ import 'package:flutter/services.dart';
 import '../core/api.dart';
 import '../core/config.dart';
 import '../core/app_config.dart';
+import '../core/notifications.dart';
 import '../core/store.dart';
 import 'theme.dart';
+import 'nav_bar.dart';
 import 'brand_logo.dart';
+import 'chat_screen.dart';
 import 'compat_screen.dart';
 import 'schem_screen.dart';
-import 'owner_screen.dart';
+import 'owner_gate.dart';
 import 'splash.dart';
 import 'external_link.dart';
 
@@ -41,6 +44,24 @@ class _ShellState extends State<Shell> {
     // إعادة البناء فوراً إن وصل تحديث للرابط أو الباقات.
     _cfg.addListener(_onConfigChanged);
     _refresh();
+    // طلب إذن الإشعارات بعد استقرار الشاشة الأولى، لا أثناءها: نافذة
+    // النظام فوق شاشة التهيئة تبدو خللاً، وتُرفض بلا قراءة.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _askNotifications());
+  }
+
+  /// يشرح للمستخدم ثم يطلب الإذن — مرة واحدة في عمر التثبيت.
+  ///
+  /// لا يُعاد الطلب بعد ذلك أبداً: تكرار نافذة النظام يُنفّر المستخدم،
+  /// ورفضها قد يمنع طلبها مجدداً في كثير من الأجهزة على أي حال.
+  Future<void> _askNotifications() async {
+    if (!mounted) return;
+    if (await Notifications.asked) return;
+    if (await Notifications.granted) {
+      await Notifications.markAsked();
+      return;
+    }
+    if (!mounted) return;
+    await NotificationPermissionDialog.show(context);
   }
 
   @override
@@ -158,68 +179,134 @@ class _ShellState extends State<Shell> {
         children: [
           CompatScreen(api: widget.api, store: widget.store),
           SchemScreen(api: widget.api, onFileOpened: refreshQuota),
+          ChatScreen(api: widget.api, store: widget.store),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
-        destinations: const [
-          NavigationDestination(
-              icon: Icon(Icons.hub_outlined),
-              selectedIcon: Icon(Icons.hub),
+      bottomNavigationBar: AnimatedNavBar(
+        index: _tab,
+        onSelect: (i) => setState(() => _tab = i),
+        items: const [
+          NavItem(
+              icon: Icons.hub_outlined,
+              activeIcon: Icons.hub,
               label: 'التوافقات'),
-          NavigationDestination(
-              icon: Icon(Icons.schema_outlined),
-              selectedIcon: Icon(Icons.schema),
+          NavItem(
+              icon: Icons.schema_outlined,
+              activeIcon: Icons.schema,
               label: 'المخططات'),
+          NavItem(
+              icon: Icons.forum_outlined,
+              activeIcon: Icons.forum,
+              label: 'الدردشة'),
         ],
       ),
     );
   }
 
   Drawer _drawer(Map<String, dynamic>? user, bool isOwner, bool isGuest) {
+    final name = isGuest
+        ? 'زائر'
+        : (user?['displayName']?.toString().isNotEmpty == true
+            ? user!['displayName']
+            : user?['username'] ?? '');
     return Drawer(
       child: SafeArea(
         child: Column(
           children: [
+            // رأس الدرج: تدرّج الهوية + هالة ضوئية خفيفة تعطي عمقاً بدل
+            // مستطيل ملوّن مسطّح.
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(22),
-              decoration: BoxDecoration(gradient: XTheme.gradient),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.fromLTRB(20, 24, 20, 22),
+              decoration: BoxDecoration(
+                gradient: XTheme.gradient,
+                boxShadow: XTheme.glow(XTheme.accent, strength: .8),
+              ),
+              child: Stack(
                 children: [
-                  const CircleAvatar(
-                    radius: 28,
-                    backgroundColor: Colors.white24,
-                    child: Icon(Icons.person, color: Colors.white, size: 30),
+                  // دائرة ضوئية باهتة — تلميح عمق بلا صورة خلفية ثقيلة
+                  Positioned(
+                    top: -46, left: -30,
+                    child: Container(
+                      width: 130, height: 130,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(.10),
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    isGuest
-                        ? 'زائر'
-                        : (user?['displayName']?.toString().isNotEmpty == true
-                            ? user!['displayName']
-                            : user?['username'] ?? ''),
-                    style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white),
-                  ),
-                  Text(
-                    isGuest ? 'تصفح محدود' : (user?['role'] ?? ''),
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 56, height: 56,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(.20),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                  color: Colors.white.withOpacity(.45),
+                                  width: 2),
+                            ),
+                            child: Icon(
+                                isOwner
+                                    ? Icons.shield_moon_outlined
+                                    : (isGuest
+                                        ? Icons.person_outline
+                                        : Icons.person),
+                                color: Colors.white,
+                                size: 29),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w900,
+                                        color: Colors.white)),
+                                const SizedBox(height: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(.22),
+                                    borderRadius: BorderRadius.circular(30),
+                                  ),
+                                  child: Text(
+                                    isOwner
+                                        ? 'المالك'
+                                        : (isGuest
+                                            ? 'تصفح محدود'
+                                            : (user?['role'] ?? 'مشترك')),
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             if (isOwner)
               _item(Icons.dashboard_customize_outlined, 'لوحة تحكم المالك', () {
                 Navigator.pop(context);
                 Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) =>
-                        OwnerScreen(api: widget.api, store: widget.store)));
+                        OwnerGate(api: widget.api, store: widget.store)));
               }, highlight: true),
             _item(Icons.send_rounded, 'تواصل مع المالك', () {
               openExternal(context, _cfg.telegram, label: 'تيليجرام');
@@ -234,7 +321,7 @@ class _ShellState extends State<Shell> {
             if (!isGuest && !isOwner)
               _item(Icons.verified_user_outlined, 'حساب مفعّل', null),
             _deviceIdTile(),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             // تبديل الثيم — أسود / أبيض
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -244,7 +331,9 @@ class _ShellState extends State<Shell> {
                   padding: const EdgeInsets.all(4),
                   decoration: BoxDecoration(
                     color: XTheme.surface2,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(XTheme.rMd),
+                    border: Border.all(
+                        color: XTheme.textDim.withOpacity(.14)),
                   ),
                   child: Row(
                     children: [
@@ -256,7 +345,7 @@ class _ShellState extends State<Shell> {
               ),
             ),
             const Spacer(),
-            const Divider(height: 1),
+            Divider(height: 1, color: XTheme.textDim.withOpacity(.18)),
             _item(Icons.logout, isGuest ? 'تسجيل الدخول' : 'تسجيل الخروج',
                 () async {
               Navigator.pop(context);
@@ -284,16 +373,34 @@ class _ShellState extends State<Shell> {
 
   Widget _item(IconData icon, String label, VoidCallback? onTap,
       {bool highlight = false}) {
-    return ListTile(
-      leading: Icon(icon,
-          color: highlight ? XTheme.cyan : XTheme.textDim, size: 22),
-      title: Text(label,
-          style: TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 14,
-              color: highlight ? XTheme.cyan : XTheme.text)),
-      onTap: onTap,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: ListTile(
+        dense: true,
+        // أيقونة في مربّع ملوّن — تعطي العنصر ثقلاً بصرياً بدل أيقونة عائمة
+        leading: Container(
+          width: 34, height: 34,
+          decoration: BoxDecoration(
+            gradient: highlight ? XTheme.gradient : null,
+            color: highlight ? null : XTheme.surface2,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon,
+              color: highlight ? Colors.white : XTheme.textDim, size: 18),
+        ),
+        title: Text(label,
+            style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+                color: highlight ? XTheme.accent : XTheme.text)),
+        trailing: onTap == null
+            ? null
+            : Icon(Icons.chevron_left_rounded,
+                size: 20, color: XTheme.textDim.withOpacity(.6)),
+        onTap: onTap,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(XTheme.rMd)),
+      ),
     );
   }
 
@@ -647,6 +754,8 @@ class _ShellState extends State<Shell> {
           decoration: BoxDecoration(
             gradient: active ? XTheme.gradient : null,
             borderRadius: BorderRadius.circular(11),
+            boxShadow:
+                active ? XTheme.glow(XTheme.accent, strength: .5) : null,
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,

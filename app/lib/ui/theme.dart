@@ -38,6 +38,69 @@ class XTheme {
     end: Alignment.bottomLeft,
   );
 
+  /// تدرّج بارد للعناصر المعلوماتية (الأمان، السجل، الحالات المحايدة) —
+  /// يفصلها بصرياً عن البرتقالي الذي يعني «إجراء».
+  static const coolGradient = LinearGradient(
+    colors: [Color(0xFF22D3EE), Color(0xFF6366F1)],
+    begin: Alignment.topRight,
+    end: Alignment.bottomLeft,
+  );
+
+  /// نصف قطر موحّد — كل الحواف في التطبيق من هنا، فلا تتنافر الأرقام.
+  static const double rSm = 12;
+  static const double rMd = 16;
+  static const double rLg = 20;
+  static const double rXl = 26;
+
+  /// ظل ناعم متدرّج حسب الثيم. الظل الثقيل في الوضع الفاتح يبدو متسخاً،
+  /// وفي الداكن يبدو حلقة رمادية — فلكل وضع قيمه.
+  static List<BoxShadow> shadow({double lift = 1}) => isLight
+      ? [
+          BoxShadow(
+            color: const Color(0xFF0F172A).withOpacity(.05 * lift),
+            blurRadius: 10 * lift,
+            offset: Offset(0, 3 * lift),
+          ),
+          BoxShadow(
+            color: const Color(0xFF0F172A).withOpacity(.04 * lift),
+            blurRadius: 24 * lift,
+            offset: Offset(0, 10 * lift),
+          ),
+        ]
+      : [
+          BoxShadow(
+            color: Colors.black.withOpacity(.34 * lift),
+            blurRadius: 16 * lift,
+            offset: Offset(0, 6 * lift),
+          ),
+        ];
+
+  /// توهّج ملوّن — للعناصر النشطة فقط (الزر الرئيسي، الشريحة المحددة).
+  static List<BoxShadow> glow(Color c, {double strength = 1}) => [
+        BoxShadow(
+          color: c.withOpacity((isLight ? .26 : .38) * strength),
+          blurRadius: 18 * strength,
+          offset: Offset(0, 6 * strength),
+        ),
+      ];
+
+  /// تعبئة زجاجية للبطاقات الداخلية — تدرّج خفيف بدل لون مسطّح.
+  static BoxDecoration panel({double radius = rLg, Color? tint}) =>
+      BoxDecoration(
+        gradient: LinearGradient(
+          colors: isLight
+              ? [surface, surface2.withOpacity(.55)]
+              : [surface2.withOpacity(.72), surface.withOpacity(.42)],
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+        ),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(
+          color: (tint ?? (isLight ? Colors.black : Colors.white))
+              .withOpacity(isLight ? .07 : .08),
+        ),
+      );
+
   static bool isLight = true;
 
   static void apply(bool light) {
@@ -82,20 +145,25 @@ class XTheme {
       cardTheme: CardThemeData(
         color: surface,
         elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(rLg)),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: surface2,
-        hintStyle: TextStyle(color: textDim),
+        hintStyle: TextStyle(color: textDim, fontSize: 14),
+        labelStyle: TextStyle(color: textDim),
         border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(rMd),
             borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(rMd),
+            borderSide: BorderSide(
+                color: (light ? Colors.black : Colors.white).withOpacity(.06))),
         focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: accent, width: 1.5)),
+            borderRadius: BorderRadius.circular(rMd),
+            borderSide: const BorderSide(color: accent, width: 1.6)),
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
       ),
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: surface,
@@ -106,11 +174,63 @@ class XTheme {
       drawerTheme: DrawerThemeData(backgroundColor: surface),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: surface2,
+        contentTextStyle: TextStyle(
+            color: text, fontSize: 13.5, fontWeight: FontWeight.w600),
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        elevation: 6,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(rMd)),
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: surface,
+        elevation: 8,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(rXl)),
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: surface,
+        surfaceTintColor: Colors.transparent,
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(rXl))),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: accent,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 15),
+          textStyle:
+              const TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(rMd)),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          foregroundColor: accent,
+          textStyle: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: surface2,
+        side: BorderSide.none,
+        labelStyle: TextStyle(
+            color: text, fontSize: 12, fontWeight: FontWeight.w700),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(rSm)),
+      ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: accent,
+        unselectedLabelColor: textDim,
+        indicatorSize: TabBarIndicatorSize.label,
+        dividerColor: Colors.transparent,
+      ),
+      progressIndicatorTheme: const ProgressIndicatorThemeData(color: accent),
+      listTileTheme: ListTileThemeData(
+        iconColor: textDim,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(rMd)),
       ),
       iconTheme: IconThemeData(color: text),
       dividerColor: textDim.withOpacity(.2),
+      splashFactory: InkSparkle.splashFactory,
     );
   }
 }
@@ -136,41 +256,136 @@ class ThemeController extends ChangeNotifier {
   bool get isLight => XTheme.isLight;
 }
 
-/// بطاقة زجاجية متدرجة الحواف
+/// بطاقة زجاجية متدرجة الحواف — الوحدة البصرية الأساسية في التطبيق.
 class GlassCard extends StatelessWidget {
-  const GlassCard({super.key, required this.child, this.padding, this.onTap});
+  const GlassCard({
+    super.key,
+    required this.child,
+    this.padding,
+    this.onTap,
+    this.accent,
+    this.radius = XTheme.rLg,
+  });
+
   final Widget child;
   final EdgeInsets? padding;
   final VoidCallback? onTap;
 
+  /// لون شريط جانبي رفيع — يميّز البطاقة بلا زخرفة زائدة.
+  final Color? accent;
+  final double radius;
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: XTheme.surface.withOpacity(XTheme.isLight ? 1 : .75),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-            color: (XTheme.isLight ? Colors.black : Colors.white)
-                .withOpacity(XTheme.isLight ? .10 : .06)),
-        boxShadow: XTheme.isLight
-            ? [
-                BoxShadow(
-                    color: Colors.black.withOpacity(.06),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4))
-              ]
-            : null,
-      ),
+    final inner = Container(
+      decoration: XTheme.panel(radius: radius, tint: accent),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(radius),
+          splashColor: (accent ?? XTheme.accent).withOpacity(.07),
+          highlightColor: Colors.transparent,
           child: Padding(
             padding: padding ?? const EdgeInsets.all(16),
             child: child,
           ),
         ),
+      ),
+    );
+
+    final shadowed = DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
+        boxShadow: XTheme.shadow(),
+      ),
+      child: inner,
+    );
+
+    if (accent == null) return shadowed;
+    // الشريط الجانبي يُرسم داخل حدود البطاقة نفسها فلا يزيح المحتوى.
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: Stack(
+        children: [
+          shadowed,
+          Positioned(
+            top: 0,
+            bottom: 0,
+            right: 0,
+            child: Container(width: 3.5, color: accent),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// عنوان قسم — سطر واحد بوزن ثقيل وخط سفلي متدرّج قصير.
+class SectionTitle extends StatelessWidget {
+  const SectionTitle(this.text, {super.key, this.icon, this.trailing});
+
+  final String text;
+  final IconData? icon;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12, top: 4),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Container(
+              width: 30, height: 30,
+              decoration: BoxDecoration(
+                gradient: XTheme.gradient,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 16, color: Colors.white),
+            ),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: Text(text,
+                style: const TextStyle(
+                    fontSize: 15.5, fontWeight: FontWeight.w900)),
+          ),
+          if (trailing != null) trailing!,
+        ],
+      ),
+    );
+  }
+}
+
+/// شريحة حالة ملوّنة — للحالات (نشط، موقوف، منتهي) بدل نص عارٍ.
+class StatusPill extends StatelessWidget {
+  const StatusPill(this.label, {super.key, required this.color, this.icon});
+
+  final String label;
+  final Color color;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.13),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: color.withOpacity(.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 5),
+          ],
+          Text(label,
+              style: TextStyle(
+                  color: color, fontSize: 11.5, fontWeight: FontWeight.w800)),
+        ],
       ),
     );
   }

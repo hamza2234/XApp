@@ -58,9 +58,21 @@ class _SchemScreenState extends State<SchemScreen>
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
               child: TextField(
                 onChanged: (v) => setState(() => _filter = v),
+                textInputAction: TextInputAction.search,
                 decoration: InputDecoration(
                   hintText: 'ابحث عن شركة…',
-                  prefixIcon: Icon(Icons.search, color: XTheme.textDim),
+                  prefixIcon: Icon(Icons.search_rounded,
+                      color: XTheme.textDim, size: 21),
+                  suffixIcon: _filter.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: Icon(Icons.close_rounded,
+                              size: 19, color: XTheme.textDim),
+                          onPressed: () {
+                            setState(() => _filter = '');
+                            FocusScope.of(context).unfocus();
+                          },
+                        ),
                   isDense: true,
                 ),
               ),
@@ -70,14 +82,30 @@ class _SchemScreenState extends State<SchemScreen>
             SliverFillRemaining(
                 child: Center(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.lock_outline, color: XTheme.gold, size: 44),
-              const SizedBox(height: 12),
+              Container(
+                width: 84, height: 84,
+                decoration: BoxDecoration(
+                  color: XTheme.gold.withOpacity(.10),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: XTheme.gold.withOpacity(.24)),
+                ),
+                child: const Icon(Icons.lock_outline,
+                    color: XTheme.gold, size: 36),
+              ),
+              const SizedBox(height: 16),
               Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 40),
                   child: Text(_error!,
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: XTheme.textDim))),
-              TextButton(onPressed: _load, child: const Text('إعادة المحاولة')),
+                      style: TextStyle(
+                          color: XTheme.textDim,
+                          height: 1.6,
+                          fontSize: 13.5))),
+              const SizedBox(height: 12),
+              TextButton.icon(
+                  onPressed: _load,
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('إعادة المحاولة')),
             ])))
           else if (_brands == null)
             SliverFillRemaining(
@@ -116,8 +144,19 @@ class _SchemScreenState extends State<SchemScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                BrandLogo(name: b.name, size: 56),
-                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(9),
+                  decoration: BoxDecoration(
+                    color: XTheme.isLight
+                        ? Colors.white
+                        : Colors.white.withOpacity(.06),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: XTheme.textDim.withOpacity(.12)),
+                  ),
+                  child: BrandLogo(name: b.name, size: 46),
+                ),
+                const SizedBox(height: 9),
                 Text(b.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,

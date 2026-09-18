@@ -3,12 +3,16 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/api.dart';
 import 'core/config.dart';
 import 'core/app_config.dart';
+import 'core/notifications.dart';
 import 'core/store.dart';
 import 'ui/theme.dart';
 import 'ui/splash.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // تهيئة الإشعارات قبل بناء الواجهة: الإعلان الذي يصل أثناء الإقلاع يجب
+  // أن يجد قناة جاهزة، وإلا ضاع بلا أثر.
+  Notifications.init();
   runApp(const XApp());
 }
 
