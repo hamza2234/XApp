@@ -2242,7 +2242,9 @@ export default {
             packages: Array.isArray(body.packages)
               ? body.packages
                   .map(p => ({
-                    cards: Math.max(1, Math.min(1000000, Math.floor(Number(p?.cards) || 0))),
+                    // بلا Math.max(1,...): كان يرفع الصفر إلى واحد فيمرّ من
+                    // المرشّح أدناه باقةٌ بلا بطاقات.
+                    cards: Math.min(1000000, Math.max(0, Math.floor(Number(p?.cards) || 0))),
                     price: String(p?.price ?? '').slice(0, 30),
                     days: Math.max(0, Math.min(3650, Math.floor(Number(p?.days) || 0))),
                     desc: String(p?.desc ?? '').slice(0, 120),
