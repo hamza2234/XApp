@@ -1071,6 +1071,7 @@ class _SecurityTabState extends State<_SecurityTab> {
     'banned_device_hit': ('وصول من جهاز محظور', XTheme.danger),
     'device_banned': ('حظر جهاز', XTheme.danger),
     'ip_banned': ('حظر IP', XTheme.danger),
+    'security_logs_cleared': ('حذف سجلات الأمان', XTheme.gold),
   };
 
   Future<void> _copy(String value, String what) async {
@@ -1092,6 +1093,45 @@ class _SecurityTabState extends State<_SecurityTab> {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('تم الحظر')));
+      }
+    } on ApiException catch (ex) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(ex.message)));
+      }
+    }
+  }
+
+  /// يمسح السجل: الكل، أو نوعاً واحداً، أو ما قبل تاريخ.
+  Future<void> _clearLogs({String? reason}) async {
+    final label = reason == null
+        ? 'كل السجلات'
+        : (_labels[reason]?.$1 ?? reason);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('حذف السجلات؟'),
+        content: Text('سيُحذف $label نهائياً ولا يمكن التراجع.',
+            style: const TextStyle(fontSize: 12.5)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: XTheme.danger),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final n = await widget.api.clearSecurityLogs(reason: reason);
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('حُذف $n سجلاً')));
       }
     } on ApiException catch (ex) {
       if (mounted) {
@@ -1127,9 +1167,84 @@ class _SecurityTabState extends State<_SecurityTab> {
                 style: TextStyle(fontSize: 12, color: XTheme.textDim)),
           ]),
         ),
+        // حذف السجلات — مسح الكل أو نوع واحد فقط.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+          child: Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _events == null || _events!.isEmpty
+                    ? null
+                    : () => _clearLogs(),
+                icon: Icon(Icons.delete_sweep_outlined,
+                    size: 18, color: XTheme.danger),
+                label: const Text('حذف كل السجلات'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: XTheme.danger,
+                  side: BorderSide(color: XTheme.danger.withOpacity(.5)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _events == null || _events!.isEmpty
+                    ? null
+                    : _pickReasonToClear,
+                icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
+                label: const Text('حذف نوع محدد'),
+              ),
+            ),
+          ]),
+        ),
         Expanded(child: _list()),
       ],
     );
+  }
+
+  /// اختيار نوع حدث لحذفه وحده — بدل مسح السجل كله.
+  Future<void> _pickReasonToClear() async {
+    final types = <String>{
+      ...?_events
+          ?.map((e) => e['reason']?.toString())
+          .whereType<String>(),
+      ..._labels.keys,
+    }.toList()
+      ..sort((a, b) =>
+          (_labels[a]?.$1 ?? a).compareTo(_labels[b]?.$1 ?? b));
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: XTheme.surface,
+      builder: (c) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Text('اختر نوع الحدث لحذفه',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w800, color: XTheme.textDim)),
+            ),
+            for (final r in types)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.shield_outlined,
+                  size: 18,
+                  // اللون يميّز الخطورة كما في بطاقة الحدث.
+                  color: _labels[r]?.$2 ?? XTheme.gold,
+                ),
+                title: Text(_labels[r]?.$1 ?? r),
+                subtitle: Text(r,
+                    style: const TextStyle(fontSize: 10),
+                    textDirection: TextDirection.ltr),
+                onTap: () => Navigator.pop(c, r),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null) await _clearLogs(reason: picked);
   }
 
   Widget _list() {
@@ -1781,6 +1896,23 @@ class _WalletsTabState extends State<_WalletsTab> {
                                 },
                                 icon: const Icon(Icons.add, size: 18),
                               ),
+                              // تحكم كامل: إنقاص، تعديل، حذف — لا شحن فقط.
+                              IconButton(
+                                tooltip: 'إنقاص عملة',
+                                onPressed: () => _adjust(w, -1),
+                                icon: const Icon(Icons.remove, size: 18),
+                              ),
+                              IconButton(
+                                tooltip: 'تعديل المحفظة',
+                                onPressed: () => _edit(w),
+                                icon: const Icon(Icons.tune, size: 18),
+                              ),
+                              IconButton(
+                                tooltip: 'حذف المحفظة',
+                                onPressed: () => _delete(w),
+                                icon: Icon(Icons.delete_outline,
+                                    size: 18, color: XTheme.danger),
+                              ),
                             ]),
                           ),
                         );
@@ -1789,6 +1921,99 @@ class _WalletsTabState extends State<_WalletsTab> {
                   ),
       ),
     ]);
+  }
+
+  /// إنقاص/زيادة بجرعة — الرصيد لا ينزل تحت الصفر على الخادم.
+  Future<void> _adjust(Map<dynamic, dynamic> w, int delta) async {
+    try {
+      await widget.api.adjustWallet('${w['device_id']}', delta);
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('فشل التعديل: $e')));
+      }
+    }
+  }
+
+  /// تعديل صريح: تعيين الرصيد والصلاحية لقيم محددة (لا جمع).
+  Future<void> _edit(Map<dynamic, dynamic> w) async {
+    final bal = (w['balance'] as num?)?.toInt() ?? 0;
+    final coins = TextEditingController(text: '$bal');
+    final days = TextEditingController(text: '0');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('تعديل المحفظة'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('${w['device_id']}',
+              style: const TextStyle(fontSize: 11),
+              textDirection: TextDirection.ltr),
+          const SizedBox(height: 12),
+          TextField(
+            controller: coins,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+                labelText: 'الرصيد (قيمة محددة)', isDense: true),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: days,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+                labelText: 'تمديد الصلاحية (أيام، 0=بلا حد)', isDense: true),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('حفظ')),
+        ],
+      ),
+    );
+    final vCoins = int.tryParse(coins.text.trim()) ?? 0;
+    final vDays = int.tryParse(days.text.trim()) ?? 0;
+    coins.dispose();
+    days.dispose();
+    if (ok != true) return;
+    try {
+      await widget.api.editWallet('${w['device_id']}', vCoins, vDays);
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('فشل الحفظ: $e')));
+      }
+    }
+  }
+
+  /// حذف المحفظة بالكامل — الزائر يفقد رصيده المدفوع.
+  Future<void> _delete(Map<dynamic, dynamic> w) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('حذف المحفظة؟'),
+        content: Text('سيُحذف رصيد الجهاز ${w['device_id']} نهائياً.',
+            style: const TextStyle(fontSize: 12)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: XTheme.danger),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.api.deleteWallet('${w['device_id']}');
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('فشل الحذف: $e')));
+      }
+    }
   }
 }
 

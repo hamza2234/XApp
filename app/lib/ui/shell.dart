@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../core/api.dart';
@@ -25,7 +27,7 @@ class Shell extends StatefulWidget {
   State<Shell> createState() => _ShellState();
 }
 
-class _ShellState extends State<Shell> {
+class _ShellState extends State<Shell> with WidgetsBindingObserver {
   int _tab = 0;
   // العدّاد الموحّد: منحة يومية + رصيد عملات، مصدره /v1/me وحده.
   int _freeLeft = 0;
@@ -35,18 +37,43 @@ class _ShellState extends State<Shell> {
   // الإعدادات المشتركة: رابط تيليجرام والباقات من مصدر واحد.
   AppConfig get _cfg => AppConfig.instance;
 
+  /// فحص دوري للإعلانات الجديدة. لا دفع حقيقي (FCM) في هذا المشروع،
+  /// فالاستقصاء هو الوسيلة المتاحة لإبلاغ الأجهزة الأخرى.
+  Timer? _annTimer;
+
   /// ما تبقّى فعلاً = المجاني اليومي + العملات. رقم واحد يُعرض ويُخصم.
   int get _totalLeft => _freeLeft + _coins;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // إعادة البناء فوراً إن وصل تحديث للرابط أو الباقات.
     _cfg.addListener(_onConfigChanged);
     _refresh();
     // طلب إذن الإشعارات بعد استقرار الشاشة الأولى، لا أثناءها: نافذة
     // النظام فوق شاشة التهيئة تبدو خللاً، وتُرفض بلا قراءة.
     WidgetsBinding.instance.addPostFrameCallback((_) => _askNotifications());
+    _annTimer = Timer.periodic(
+        const Duration(minutes: 5), (_) => _pollAnnouncements());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // العودة إلى التطبيق أهمّ لحظة: المستخدم ينظر إلى الشاشة الآن.
+    if (state == AppLifecycleState.resumed) _pollAnnouncements();
+  }
+
+  /// يجلب الإعلانات ويُنبّه عن الجديد منها على هذا الجهاز.
+  Future<void> _pollAnnouncements() async {
+    if (!mounted) return;
+    try {
+      final boot = await widget.api.bootstrap();
+      final anns = boot['announcements'];
+      if (anns is List) await Notifications.notifyNewAnnouncements(anns);
+    } catch (_) {
+      // فشل الشبكة لا يستحق إزعاج المستخدم — تُعاد المحاولة في الدورة التالية.
+    }
   }
 
   /// يشرح للمستخدم ثم يطلب الإذن — مرة واحدة في عمر التثبيت.
@@ -66,6 +93,8 @@ class _ShellState extends State<Shell> {
 
   @override
   void dispose() {
+    _annTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _cfg.removeListener(_onConfigChanged);
     super.dispose();
   }

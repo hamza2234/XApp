@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'theme.dart';
@@ -121,6 +123,7 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
                         sweep: _sweep.value,
                         pulse: _pulse.value,
                         light: XTheme.isLight,
+                        direction: Directionality.of(context),
                       ),
                     );
                   },
@@ -226,6 +229,23 @@ class _NavCell extends StatelessWidget {
   }
 }
 
+/// مركز المؤشّر الأفقي لتبويب نشط.
+///
+/// `position` بوحدات العناصر (قد يكون كسرياً أثناء الانزلاق). الاتجاه مهم:
+/// في RTL العمود 0 يقع على اليمين لا اليسار، فالمرآة ضرورية وإلا استقر الخط
+/// تحت التبويب المعاكس (كان يظهر تحت «الدردشة» عند الضغط على «التوافقات»).
+double navIndicatorCenterX(
+  double width,
+  int count,
+  double position,
+  TextDirection direction,
+) {
+  if (count == 0) return 0;
+  final cell = width / count;
+  final leftBased = cell * (position + .5);
+  return direction == TextDirection.rtl ? width - leftBased : leftBased;
+}
+
 /// يرسم المؤشّر المنزلق هالةً متدرّجة خلف التبويب النشط، واللمعان العابر.
 class _NavIndicatorPainter extends CustomPainter {
   _NavIndicatorPainter({
@@ -234,6 +254,7 @@ class _NavIndicatorPainter extends CustomPainter {
     required this.sweep,
     required this.pulse,
     required this.light,
+    required this.direction,
   });
 
   /// موضع التبويب النشط بوحدات العناصر (قد يكون كسرياً أثناء الانزلاق).
@@ -244,12 +265,15 @@ class _NavIndicatorPainter extends CustomPainter {
   final double sweep;
   final double pulse;
   final bool light;
+  final TextDirection direction;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (count == 0) return;
     final cell = size.width / count;
-    final center = cell * (position + .5);
+    final center = navIndicatorCenterX(size.width, count, position, direction);
+    // إشارة الاتجاه: تُحرك الجسيمات مع اتجاه القراءة لا عكسه.
+    final dir = direction == TextDirection.rtl ? -1.0 : 1.0;
 
     // ===== هالة متدرّجة خلف التبويب النشط =====
     final haloW = cell * .92;
@@ -275,6 +299,48 @@ class _NavIndicatorPainter extends CustomPainter {
         ).createShader(halo)
         ..maskFilter = MaskFilter.blur(BlurStyle.normal, 7 + pulse * 4),
     );
+
+    // ===== نواة ذرّية: مدارات وجسيمات تدور حول التبويب النشط =====
+    // `pulse` متحرّك دائماً، فالمدارات لا تتوقف أبداً — حركة مستمرة لا وميض.
+    final orbitCenter = Offset(center, size.height * .52);
+    for (var o = 0; o < 3; o++) {
+      // مدارات بأقطار مختلفة واتجاهات متعاكسة لإحساس ذرّي حقيقي.
+      final radius = cell * (.30 + o * .16);
+      final spin = pulse * 2 * 3.14159265 * (o.isEven ? 1 : -1) + o * 2.1;
+      final ellY = .55 + o * .05;
+
+      // حلقة المدار — باهتة حتى لا تزاحم الأيقونة.
+      canvas.drawOval(
+        Rect.fromCenter(
+          center: orbitCenter,
+          width: radius * 2,
+          height: radius * 2 * ellY,
+        ),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..color = XTheme.accent.withOpacity(light ? .16 : .22),
+      );
+
+      // جسيم واحد يدور على كل مدار.
+      final p = Offset(
+        orbitCenter.dx + dir * radius * _cos(spin),
+        orbitCenter.dy + radius * ellY * _sin(spin),
+      );
+      // وهج خفيف حول الجسيم ثم الجسيم نفسه.
+      canvas.drawCircle(
+        p,
+        2.6,
+        Paint()
+          ..color = XTheme.accent.withOpacity(light ? .45 : .6)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+      );
+      canvas.drawCircle(
+        p,
+        1.5,
+        Paint()..color = XTheme.accent.withOpacity(.95),
+      );
+    }
 
     // خط سفلي رفيع تحت التبويب النشط — يثبّت المؤشّر بصرياً
     final barW = cell * .34;
@@ -317,5 +383,10 @@ class _NavIndicatorPainter extends CustomPainter {
       old.position != position ||
       old.sweep != sweep ||
       old.pulse != pulse ||
-      old.count != count;
+      old.count != count ||
+      old.direction != direction;
 }
+
+// دوال مثلثية محلية — تتجنّب استيراد dart:math كلّه من أجل دالتين.
+double _sin(double x) => math.sin(x);
+double _cos(double x) => math.cos(x);

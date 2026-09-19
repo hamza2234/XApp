@@ -438,6 +438,19 @@ class Api {
   /// حذف محفظة بالكامل.
   Future<void> deleteWallet(String deviceId) => ownerSend(
       'DELETE', '/v1/owner/wallets/${Uri.encodeComponent(deviceId)}', null);
+
+  /// حذف سجلات الأمان. بلا وسائط يمسح الكل؛ `reason` يمسح نوعاً واحداً.
+  Future<int> clearSecurityLogs({String? reason, int? beforeMs}) async {
+    final q = <String>[
+      if (reason != null && reason.isNotEmpty) 'reason=${Uri.encodeComponent(reason)}',
+      if (beforeMs != null && beforeMs > 0) 'before=$beforeMs',
+    ];
+    final r = await ownerSend(
+        'DELETE',
+        '/v1/owner/security${q.isEmpty ? '' : '?${q.join('&')}'}',
+        null);
+    return (r['deleted'] as num?)?.toInt() ?? 0;
+  }
   Future<List<dynamic>> ownerBans() async =>
       (await ownerGet('/v1/owner/bans'))['bans'] as List;
   Future<void> banDevice(String deviceId, String reason) =>

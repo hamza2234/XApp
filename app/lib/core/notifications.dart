@@ -17,6 +17,7 @@ class Notifications {
 
   static final _plugin = FlutterLocalNotificationsPlugin();
   static const _kAsked = 'x_notif_asked';
+  static const _kSeenAnns = 'x_seen_announcements';
   static const _channelId = 'mapx_announcements';
 
   /// قناة الإعلانات — أهمية عالية حتى يظهر الإشعار كرأس منبثق.
@@ -110,6 +111,68 @@ class Notifications {
       notificationDetails: details,
       payload: payload,
     );
+  }
+
+  /// الإعلانات التي رأى صاحب الجهاز إشعارها بالفعل.
+  static Future<Set<String>> _seen() async {
+    final p = await SharedPreferences.getInstance();
+    return (p.getStringList(_kSeenAnns) ?? const []).toSet();
+  }
+
+  /// يُنشئ إشعاراً محلياً لكل إعلان جديد لم يُنبَّه عنه على هذا الجهاز.
+  ///
+  /// الحدّ المعروف: هذا ليس دفعاً حقيقياً (FCM). الإعلان يصل حين يفتح
+  /// المستخدم التطبيق أو يعود إليه، لا وهو مغلق تماماً. الدفع الحقيقي يحتاج
+  /// مشروع Firebase وملف `google-services.json`، وليسا معدّين في هذا المستودع.
+  ///
+  /// نعرض إشعاراً واحداً عند وجود إعلانات جديدة مهما كان عددها — ثلاثة
+  /// إشعارات دفعة واحدة تُنفّر، وواحد يلفت النظر بلا إزعاج.
+  static Future<int> notifyNewAnnouncements(List<dynamic> anns) async {
+    if (!Platform.isAndroid) return 0;
+    if (anns.isEmpty) return 0;
+    if (!await granted) return 0;
+
+    final seen = await _seen();
+    final fresh = <Map>[
+      for (final a in anns)
+        if (a is Map && !seen.contains('${a['id']}')) a,
+    ];
+    if (fresh.isEmpty) return 0;
+
+    await _plugin.show(
+      // معرّف ثابت: يتحدّث الإشعار بدل تكديس نسخ.
+      id: 9001,
+      title: fresh.length == 1
+          ? '${fresh.first['title'] ?? 'إعلان جديد'}'
+          : '${fresh.length} إعلانات جديدة',
+      body: fresh.length == 1
+          ? '${fresh.first['subtitle'] ?? ''}'
+          : '${fresh.first['title'] ?? ''} و${fresh.length - 1} غيرها',
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channelId,
+          'إعلانات MAPX',
+          channelDescription: 'إشعارات إعلانات المالك والعروض الجديدة',
+          importance: Importance.high,
+          priority: Priority.high,
+          styleInformation: BigTextStyleInformation(
+            fresh
+                .map((a) => '• ${a['title'] ?? ''}\n${a['subtitle'] ?? ''}')
+                .join('\n\n'),
+            contentTitle: 'إعلانات MAPX',
+            summaryText: 'MAPX',
+          ),
+          color: XTheme.accent,
+          icon: '@mipmap/ic_launcher',
+        ),
+      ),
+    );
+
+    // تُحفظ بعد العرض الناجح فقط — إخفاق الإشعار يجب ألّا يمنع المحاولة لاحقاً.
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList(
+        _kSeenAnns, {...seen, ...fresh.map((a) => '${a['id']}')}.toList());
+    return fresh.length;
   }
 }
 

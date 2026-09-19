@@ -3,6 +3,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:x_app/core/store.dart';
 
 void main() {
+  // SharedPreferences يمرّ عبر قناة المنصّة، فيلزم تهيئة الربط قبل أي اختبار
+  // وإلا فشل كل اختبار برسالة “Binding has not yet been initialized”.
+  TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
   group('عدّاد بحوث التوافقات اليومي', () {

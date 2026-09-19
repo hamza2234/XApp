@@ -795,10 +795,63 @@ async function mirrorSearchCompat(
     binds.push(`%${t}%`)
     clauses.push(`LOWER(data) LIKE ?${binds.length}`)
   }
-  binds.push(opts.limit)
-  return mrows(await db.prepare(
-    `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')} LIMIT ?${binds.length}`
+  // نجلب أكثر من الحدّ ثم نرتّب بالأهمية: الاستعلام بلا ORDER BY كان يُرجع
+  // الصفوف بترتيب تخزين اعتباطي، فيظهر السجل المطابق تماماً بعد صفّين.
+  const fetchLimit = Math.min(opts.limit * 3, 360)
+  binds.push(fetchLimit)
+  const rows = mrows(await db.prepare(
+    `SELECT id, data FROM docs WHERE ${clauses.join(' AND ')}
+     ORDER BY sort_order IS NULL, sort_order, id LIMIT ?${binds.length}`
   ).bind(...binds).all<{ id: string; data: string }>())
+
+  // الترتيب النهائي في JS: أسماء الحقول في `data` JSON غير موثّقة في القاعدة،
+  // فالاعتماد على json_extract لأسماء مخمّنة هشّ. هنا نقرأ الحقول المحلّلة.
+  const q = opts.query.toLowerCase().trim()
+  const scored = rows.map(d => ({ d, s: relevanceScore(d.fields, tokens, q) }))
+  scored.sort((a, b) => b.s - a.s || a.d.id.localeCompare(b.d.id))
+  return scored.slice(0, opts.limit).map(x => x.d)
+}
+
+/**
+ * درجة ملاءمة سجل لعبارة البحث — الأعلى أولاً.
+ *
+ * بنية سجل التوافقات: `compatibleModels` قائمة موديلات، و`subCategory` كائن
+ * فيه `name`، و`componentType` نوع القطعة. المطابقة في موديل بعينه أقوى دليل
+ * من مطابقة عابرة في نص الحقل كله. بلا هذا الترتيب يظهر سجل هامشي قبل السجل
+ * الذي يبحث عنه المستخدم حرفياً.
+ */
+function relevanceScore(fields: Record<string, unknown>, tokens: string[], q: string): number {
+  const models = Array.isArray(fields.compatibleModels)
+    ? (fields.compatibleModels as unknown[]).map(m => String(m).toLowerCase())
+    : [];
+  const sub = (fields.subCategory && typeof fields.subCategory === 'object')
+    ? String((fields.subCategory as Record<string, unknown>).name ?? '').toLowerCase()
+    : String(fields.subCategory ?? '').toLowerCase();
+  const hay = JSON.stringify(fields).toLowerCase()
+
+  // الترتيب يُبنى على أفضل موديل في السجل لا على مجموع كل الموديلات:
+  // سجل فيه عشرة موديلات كلها مطابقة جزئية كان يسبق سجلاً فيه الموديل
+  // المطلوب حرفياً. المهم أن يوجد موديل واحد مطابق تماماً.
+  let best = 0
+  for (const m of models) {
+    const cm = m.replace(/[\s-]+/g, '')
+    const cq = q.replace(/[\s-]+/g, '')
+    let s = 0
+    if (cq && cm === cq) s = 100
+    else if (cq && cm.startsWith(cq)) s = 80
+    // اسم الموديل يُكتب في البيانات مسبوقاً بالشركة («xiaomi redmi note 11»)،
+    // فمطابقة الذيل تطابق الاسم الذي كتبه المستخدم.
+    else if (cq && cm.endsWith(cq)) s = 70
+    else if (cq && cq.length >= 3 && cm.includes(cq)) s = 60
+    else s = tokens.reduce((acc, t) =>
+      acc + (m === t ? 50 : m.startsWith(t) ? 30 : m.includes(t) ? 18 : 0), 0)
+    if (s > best) best = s
+  }
+
+  // كسر التعادل: مطابقة النوع الفرعي، ثم أي مطابقة في السجل كله.
+  let tie = tokens.reduce((acc, t) => acc + (sub.includes(t) ? 4 : 0), 0)
+  for (const t of tokens) if (hay.includes(t)) tie += 1
+  return best * 1000 + tie
 }
 
 /** الأنواع المتوفرة لشركة — استعلام تجميعي واحد، مخزّن مؤقتاً. */
@@ -2593,6 +2646,31 @@ export default {
             attacksOnly: !all,
             summary: byReason.results ?? []
           })
+        }
+
+        // حذف سجلات الأمان: الكل، أو نوع واحد، أو ما قبل تاريخ.
+        // السجل ينمو بلا حد عملياً، وتركه للقارئ وحده يجعله عديم الفائدة.
+        // محميّ بنفس بوابة جلسة المالك لكل مسارات /v1/owner/*.
+        if (path === '/v1/owner/security' && request.method === 'DELETE') {
+          const reason = url.searchParams.get('reason')?.trim() ?? ''
+          const before = Number(url.searchParams.get('before')) || 0
+          let deleted = 0
+          if (reason) {
+            const r = await env.XDB.prepare(
+              'DELETE FROM x_security WHERE reason = ?1'
+            ).bind(reason).run()
+            deleted = Number(r.meta?.changes ?? 0)
+          } else if (before > 0) {
+            const r = await env.XDB.prepare(
+              'DELETE FROM x_security WHERE at < ?1'
+            ).bind(new Date(before).toISOString()).run()
+            deleted = Number(r.meta?.changes ?? 0)
+          } else {
+            const r = await env.XDB.prepare('DELETE FROM x_security').run()
+            deleted = Number(r.meta?.changes ?? 0)
+          }
+          await logSecurity(env, request, 'security_logs_cleared')
+          return sealed({ ok: true, deleted })
         }
 
         if (path === '/v1/owner/announcements' && request.method === 'GET') {
