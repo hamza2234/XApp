@@ -159,3 +159,26 @@ $BT/apksigner verify --print-certs build/app/outputs/flutter-apk/app-arm64-v8a-r
   يجب إعلان `<queries>` مع `scheme https/http/tg` وحزم تيليجرام، وإلا يعيد
   `canLaunchUrl` القيمة `false`. استخدم `openExternal` في `lib/ui/external_link.dart`
   ولا تستخدم `canLaunchUrl` كشرط لإطلاق الرابط.
+
+## توزيع النسخ: الرابط الدائم على Cloudflare R2
+
+خادم التحميل المحلي (`/workspace/serve_dist.sh`، منفذ 12000) يعمل داخل بيئة
+العمل المؤقتة و**يموت كلما أُعيد إنشاء البيئة** فيتوقف الرابط ويشكو المستخدم
+أن «خادم التحميل لا يحمل». حلقة `while true` لا تكفي لأن إعادة إنشاء البيئة
+تقتل العملية الأم أيضاً.
+
+الرابط الدائم المعتمد (لا يعتمد على بيئة العمل):
+
+```
+https://pub-8da12185716441d4bcdcd4c49f395174.r2.dev/download.html
+```
+
+- الحاوية: `xapp-releases` على حساب Cloudflare، عامة عبر managed domain.
+- الملفات: `MAPX-v<النسخة>.apk` مع نسخ `-arm64` و `-armeabi-v7a` و `-x86_64`.
+- الرفع عبر API بلا wrangler:
+  `curl -X PUT https://api.cloudflare.com/client/v4/accounts/<ACC>/r2/buckets/xapp-releases/objects/<name> -H "Authorization: Bearer <token>" --data-binary @<file>`
+  التوكن في `/workspace/.cf_token` والحساب `4b386375f3294750ffdb6f89de3a09db`.
+- صفحة التنزيل تُنشر باسم `download.html` لأن روابطها نسبية فتعمل كما هي.
+
+عند كل نسخة جديدة: ارفع الحزم الأربع مع `download.html` و `SHA256.txt`، وتأكد
+أن بصمة الملف المنزّل من الرابط تطابق `sha256sum` المحلي.
