@@ -159,6 +159,15 @@ $BT/apksigner verify --print-certs build/app/outputs/flutter-apk/app-arm64-v8a-r
   يجب إعلان `<queries>` مع `scheme https/http/tg` وحزم تيليجرام، وإلا يعيد
   `canLaunchUrl` القيمة `false`. استخدم `openExternal` في `lib/ui/external_link.dart`
   ولا تستخدم `canLaunchUrl` كشرط لإطلاق الرابط.
+- **البصمة لا تتفعّل صامتة**: `local_auth_android` يعرض نافذة البصمة عبر
+  `Fragment`، فيحتاج النشاط أن يرث `FlutterFragmentActivity` لا `FlutterActivity`.
+  مع `FlutterActivity` يرجع `authenticate()` بلا نافذة وبلا خطأ ظاهر — أشبه
+  بمفتاح لا يفعل شيئاً. الأثر في `MainActivity.kt` وحده.
+- **`LaunchTheme`/`NormalTheme` بـ`parent` من `android:` تنهار على أندرويد 8-**
+  عند عرض نافذة البصمة؛ استخدم `Theme.AppCompat.*.NoActionBar` في
+  `res/values/styles.xml` و`res/values-night/styles.xml` معاً.
+- **`USE_BIOMETRIC` لا يُعلَن يدوياً**: قالب `local_auth_android` يعلنه في
+  manifest الملحق فيُدمج تلقائياً. إعلانه في manifest التطبيق زيادة بلا فائدة.
 
 ## توزيع النسخ: الرابط الدائم على Cloudflare R2
 
@@ -195,3 +204,141 @@ https://pub-8da12185716441d4bcdcd4c49f395174.r2.dev/download.html
 فـ`json_extract` على اسم مخمّن يهشّ؛ حقول التوافقات الفعلية هي
 `compatibleModels` (قائمة) و`subCategory` (كائن فيه `name`) و`componentType`.
 اختبار الحراسة: `app/test/compat_search_order_test.dart`.
+## بناء APK (بيئة بلا Android SDK)
+
+البيئة لا تأتي بـ Java ولا Android SDK ولا `unzip`. الحلول التي نجحت:
+
+- JDK: حزمة محمولة من Adoptium إلى `/workspace/jdk17`
+  (`api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse`).
+  `openjdk-17-jdk-headless` غير موجود في مستودع apt هنا.
+- SDK: `cmdline-tools` ثم `platforms;android-35` و`build-tools;35.0.0`.
+  ثبّت `CMake 3.22.1` تلقائياً أول بناء (من `pdfrx`).
+- فكّ `cmdline-tools.zip` بـ `zipfile` من Python: `unzip` غير مثبّت، وفكّه
+  بأداة أخرى يُفقد صلاحية التنفيذ فتفشل `sdkmanager` بـ `Permission denied`
+  — أضف `chmod +x bin/*` بعد الفكّ.
+- المتغيّرات: `JAVA_HOME=/workspace/jdk17`،
+  `ANDROID_HOME=ANDROID_SDK_ROOT=/workspace/android-sdk`.
+- البناء يستغرق ~6 دقائق؛ شغّله في الخلفية واقرأ `/tmp/apk_build.log`.
+- `flutter build apk --release` يخرج APK واحداً لكل المعماريات (80MB).
+  للملفات المفصولة: `--split-per-abi`.
+
+تحقق قبل التسليم: `apksigner verify --print-certs` (يجب أن تطابق SHA-256
+بصمة `xapp-release.jks`، وإلا فالتوقيع تصحيح لا إصدار)، و`aapt2 dump badging`
+لـ versionCode/versionName، ووجود `android.permission.INTERNET`.
+
+## فحص نوع الوسائط (فخّ عائلة MP4)
+
+مهم لرسائل الصوت: `mp4` و`m4a` و`3gp` تشترك كلها في علامة `ftyp` عند البايت
+الرابع. جدول `MEDIA_SIGNATURES` بمقارنة أول تطابق كان يصنّف **كل** ملف m4a
+فيديوَ، لأن قاعدة mp4 تسبقه — أي أن كل رسالة صوتية عُرضت بمشغّل فيديو.
+التمييز في `sniffMp4Family`: العلامة الداخلية (bytes 8..11: `M4A `/`isom`/`3gp`)
+ثم وجود مسار `vide` أو `soun`. افحص مقدّمة الملف وذيله (64KB) فقط: مسارات
+`moov` قد تأتي في الآخر، وقصّ الملف كاملاً يُكلف على المقاطع الكبيرة.
+
+اختبار عائلة MP4 في `/tmp/` كان يتحقق بست حالات (faststart، moov في الآخر،
+3gp، وبدون مسارات). أعِد مثلها عند تغيير الفحص.
+
+## إعادة إنتاج الـ worker محلياً للاختبار
+
+`wrangler dev --local --port 8788` على نسخة `/tmp/wtest` (بذرة D1 فيها
+حمزة/سوسو/سوس)، مع إضافة الأعمدة الجديدة عبر:
+`wrangler d1 execute x-app-db --local --command "ALTER TABLE ..."`.
+التوقيع JWT في الاختبار المحلي بسرّ ثابت — لا تخلط بينه وبين الإنتاج.
+
+جرّد الأعمدة عن بعد قبل النشر:
+`wrangler d1 execute x-app-db --remote --command "ALTER TABLE x_chat_messages ADD COLUMN media_seconds INTEGER NOT NULL DEFAULT 0"`.
+إضافة عمود في الكود بلا تطبيق الهجرة يُفشل الإدراج في الإنتاج.
+
+## واجهة الدردشة: ملء شاشة دائم
+
+الدردشة تعمل بملء الشاشة **تلقائياً** بمجرّد فتح تبويبها — لا زر تكبير
+(`Icons.fullscreen` ممنوع في `shell.dart` و`chat_screen.dart`، واختبار
+`chat_fullscreen_test.dart` يحرس ذلك). الغلاف يشتق الحالة من `_chatOpen => _tab == 2`
+فلا تُخزَّن في حقل يُنسى تصفيره. `_lastNonChatTab` يحفظ التبويب السابق للرجوع إليه.
+
+**لا تُبنَ واجهة الدردشة يدوياً، ولا تُزجّج فوق هذا الثيم.** جرّبنا الزجاج
+(`BackdropFilter` + طبقة بيضاء شفّافة) فاختفى المحتوى: ألوان `XTheme.surface`
+معتمة، والوضع الفاتح أبيض على أبيض — المستخدم رأى «لا شيء». الأسطح هنا معتمة
+(`XTheme.surface`)، والاختبار يمنع عودة `BackdropFilter` إلى هذا الملف.
+
+**المطلوب بدله: مصدر مفتوح جاهز.** `flutter_chat_ui` (Flyer Chat، Apache-2.0)
+مدعوم عربياً و RTL رسمياً ومستقل عن الخادم، وهو المرشّح المعتمد للاستبدال.
+
+لوحة المفاتيح تتجاوز المحتوى السفلي، فالكومبوزر يلفّ نفسه بـ`SafeArea(top:false)`.
+
+## تنبيهات «توقيع مزوّر» في لوحة المالك
+
+سجل الأمان في اللوحة يعرض `bad_signature` لأي طلب فشل تحقق JWT. هذه التنبيهات
+قد تكون منك أنت: أي سكربت اختبار (مثل `/tmp/probe.py` أو أي أداة تفحص
+`/v1/chat/messages`) يرسل توقيعاً غير صالح يُسجَّل فوراً ويبدو كاختراق.
+
+افرز الحقيقة بحقل الجهاز لا بالعدد: `cht-a-0001` مثلاً موجود في سكربتات الاختبار
+فقط ولا وجود له في `app/lib`، فمعناه أن المصدر اختبار لا مهاجم. اربط الحدث
+بالمصدر قبل أي استنتاج. عند التحقيق، اقرأ السجل من الخادم عبر `live.py` لا من
+نسخة محلية.
+
+## الإشعارات: وجهة الضغط، والدردشة، والدفع
+
+**لا إشعار بلا وجهة.** `payload` يحمل `{"k":"chat","r":"<room>"}` أو `{"k":"ad"}`،
+و`NotificationTarget.decode` يرفض أي حمولة لا يعرفها بدل فتح شاشة عشوائية.
+ثلاثة مسارات يجب أن تعمل جميعها والحمولة نفسها تحملها: التطبيق مفتوح
+(`onDidReceiveNotificationResponse`)، في الخلفية، ومغلق تماماً
+(`onDidReceiveBackgroundNotificationResponse` — لازمة `@pragma('vm:entry-point')`).
+في حال الإغلاق التام يبدأ أندرويد معزلاً بلا واجهة، فالوجهة تُكتب في
+`SharedPreferences` (`x_notif_pending`) ويسحبها الغلاف عند أول إطار؛ ومكوّن
+الإشعارات يعيدها أيضاً عبر `getNotificationAppLaunchDetails()`.
+
+الغلاف يوجّه: الدردشة ⇒ `_openRoomId` + `_tab = 2`، والإعلان ⇒ `_tab = 0`.
+الشاشة باقية في `IndexedStack` فلا `initState` جديد — التبديل يقع في
+`didUpdateWidget` عند تغيّر `openRoomId`، والأفضلية لـ`_switchRoom` القائم.
+
+**منع الإشعار المزعج أو الكاذب** في `ChatNotifyGate` (منطق صافٍ، مُختبَر في
+`test/notifications_logic_test.dart` — 21 فحصاً): لا إشعار لرسالتي أنا، ولا
+للقسم المفتوح أمام المستخدم (`_activeRoomId` يمليه `onRoomChanged`)، ولا حين
+تكون الدردشة موقوفة أو المستخدم كاتم. **أول نبضة لكل قسم تؤسّس الختم الزمني
+ولا تُنبّه** — بلا هذا يصل إشعار بكل تاريخ المحادثة لحظة التثبيت.
+
+قناتان منفصلتان: `mapx_announcements` و`mapx_chat`. الفصل مقصود: من كتم
+الإعلانات يبقى يعرف أن أحداً ناداه في الدردشة.
+
+**الدفع (FCM) مهيّأ في الخادم ومعطّل بهدوء في العميل.** الخادم يحتوي
+`x_push_tokens` و`/v1/push/register` و`pushRoomMessage`/`pushToAll` على FCM v1
+(توقيع JWT بـRS256 بحساب الخدمة). كل ذلك **صامت** حتى يُضبط السرّ
+`FCM_SERVICE_ACCOUNT` (JSON حساب الخدمة)، فيظهر `pushed: false` في رد نشر
+الإعلان. العميل اليوم على الاستقصاء الدوريّ (20 ثانية للدردشة، 5 دقائق
+للإعلانات): يصل الإشعار حين يفتح المستخدم التطبيق أو يعود إليه، **لا وهو مغلق
+تماماً**. لتفعيل الدفع الحقيقي في العميل: أضف `firebase_core` و`firebase_messaging`
+و`google-services.json` من مشروع Firebase، ثم استدعِ `/v1/push/register` بالرمز.
+لم يُضَف شيء من ذلك بعد لأن **لا مشروع Firebase ولا `google-services.json` في
+المستودع** — الإضافة بلا مفاتيح تعني كوداً لا يعمل ولا يُختبر.
+
+## بيئة البناء — تُصفَّر مع كل إعادة تشغيل للحاوية
+
+إعادة تشغيل الحاوية **تُمحي** `JAVA_HOME` و`ANDROID_HOME` وتُقلّص `~/.pub-cache`
+(بقي 101 حزمة من 223). أعراض ذلك: `No Android SDK found`، و
+`JAVA_HOME is set to an invalid directory`، وأخطاء
+`Error when reading '.../pub-cache/.../flutter_local_notifications-22.3.1/...': No such file or directory`
+المتكرّرة في `dart_plugin_registrant.dart` — **وهي ليست أخطاء كود**.
+
+قبل أي بناء أعد الثلاثة:
+
+```bash
+sudo apt-get update && sudo apt-get install -y openjdk-21-jdk-headless
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export PATH=$JAVA_HOME/bin:$PATH
+export ANDROID_HOME=/workspace/tools/android-sdk
+export ANDROID_SDK_ROOT=/workspace/tools/android-sdk
+flutter pub get    # ضروري: يُعيد ما مُحي من pub-cache
+flutter build apk --release
+```
+
+`android/local.properties` يشير إلى `sdk.dir=/workspace/tools/android-sdk`.
+التوقيع جاهز في `android/key.properties` (لا تُطبع كلماته).
+
+**لا تُبنَ في المقدمة بمهلة طويلة**: البناء يستغرق ~4 دقائق ويتجاوز حدّ
+الأوامر. شغّله في الخلفية وتابع السجل:
+`nohup flutter build apk --release > /tmp/apk_build.log 2>&1 &`.
+
+الناتج: `build/app/outputs/flutter-apk/app-release.apk`، ويُنشر في `dist/`
+باسم الإصدار مع `sha256sum`. للتحقق من التوقيع:
+`apksigner verify --print-certs` من `build-tools/36.0.0`.

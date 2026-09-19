@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_chat_core/flutter_chat_core.dart' as fc;
+import 'package:flutter_chat_ui/flutter_chat_ui.dart' as fchat;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -13,6 +15,8 @@ import '../core/api.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
+import 'chat_bridge.dart';
+import 'chat_theme_x.dart';
 import 'external_link.dart';
 import 'media_viewer.dart';
 import 'theme.dart';
@@ -22,9 +26,38 @@ import 'theme.dart';
 /// كل المحادثات علنية داخل الأقسام: لا رسائل خاصة. هذا اختيار أمني مقصود،
 /// فما يمكن حمايته فعلاً بخادم واحد هو ما لا يحتاج إدارة مفاتيح طرفية.
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.api, required this.store});
+  const ChatScreen({
+    super.key,
+    required this.api,
+    required this.store,
+    required this.onExit,
+    this.openRoomId = '',
+    this.onRoomOpened,
+    this.onRoomChanged,
+  });
   final Api api;
   final Store store;
+
+  /// قسم مطلوب فتحه من الخارج (ضغط إشعار دردشة).
+  ///
+  /// يصل عبر الغلاف لا مباشرةً، لأن الشاشة تُبنى مرة واحدة وتبقى حيّة في
+  /// `IndexedStack`؛ تغيير هذه القيمة هو ما يستدعي التبديل.
+  final String openRoomId;
+
+  /// يُبلَّغ بعد فتح القسم المطلوب، ليُنظَّف الطلب فلا يُعاد الفتح كل بناء.
+  final VoidCallback? onRoomOpened;
+
+  /// يُبلَّغ بالقسم المعروض الآن.
+  ///
+  /// يحتاجه الغلاف ليمتنع عن إشعار المستخدم برسائل القسم الذي ينظر إليه
+  /// بعينه — وهو ما لا يمكن استنتاجه من الغلاف وحده.
+  final ValueChanged<String>? onRoomChanged;
+
+  /// الخروج من الدردشة — يعيد الشريطين في الغلاف.
+  ///
+  /// الدردشة تعمل بملء الشاشة دائماً، فالرأس يحتاج مخرجاً صريحاً بعد أن
+  /// اختفى شريط التنقل السفلي.
+  final VoidCallback onExit;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -52,13 +85,26 @@ class _ChatScreenState extends State<ChatScreen>
   Timer? _poll;
   bool _polling = false;
 
+  /// محرّك قائمة الرسائل.
+  ///
+  /// التمرير والتحميل التدريجي وزر «النزول للأسفل» كلها مسؤولية الحزمة بدل
+  /// `ScrollController` يدوي: منطق «الرسائل الجديدة» وربط الموضع عند إدراج
+  /// رسائل أقدم كان أكثر ما يخطئ فيه الكود المكتوب يدوياً.
+  final _chatController = fc.InMemoryChatController();
+  final _bridge = ChatBridge();
+
+  /// نصّ الإدخال — نملّكه لنحفظه إن طُلب من المستخدم إكمال هويته.
   final _input = TextEditingController();
   final _focus = FocusNode();
-  final _scroll = ScrollController();
-  bool _atBottom = true;
 
-  /// مؤقّت إخفاء شريط «رسائل جديدة».
-  bool _unseenBelow = false;
+
+  /// عدد من شاركوا في القسم ومن هم متصل الآن — يُحدَّثان عند فتح القسم فقط.
+  int _members = 0;
+  int _online = 0;
+
+  /// عيّنات شدة الصوت أثناء التسجيل، وعميل الاستماع إليها.
+  final List<double> _waveSamples = [];
+  StreamSubscription<Amplitude>? _ampSub;
 
   final _picker = ImagePicker();
   final _recorder = AudioRecorder();
@@ -72,11 +118,33 @@ class _ChatScreenState extends State<ChatScreen>
   @override
   void initState() {
     super.initState();
-    _scroll.addListener(_onScroll);
-    _focus.addListener(() {
-      if (mounted) setState(() {});
-    });
     _load();
+  }
+
+  @override
+  void didUpdateWidget(ChatScreen old) {
+    super.didUpdateWidget(old);
+    // طلب فتح قسم من إشعار: الشاشة باقية في `IndexedStack` فلا `initState`
+    // جديد، والتبديل لا يقع إلا برصد تغيّر القيمة هنا.
+    if (widget.openRoomId.isNotEmpty && widget.openRoomId != old.openRoomId) {
+      _openRoomFromOutside(widget.openRoomId);
+    }
+  }
+
+  /// يفتح قسماً طلبه إشعار، بعد أن تكون الحالة قد حُمّلت.
+  Future<void> _openRoomFromOutside(String roomId) async {
+    // الحالة قد لا تكون وصلت بعد (الإشعار أسرع من الشبكة)؛ ننتظر انتهاء
+    // التحميل الجاري بدل أن نفشل ونبتلع الطلب.
+    if (_loading) {
+      for (var i = 0; i < 40 && _loading; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        if (!mounted) return;
+      }
+    }
+    if (!mounted) return;
+    final room = _rooms.where((r) => r.id == roomId).firstOrNull;
+    if (room != null) await _switchRoom(room);
+    widget.onRoomOpened?.call();
   }
 
   @override
@@ -84,27 +152,13 @@ class _ChatScreenState extends State<ChatScreen>
     _poll?.cancel();
     _recordTick?.cancel();
     _recorder.dispose();
-    _scroll.dispose();
+    _ampSub?.cancel();
+    _chatController.dispose();
     _input.dispose();
     _focus.dispose();
     super.dispose();
   }
 
-  void _onScroll() {
-    if (!_scroll.hasClients) return;
-    final pos = _scroll.position;
-    // RTL: النهاية هي أحدث رسالة، فـpixels قريبة من maxScrollExtent هناك.
-    final atBottom = pos.pixels >= pos.maxScrollExtent - 60;
-    if (atBottom != _atBottom) {
-      setState(() {
-        _atBottom = atBottom;
-        if (atBottom) _unseenBelow = false;
-      });
-      if (atBottom) _reportSeen();
-    }
-    // التمرير للأعلى يطلب دفعة أقدم — لا تُحمَّل المحادثة كاملة أبداً.
-    if (pos.pixels <= 120 && _hasMore && !_loadingOlder) _loadOlder();
-  }
 
   Future<void> _load() async {
     setState(() {
@@ -122,6 +176,7 @@ class _ChatScreenState extends State<ChatScreen>
         _loading = false;
       });
       if (room == null) return;
+      widget.onRoomChanged?.call(room.id);
       await _loadLatest(room.id);
       _startPolling();
     } on ApiException catch (e) {
@@ -153,12 +208,21 @@ class _ChatScreenState extends State<ChatScreen>
         _hasMore = page.hasMore;
         _lastAt = _messages.isEmpty ? 0 : _messages.last.at;
         _reportedSeen = 0;
+        // العدّاد يأتي في وضع الفتح وحده، فلا نستبدل قيمة سليمة بـnull.
+        if (page.members != null) _members = page.members!;
+        if (page.online != null) _online = page.online!;
       });
+      _syncChatList();
       _jumpToBottom();
       _reportSeen();
     } catch (_) {
       // فشل أول تحميل لا يمسح رسائل موجودة؛ التحديث الدوري سيعيد المحاولة.
     }
+  }
+
+  /// يطلبه `ChatAnimatedList` عند بلوغ أعلى القائمة — الدفعة الأقدم.
+  Future<void> _onStartReached() async {
+    if (_hasMore && !_loadingOlder) await _loadOlder();
   }
 
   /// دفعة أقدم عند التمرير للأعلى.
@@ -170,18 +234,14 @@ class _ChatScreenState extends State<ChatScreen>
       final page = await widget.api
           .chatMessages(_room!.id, before: oldest, limit: 40);
       if (!mounted) return;
-      // نحفظ موضع التمرير: إدراج عناصر في الأعلى يزيح ما يقرأه المستخدم.
-      final before = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
       setState(() {
         _messages.insertAll(0, page.messages);
         _hasMore = page.hasMore;
         _loadingOlder = false;
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scroll.hasClients) return;
-        final after = _scroll.position.maxScrollExtent;
-        _scroll.jumpTo(_scroll.position.pixels + (after - before));
-      });
+      // الحزمة تربط موضع القائمة بنفسها عند إدراج رسائل أقدم، فلا نحفظ
+      // الموضع يدوياً ونزيحه — كان ذلك مصدر قفزات في القائمة.
+      _syncChatList();
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
     }
@@ -217,11 +277,11 @@ class _ChatScreenState extends State<ChatScreen>
             }
           }
           _lastAt = _messages.last.at;
-          if (!_atBottom) _unseenBelow = true;
         });
-        if (_atBottom) _reportSeen();
-        // عند وجود جديد والتمرير في الأسفل نتابع النزول تلقائياً.
-        if (_atBottom) _jumpToBottom();
+        _syncChatList();
+        // القائمة المعكوسة تنزل تلقائياً للجديد إن كان المستخدم في الأسفل،
+        // فلا نجبره على النزول. `_reportSeen` يبقى: ختم المشاهدة للخادم.
+        _reportSeen();
       }
       // تحديث صور المشاهدين للرسائل القديمة قد يحتاج إعادة جلب أخيرة،
       // لكن ذلك يكفي عند الطلب اليدوي (سحب للتحديث) لا كل دورة.
@@ -243,26 +303,50 @@ class _ChatScreenState extends State<ChatScreen>
     widget.api.chatSeen(room.id, at).catchError((_) {});
   }
 
+  /// ينزل إلى آخر رسالة.
+  ///
+  /// نستخدم أوّل الرسائل في القائمة لا آخرها: القائمة معكوسة (`reversed`)
+  /// فالفهرس 0 هو الأحدث. `scrollToIndex` في الحزمة يفهم هذا الترتيب.
   void _jumpToBottom() {
+    final last = _messages.isEmpty ? null : _messages.last;
+    if (last == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+      _chatController.scrollToMessage(last.id);
     });
+  }
+
+  /// يزامن القائمة المعروضة مع `_messages`.
+  ///
+  /// الحزمة تحتفظ بنسخة `Message` خاصّة بها، فلا تكفي `setState` وحدها:
+  /// بدّون هذا النداء تُعرض القائمة القديمة بينما مصدر الحقيقة تغيّر — وهي
+  /// بالضبط علّة «رسالة أرسلتها ولا تظهر».
+  void _syncChatList() {
+    if (!mounted) return;
+    final core = [
+      for (final m in _messages)
+        _bridge.toCore(m, isMine: m.mine),
+    ];
+    // `setMessages` ينهار إن تكرّر معرّف؛ الرسائل المحلية المؤقّتة لها معرّف
+    // فريد، لكن الحماية أرخص من انهيار في الإصدار.
+    final seen = <String>{};
+    core.retainWhere((m) => seen.add(m.id));
+    _chatController.setMessages(core);
   }
 
   Future<void> _switchRoom(ChatRoom room) async {
     if (_room?.id == room.id) return;
+    widget.onRoomChanged?.call(room.id);
     setState(() {
       _room = room;
       _messages.clear();
       _lastAt = 0;
       _reportedSeen = 0;
       _hasMore = false;
-      _unseenBelow = false;
+      // القائمة تحمل رسائل القسم السابق، وتفريغها يمنع لَمحها لحظة التبديل.
+      _syncChatList();
+      // أرقام القسم السابق لا تصلح للجديد — تصفيرها يمنع عرض عدد مضلّل.
+      _members = 0;
+      _online = 0;
     });
     await _loadLatest(room.id);
   }
@@ -280,26 +364,69 @@ class _ChatScreenState extends State<ChatScreen>
       ));
   }
 
-  Future<void> _sendText() async {
-    final text = _input.text.trim();
-    if (text.isEmpty) return;
+  /// `text` يأتي من مربّع الحزمة، وهي من فرّغته بعد الإرسال.
+  ///
+  /// المربّع لا يعرض خطأً بنفسه، فنكتبه في الحقل إن لم نستطع الإرسال
+  /// (كتابة موقوفة أو بلا هوية) بدل أن يضيع ما كتبه المستخدم.
+  Future<void> _sendText(String text) async {
+    final body = text.trim();
+    if (body.isEmpty) return;
     final room = _room;
     if (room == null) return;
     if (!_state.canWrite) {
+      _restoreDraft(body);
       _toast(_state.writeBlockedReason.isEmpty
           ? 'لا يمكنك الكتابة حالياً'
           : _state.writeBlockedReason);
       return;
     }
-    _input.clear();
-    await _send(room.id, text: text);
+    // الهوية قبل الإرسال: الخادم يرفض الكتابة بلا كنية أو صورة، وكان الرفض
+    // يظهر كخطأ بعد كتابة الرسالة فيضيع النص. نفتح اللوحة ونعيد النصّ.
+    if (!await _ensureIdentity()) {
+      _restoreDraft(body);
+      return;
+    }
+    if (!mounted) return;
+    await _send(room.id, text: body);
   }
+
+  /// يعيد نصّاً لم يُرسل إلى الحقل بعد فشل شرط الإرسال.
+  void _restoreDraft(String text) {
+    if (!mounted) return;
+    _input.text = text;
+    _input.selection =
+        TextSelection.collapsed(offset: _input.text.length);
+  }
+
+  /// يضمن أن للمستخدم كنية أو صورة قبل الكتابة؛ يعيد false إن بقي بلا هوية.
+  ///
+  /// الزائر لا يُسأل: الهوية شرط على الحسابات المسجّلة وحدها، والحساب
+  /// المجهول يُخبر صراحةً أنه بحاجة إلى حساب.
+  Future<bool> _ensureIdentity() async {
+    if (!widget.store.hasSession || widget.store.isGuest) {
+      _toast('أنشئ حساباً للمشاركة في الدردشة');
+      return false;
+    }
+    if (_hasIdentity) return true;
+    _toast('اختر كنية أو صورة قبل أول رسالة');
+    await _openProfile();
+    return mounted && _hasIdentity;
+  }
+
+  /// هل للمستخدم كنية أو صورة؟ الخادم يقبل أيّاً منهما.
+  bool get _hasIdentity =>
+      _state.myNickname.trim().isNotEmpty ||
+      _state.myAvatarUrl.trim().isNotEmpty;
 
   /// إرسال موحّد: يعرض الرسالة فوراً كـ«قيد الإرسال» ثم يستبدلها بردّ الخادم.
   ///
   /// العرض الفوري مقصود: انتظار الشبكة قبل ظهور الرسالة يجعل الدردشة تبدو
   /// معطّلة على اتصال ضعيف، وهو أسوأ من رسالة تظهر باهتة لحظة.
-  Future<void> _send(String roomId, {String text = '', String? mediaB64, int seconds = 0}) async {
+  Future<void> _send(String roomId,
+      {String text = '',
+      String? mediaB64,
+      int seconds = 0,
+      List<double> waveform = const []}) async {
     final tempId = 'local_${DateTime.now().microsecondsSinceEpoch}';
     final optimistic = ChatMessage(
       id: tempId,
@@ -316,23 +443,29 @@ class _ChatScreenState extends State<ChatScreen>
         nickname: _state.myNickname,
         avatarUrl: _state.myAvatarUrl,
       ),
+      waveform: waveform,
       pending: true,
     );
     setState(() {
       _messages.add(optimistic);
       _lastAt = optimistic.at;
     });
+    _syncChatList();
     _jumpToBottom();
 
     try {
       final saved = await widget.api.chatSend(roomId,
-          text: text, mediaB64: mediaB64, mediaSeconds: seconds);
+          text: text,
+          mediaB64: mediaB64,
+          mediaSeconds: seconds,
+          waveform: waveform);
       if (!mounted) return;
       setState(() {
         final i = _messages.indexWhere((m) => m.id == tempId);
         if (i >= 0) _messages[i] = saved;
         if (saved.at > _lastAt) _lastAt = saved.at;
       });
+      _syncChatList();
       _reportSeen();
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -340,6 +473,7 @@ class _ChatScreenState extends State<ChatScreen>
         final i = _messages.indexWhere((m) => m.id == tempId);
         if (i >= 0) _messages[i] = _messages[i].copyWith(pending: false, failed: true);
       });
+      _syncChatList();
       _toast(e.message);
     } catch (_) {
       if (!mounted) return;
@@ -347,6 +481,7 @@ class _ChatScreenState extends State<ChatScreen>
         final i = _messages.indexWhere((m) => m.id == tempId);
         if (i >= 0) _messages[i] = _messages[i].copyWith(pending: false, failed: true);
       });
+      _syncChatList();
       _toast('تعذر الإرسال — تحقق من الإنترنت');
     }
   }
@@ -379,7 +514,9 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     _pendingKind = 'image';
-    await _send(_room!.id, text: _input.text.trim(), mediaB64: base64Encode(bytes));
+    // التعليق المكتوب في الحقل يُرفق بالصورة ثم يُفرّغ، كما كان.
+    await _send(_room!.id,
+        text: _input.text.trim(), mediaB64: base64Encode(bytes));
     _input.clear();
   }
 
@@ -435,6 +572,17 @@ class _ChatScreenState extends State<ChatScreen>
       setState(() {
         _recording = true;
         _recordStart = DateTime.now().millisecondsSinceEpoch;
+        _waveSamples.clear();
+      });
+      // نلتقط شدة الصوت كل 200 مللي ثانية لرسم موجة حقيقية للرسالة.
+      //
+      // البديل — رسم أعمدة عشوائية — يكذب على المستخدم: الموجة تبدو متغيّرة
+      // وهي نفسها لكل المقاطع. القيمة بالديسيبل (سالبة)، فنحوّلها إلى 0..1.
+      _ampSub?.cancel();
+      _ampSub = _recorder.onAmplitudeChanged(const Duration(milliseconds: 200))
+          .listen((a) {
+        if (!_recording) return;
+        _waveSamples.add(((a.current + 60) / 60).clamp(0.0, 1.0));
       });
       // إيقاف تلقائي عند بلوغ الحدّ الأقصى للمدة.
       _recordTick?.cancel();
@@ -450,8 +598,32 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  /// يضغط عيّنات الموجة إلى طول ثابت يرسمه التطبيق.
+  ///
+  /// عدد العيّنات يتبع مدة التسجيل، وطول الموجة المعروضة ثابت. التوسيط
+  /// بالمتوسط (لا بأخذ كل نبضة n) يمنع فقدان المقاطع القصيرة الصاخبة.
+  List<double> _compressWave(List<double> src, {int buckets = 48}) {
+    if (src.isEmpty) return const [];
+    if (src.length <= buckets) return List<double>.from(src);
+    final out = <double>[];
+    final step = src.length / buckets;
+    for (var i = 0; i < buckets; i++) {
+      final start = (i * step).floor();
+      final end = ((i + 1) * step).ceil().clamp(start + 1, src.length);
+      var sum = 0.0;
+      for (var j = start; j < end; j++) {
+        sum += src[j];
+      }
+      out.add((sum / (end - start)).clamp(0.0, 1.0));
+    }
+    return out;
+  }
+
   Future<void> _stopRecording() async {
     _recordTick?.cancel();
+    await _ampSub?.cancel();
+    _ampSub = null;
+    final wave = _compressWave(List<double>.from(_waveSamples));
     try {
       final path = await _recorder.stop();
       final secs =
@@ -470,7 +642,7 @@ class _ChatScreenState extends State<ChatScreen>
       }
       _pendingKind = 'audio';
       await _send(_room!.id,
-          mediaB64: base64Encode(bytes), seconds: secs);
+          mediaB64: base64Encode(bytes), seconds: secs, waveform: wave);
     } catch (_) {
       if (mounted) setState(() => _recording = false);
       _toast('تعذر إيقاف التسجيل');
@@ -498,14 +670,158 @@ class _ChatScreenState extends State<ChatScreen>
     }
     return Column(
       children: [
+        _chatHeader(),
         _roomBar(),
         if (_state.welcome.trim().isNotEmpty) _welcomeStrip(),
-        Expanded(child: _messageArea()),
-        if (_unseenBelow) _newMessagesBar(),
-        _composer(),
+        // `XChatScope` يلزم: الحزمة تقرأ ثيم Material وترجماته من نسختها
+        // (`material_ui`) ولا ترى ثيم `MaterialApp` عندنا. بدونه ترجع إلى
+        // ثيم فاتح افتراضي فيظهر نصّ غامق على خلفية غامقة.
+        Expanded(child: XChatScope(child: _messageArea())),
       ],
     );
   }
+
+  /// رأس الدردشة الزجاجي: مخرج + هوية القسم + عدّاد الحضور.
+  ///
+  /// الرقم يجيب سؤالاً أول ما يفتح المستخدم القسم: هل هنا أحد؟ بلا هذا
+  /// السطر يقف المستخدم أمام فراغ ولا يدري أهي مهجورة أم مزدحمة.
+  Widget _chatHeader() {
+    final room = _room;
+    if (room == null) return const SizedBox.shrink();
+    return Container(
+      decoration: BoxDecoration(
+        color: XTheme.surface,
+        border: Border(
+          bottom: BorderSide(color: XTheme.textDim.withOpacity(.10)),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(6, 8, 14, 8),
+        child: Row(
+          children: [
+              // الدردشة بملء الشاشة دائماً، فلا شريط تنقّل: هذا المخرج
+              // الوحيد الظاهر، ولولاه لبدا التطبيق بلا مخرج.
+              IconButton(
+                tooltip: 'خروج من الدردشة',
+                icon: const Icon(Icons.arrow_forward_rounded),
+                onPressed: widget.onExit,
+              ),
+              _roomBadge(room),
+              const SizedBox(width: 11),
+              Expanded(child: _roomTitle(room)),
+              _onlineChip(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// أيقونة القسم داخل قرص متدرّج — نقطة التعرّف البصرية على القسم.
+  Widget _roomBadge(ChatRoom room) => Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          gradient: XTheme.gradient,
+          borderRadius: BorderRadius.circular(13),
+          boxShadow: XTheme.glow(XTheme.accent, strength: .45),
+        ),
+        child: Icon(_roomIcon(room.icon), size: 19, color: Colors.white),
+      );
+
+  /// اسم القسم وسطر الوصف: «N عضواً» دائماً، والرقم الملون عن المتصلين.
+  Widget _roomTitle(ChatRoom room) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            room.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 15.5,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -.2,
+            ),
+          ),
+          const SizedBox(height: 2),
+          // الرقمان قد يتجاوزان عرض الرأس على الأجهزة الضيقة (اسم قسم طويل
+          // بجانب شارة الحضور). بلا `Flexible` يتمدّد النصّان فيتجاوزان
+          // المساحة ويظهر شريط التشويه الأصفر — وهو عطل عرض لا نقص بيانات:
+          // الرقم يبقى مقروءاً في القسم الأعرض.
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  '$_members عضواً',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: XTheme.textDim,
+                  ),
+                ),
+              ),
+              if (_online > 0) ...[
+                const SizedBox(width: 7),
+                _dot(XTheme.textDim.withOpacity(.45), 3),
+                const SizedBox(width: 7),
+                _dot(XTheme.ok, 6),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    '$_online الآن',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w800,
+                      color: XTheme.ok,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      );
+
+  /// شارة «متصل الآن» — تظهر فقط عند وجود من هو متصل فعلاً.
+  ///
+  /// إظهارها بصفر يقول للمستخدم «القسم مهجور» وهو قد يكون وحده في وقته؛
+  /// غيابها حينها أصدق من صفر صريح.
+  Widget _onlineChip() {
+    if (_online <= 0) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: XTheme.ok.withOpacity(.12),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: XTheme.ok.withOpacity(.30)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _dot(XTheme.ok, 6),
+          const SizedBox(width: 6),
+          const Text(
+            'مباشر',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+              color: XTheme.ok,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dot(Color c, double size) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+      );
 
   Widget _errorView(String msg) => Center(
         child: Padding(
@@ -559,70 +875,76 @@ class _ChatScreenState extends State<ChatScreen>
   Widget _roomBar() {
     final me = _state.myNickname.isEmpty ? 'ملفي' : _state.myNickname;
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
         color: XTheme.surface,
         border: Border(
           bottom: BorderSide(color: XTheme.textDim.withOpacity(.10)),
         ),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: SizedBox(
-              height: 38,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                reverse: true,
-                itemCount: _rooms.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (_, i) {
-                  final r = _rooms[i];
-                  final active = _room?.id == r.id;
-                  return GestureDetector(
-                    onTap: () => _switchRoom(r),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        gradient: active ? XTheme.gradient : null,
-                        color: active ? null : XTheme.surface2,
-                        borderRadius: BorderRadius.circular(30),
-                        boxShadow:
-                            active ? XTheme.glow(XTheme.accent, strength: .6) : null,
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(_roomIcon(r.icon),
-                              size: 15,
-                              color: active ? Colors.white : XTheme.textDim),
-                          const SizedBox(width: 6),
-                          Text(r.name,
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w800,
-                                color: active ? Colors.white : XTheme.text,
-                              )),
-                        ],
-                      ),
-                    ),
-                  );
-                },
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
+        child: Row(
+          children: [
+              Expanded(
+                child: SizedBox(
+                  height: 36,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    reverse: true,
+                    itemCount: _rooms.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 7),
+                    itemBuilder: (_, i) => _roomChip(_rooms[i]),
+                  ),
+                ),
               ),
-            ),
-          ),
-          const SizedBox(width: 6),
-          _iconBtn(
-            _state.notify ? Icons.notifications_active_outlined
-                : Icons.notifications_off_outlined,
-            _state.notify ? 'إشعارات مفعّلة' : 'إشعارات مكتومة',
-            _toggleNotify,
-            tint: _state.notify ? XTheme.accent : XTheme.textDim,
-          ),
-          _iconBtn(Icons.person_outline, me, _openProfile,
-              tint: XTheme.cyan),
-        ],
+              const SizedBox(width: 6),
+              _iconBtn(
+                _state.notify
+                    ? Icons.notifications_active_outlined
+                    : Icons.notifications_off_outlined,
+                _state.notify ? 'إشعارات مفعّلة' : 'إشعارات مكتومة',
+                _toggleNotify,
+                tint: _state.notify ? XTheme.accent : XTheme.textDim,
+              ),
+            _iconBtn(Icons.person_outline, me, _openProfile,
+                tint: XTheme.cyan),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// قرص القسم — النشط متدرّج بحلقة فاتحة، والخامل زجاج شفّاف بلا حدّ.
+  Widget _roomChip(ChatRoom r) {
+    final active = _room?.id == r.id;
+    return GestureDetector(
+      onTap: () => _switchRoom(r),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 13),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: active ? XTheme.gradient : null,
+          color: active ? null : XTheme.surface2,
+          borderRadius: BorderRadius.circular(30),
+          border: active
+              ? null
+              : Border.all(color: XTheme.textDim.withOpacity(.16)),
+          boxShadow: active ? XTheme.glow(XTheme.accent, strength: .45) : null,
+        ),
+        child: Row(
+          children: [
+            Icon(_roomIcon(r.icon),
+                size: 15, color: active ? Colors.white : XTheme.textDim),
+            const SizedBox(width: 6),
+            Text(r.name,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: active ? Colors.white : XTheme.text,
+                )),
+          ],
+        ),
       ),
     );
   }
@@ -665,113 +987,169 @@ class _ChatScreenState extends State<ChatScreen>
       );
 
   Widget _messageArea() {
-    if (_messages.isEmpty) {
-      return _noticeView(
+    return fchat.Chat(
+      currentUserId: ChatBridge.myUserId,
+      chatController: _chatController,
+      theme: xChatTheme(context),
+      resolveUser: (id) async {
+        if (id == ChatBridge.myUserId) {
+          return fc.User(
+            id: id,
+            name: _state.myNickname,
+            imageSource: _state.myAvatarUrl.isEmpty
+                ? null
+                : '${kApiBase}${_state.myAvatarUrl}',
+          );
+        }
+        // الرسالة تحمل كائن المؤلّف كاملاً في `metadata`، فلا نحتاج نداء
+        // شبكة لحلّ الاسم والصورة.
+        for (final m in _messages) {
+          if (!m.mine && m.author.id == id) return _bridge.toUser(m.author, id: id);
+        }
+        return null;
+      },
+      onMessageSend: _onMessageSend,
+      // أزرار الإرفاق تبقى أزرارنا الثلاثة أسفل الشاشة: الصوت تسجيل حيّ لا
+      // ملف، والفيديو يُلتقط بالكاميرا مباشرة، ولا يدخلان في قائمة مرفقات
+      // الحزمة القياسية (ملف/صورة/فيديو من المعرض).
+      onMessageLongPress: _onMessageLongPress,
+      builders: fc.Builders(
+        composerBuilder: (context) => _composer(),
+        chatMessageBuilder: (context, message, index, animation, child,
+            {isRemoved, required isSentByMe, groupStatus}) =>
+            _messageRow(
+          context,
+          message,
+          index,
+          animation,
+          child,
+          isSentByMe: isSentByMe,
+          groupStatus: groupStatus,
+        ),
+        emptyChatListBuilder: (context) => _emptyList(),
+        // القائمة نفسها من الحزمة مع إضافة نداء التحميل التدريجي: الرسائل
+        // تُطلب عند بلوغ الأعلى، والحزمة تتولّى ربط الموضع بعد الإدراج.
+        chatAnimatedListBuilder: (context, itemBuilder) =>
+            fchat.ChatAnimatedList(
+          itemBuilder: itemBuilder,
+          onStartReached: _onStartReached,
+        ),
+        // حزمة `chat_ui` لا ترسم وسائط بنفسها: تتركها لمن يحقن بانية. نمرّر
+        // وسائطنا الحالية لأنها توقّع روابط Cloudflare قبل التحميل، وهذا ما
+        // لا تفعله باقتا `flyer_chat_*` الرسميتان.
+        textMessageBuilder: (context, message, index,
+                {required isSentByMe, groupStatus}) =>
+            _coreBubble(message, isSentByMe: isSentByMe),
+        imageMessageBuilder: (context, message, index,
+                {required isSentByMe, groupStatus}) =>
+            _coreBubble(message, isSentByMe: isSentByMe),
+        videoMessageBuilder: (context, message, index,
+                {required isSentByMe, groupStatus}) =>
+            _coreBubble(message, isSentByMe: isSentByMe),
+        audioMessageBuilder: (context, message, index,
+                {required isSentByMe, groupStatus}) =>
+            _coreBubble(message, isSentByMe: isSentByMe),
+        systemMessageBuilder: (context, message, index,
+                {required isSentByMe, groupStatus}) =>
+            _coreBubble(message, isSentByMe: isSentByMe),
+      ),
+      backgroundColor: XTheme.bg,
+    );
+  }
+
+  /// صفّ الرسالة: اسم الكاتب أعلى فقاعة الطرف الآخر، والصور الشخصية على
+  /// الجانبين. القائمة معكوسة فالفقاعات الجديدة في الأسفل.
+  Widget _messageRow(
+    BuildContext context,
+    fc.Message message,
+    int index,
+    Animation<double> animation,
+    Widget child, {
+    required bool isSentByMe,
+    fc.MessageGroupStatus? groupStatus,
+  }) {
+    // `groupStatus` يقول هل هذه أول رسالة في مجموعة متتالية؛ نُخفي الاسم
+    // والصورة عند التكرار كما اعتاد المستخدم في النسخة السابقة.
+    final first = groupStatus?.isFirst ?? true;
+    return fchat.ChatMessage(
+      message: message,
+      index: index,
+      animation: animation,
+      child: child,
+      headerWidget: !isSentByMe && first ? _senderName(message) : null,
+      leadingWidget: !isSentByMe ? _authorAvatar(message) : null,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+    );
+  }
+
+  Widget? _senderName(fc.Message message) {
+    final m = ChatBridge.unwrap(message);
+    if (m == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3, right: 42, left: 6),
+      child: Text(m.author.label,
+          style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w900,
+              color: XTheme.textDim)),
+    );
+  }
+
+  Widget? _authorAvatar(fc.Message message) {
+    final m = ChatBridge.unwrap(message);
+    if (m == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: _avatar(m.author, size: 34),
+    );
+  }
+
+  Widget _emptyList() => _noticeView(
         icon: Icons.chat_bubble_outline,
         title: 'لا رسائل في ${_room?.name ?? 'القسم'} بعد',
         body: _state.canWrite
             ? 'كن أول من يبدأ الحديث'
             : _state.writeBlockedReason,
       );
-    }
-    return Stack(
-      children: [
-        RefreshIndicator(
-          onRefresh: () => _loadLatest(_room!.id),
-          color: XTheme.accent,
-          child: ListView.builder(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
-            itemCount: _messages.length + (_loadingOlder ? 1 : 0),
-            itemBuilder: (_, i) {
-              if (_loadingOlder && i == 0) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Center(
-                    child: SizedBox(
-                      width: 20, height: 20,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: XTheme.accent),
-                    ),
-                  ),
-                );
-              }
-              final m = _messages[i - (_loadingOlder ? 1 : 0)];
-              final prev = i - (_loadingOlder ? 1 : 0) - 1 >= 0
-                  ? _messages[i - (_loadingOlder ? 1 : 0) - 1]
-                  : null;
-              // تجميع رسائل الكاتب نفسه المتقاربة زمنياً: يقلّل تكرار الاسم
-              // والصورة ويجعل القراءة أسرع، كما في ماسنجر.
-              final grouped = prev != null &&
-                  prev.author.id == m.author.id &&
-                  !m.mine &&
-                  m.at - prev.at < 5 * 60 * 1000;
-              return _bubble(m, grouped: grouped);
-            },
-          ),
-        ),
-        if (_hasMore && !_loadingOlder)
-          Positioned(
-            top: 6,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: GestureDetector(
-                onTap: _loadOlder,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: XTheme.surface2,
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(
-                        color: XTheme.textDim.withOpacity(.20)),
-                  ),
-                  child: Text('تحميل رسائل أقدم',
-                      style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w800,
-                          color: XTheme.textDim)),
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
+
+  /// حذف رسالتي بالضغط المطوّل.
+  ///
+  /// الصور والفيديو تُفتح من داخل الفقاعة نفسها (`_imageContent`)، فلا
+  /// نكرّر الفتح هنا وإلا انفتح العارض مرّتين للضغطة الواحدة.
+  void _onMessageLongPress(BuildContext context, fc.Message message,
+      {required int index, required LongPressStartDetails details}) {
+    final m = ChatBridge.unwrap(message);
+    if (m == null) return;
+    // الحذف لرسائلي وحدها: زر لا يفعل شيئاً أسوأ من غياب زر.
+    final mine = message.authorId == ChatBridge.myUserId;
+    if (mine && !m.pending && m.id.isNotEmpty) _confirmDelete(m);
   }
 
-  Widget _newMessagesBar() => GestureDetector(
-        onTap: () {
-          setState(() => _unseenBelow = false);
-          _jumpToBottom();
-        },
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          color: XTheme.accent.withOpacity(.14),
-          child: const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.arrow_downward, size: 14, color: XTheme.accent),
-              SizedBox(width: 6),
-              Text('رسائل جديدة',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                      color: XTheme.accent)),
-            ],
-          ),
-        ),
-      );
+  /// نصّ جديد من المربّع — نفس مسار `_sendText` لكن الحزمة هي من ناداه،
+  /// فنعيد ما كُتب إن فشل الشرط بدل أن يضيع.
+  void _onMessageSend(String text) {
+    final message = text.trim();
+    if (message.isEmpty) return;
+    _sendText(message);
+  }
 
   /// فقاعة الرسالة — الشكل يتبع السمة التي يختارها المالك.
-  Widget _bubble(ChatMessage m, {required bool grouped}) {
+  /// فقاعة الرسالة — الشكل يتبع السمة التي يختارها المالك.
+  ///
+  /// نبنيها نحن لمّا تمرّره الحزمة من بانية، لأن كل رسالة عندنا تحتاج
+  /// توقيع رابط Cloudflare قبل تحميلها، وعرض المشاهدين، وشكل فقاعة من
+  /// سمة التطبيق. الحزمة تتولّى الترتيب والمحاذاة والتحريك فقط.
+  Widget _coreBubble(fc.Message message, {required bool isSentByMe}) {
+    final m = ChatBridge.unwrap(message);
+    if (m == null) return const SizedBox.shrink();
     if (m.kind == 'system') return _systemBubble(m);
-    final mine = m.mine;
+    final mine = isSentByMe;
     final radius = _bubbleRadius(_state.theme);
     final bubbleColor = mine
         ? null
         : (XTheme.isLight ? Colors.white : XTheme.surface2);
+    // نصّ الفقاعة: غامق على البرتقالي الفاتح، والأبيض فوقه غير مقروء.
+    final onBubble = mine ? chatOnAccent : XTheme.text;
 
     final content = Column(
       crossAxisAlignment:
@@ -786,7 +1164,7 @@ class _ChatScreenState extends State<ChatScreen>
               style: TextStyle(
                 fontSize: 14.2,
                 height: 1.45,
-                color: mine ? Colors.white : XTheme.text,
+                color: onBubble,
               ),
             ),
           ),
@@ -802,7 +1180,7 @@ class _ChatScreenState extends State<ChatScreen>
                   style: TextStyle(
                       fontSize: 10,
                       color: mine
-                          ? Colors.white.withOpacity(.75)
+                          ? onBubble.withOpacity(.75)
                           : XTheme.textDim)),
               if (mine) ...[
                 const SizedBox(width: 4),
@@ -813,7 +1191,7 @@ class _ChatScreenState extends State<ChatScreen>
                   size: 12,
                   color: m.failed
                       ? XTheme.danger
-                      : Colors.white.withOpacity(.85),
+                      : onBubble.withOpacity(.85),
                 ),
               ],
             ],
@@ -824,7 +1202,7 @@ class _ChatScreenState extends State<ChatScreen>
       ],
     );
 
-    final bubble = Container(
+    return Container(
       constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width * .78),
       decoration: BoxDecoration(
@@ -832,70 +1210,19 @@ class _ChatScreenState extends State<ChatScreen>
         color: bubbleColor,
         borderRadius: radius,
         boxShadow: mine
-            ? XTheme.glow(XTheme.accent, strength: .35)
-            : XTheme.shadow(lift: .5),
+            ? XTheme.glow(XTheme.accent, strength: .30)
+            : XTheme.shadow(lift: .4),
         border: mine
             ? null
-            : Border.all(color: XTheme.textDim.withOpacity(.10)),
+            : Border.all(
+                color: XTheme.isLight
+                    ? Colors.black.withOpacity(.05)
+                    : Colors.white.withOpacity(.07),
+              ),
       ),
       child: ClipRRect(
         borderRadius: radius,
         child: content,
-      ),
-    );
-
-    final avatar = _avatar(m.author, size: grouped ? 26 : 34,
-        showInitials: !grouped);
-
-    return Padding(
-      padding: EdgeInsets.only(top: grouped ? 2 : 10),
-      child: Row(
-        mainAxisAlignment:
-            mine ? MainAxisAlignment.start : MainAxisAlignment.end,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          if (mine) ...[
-            Flexible(child: bubble),
-            const SizedBox(width: 8),
-            Opacity(
-              opacity: m.pending ? .5 : 1,
-              child: _avatar(
-                ChatAuthor(
-                    nickname: _state.myNickname,
-                    avatarUrl: _state.myAvatarUrl),
-                size: 34,
-              ),
-            ),
-          ] else ...[
-            Opacity(
-              opacity: m.pending ? .5 : 1,
-              child: SizedBox(
-                width: 34,
-                child: grouped
-                    ? const SizedBox.shrink()
-                    : avatar,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (!grouped)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 3, right: 4),
-                      child: Text(m.author.label,
-                          style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w900,
-                              color: XTheme.textDim)),
-                    ),
-                  bubble,
-                ],
-              ),
-            ),
-          ],
-        ],
       ),
     );
   }
@@ -930,34 +1257,62 @@ class _ChatScreenState extends State<ChatScreen>
           title: m.author.label,
         ),
       )),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(XTheme.rSm),
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 300),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(XTheme.rSm),
+          child: SizedBox(
+            // مقاس ثابت قبل وصول الصورة وبعدها.
+            //
+            // الصورة كانت تُقاس بمحتواها، فتظهر بحجم أثناء التحميل ثم تقفز
+            // إلى حجمها الحقيقي فور اكتماله — ومع كل إعادة تنزيل تتكرّر
+            // القفزة ويهتز كل ما تحتها. إطار ثابت يجعل العرض ثابتاً من
+            // اللحظة الأولى، والصورة تملؤه بلا تحرّك.
+            width: _imageWidth,
+            height: _imageHeight,
             child: Image.network(
-              url.startsWith('/') ? '$kApiBase$url' : url,
-              headers: url.startsWith('/')
-                  ? widget.api.signFor('GET', url)
-                  : null,
+              _mediaUrl(url),
+              headers: _mediaHeaders(url),
               fit: BoxFit.cover,
-              loadingBuilder: (context, child, p) => p == null
-                  ? child
-                  : Container(
-                      height: 180,
-                      width: 220,
-                      alignment: Alignment.center,
-                      color: XTheme.surface2,
-                      child: const CircularProgressIndicator(
-                          strokeWidth: 2, color: XTheme.accent),
+              gaplessPlayback: true,
+              loadingBuilder: (context, child, p) {
+                if (p == null) return child;
+                // شريط تقدّم رقيق فوق الإطار بدل استبدال الصورة بمربع رمادي:
+                // الصورة تظهر تدريجياً فلا تبدو الشاشة فارغة ثم ممتلئة.
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Container(color: XTheme.surface2),
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: LinearProgressIndicator(
+                        value: p.expectedTotalBytes != null
+                            ? p.cumulativeBytesLoaded /
+                                p.expectedTotalBytes!
+                            : null,
+                        minHeight: 3,
+                        backgroundColor: Colors.transparent,
+                        valueColor: const AlwaysStoppedAnimation(
+                            XTheme.accent),
+                      ),
                     ),
+                  ],
+                );
+              },
               errorBuilder: (context, error, stack) => Container(
-                height: 140, width: 200,
-                alignment: Alignment.center,
                 color: XTheme.surface2,
-                child: Icon(Icons.broken_image_outlined,
-                    color: XTheme.textDim),
+                alignment: Alignment.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.broken_image_outlined,
+                        color: XTheme.textDim, size: 26),
+                    const SizedBox(height: 6),
+                    Text('تعذر تحميل الصورة',
+                        style: TextStyle(
+                            fontSize: 10.5, color: XTheme.textDim)),
+                  ],
+                ),
               ),
             ),
           ),
@@ -966,10 +1321,30 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
+  /// مقاس إطار الصورة في الفقاعة.
+  ///
+  /// ثابت لا يتبع الصورة، وإلا عاد الاهتزاز. 220×165 يبدو جيداً على الجوال
+  /// ولا يترك فراغاً كبيراً في الرسائل النصية القصيرة المجاورة.
+  static const double _imageWidth = 220;
+  static const double _imageHeight = 165;
+
+  /// رابط الوسيط كاملاً — الروابط النسبية تُسبق بعنوان الـWorker.
+  String _mediaUrl(String url) =>
+      url.startsWith('/') ? '$kApiBase$url' : url;
+
+  /// ترويسات الوسيط: الروابط النسبية محمية بتوقيع الطلب، والخارجية لا.
+  ///
+  /// التوقيع ثابت داخل نافذة صلاحيته (انظر Api.signFor) لأن توليده في كل
+  /// بناء يجعل Flutter يعتبر الصورة جديدة فيعيد تنزيلها ويرتجّ العرض.
+  Map<String, String>? _mediaHeaders(String url) =>
+      url.startsWith('/') ? widget.api.signFor('GET', url) : null;
+
   Widget _audioContent(ChatMessage m, bool mine) => _VoicePlayer(
         api: widget.api,
         url: m.mediaUrl,
         mine: mine,
+        waveform: m.waveform,
+        seconds: m.seconds,
       );
 
   Widget _videoContent(ChatMessage m, bool mine) {
@@ -1096,6 +1471,53 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
+  /// تأكيد حذف رسالة، ثم حذفها من الخادم والقائمة.
+  ///
+  /// التأكيد ضروري: الضغط المطوّل يقع بالخطأ عند التمرير، وحذف بلا سؤال
+  /// لا رجعة فيه. نطالب بالخادم أولاً ثم نمسح محلياً، فلو فشل الحذف بقيت
+  /// الرسالة ظاهرة بدل أن تختفي ثم تعود في التحديث التالي.
+  Future<void> _confirmDelete(ChatMessage m) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(XTheme.rLg)),
+        title: const Text('حذف الرسالة؟',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+        content: Text(
+          m.isText
+              ? 'ستُحذف هذه الرسالة من الدردشة للجميع.'
+              : 'سيُحذف هذا المرفق من الدردشة للجميع.',
+          style: TextStyle(fontSize: 13.5, color: XTheme.textDim),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('حذف',
+                style: TextStyle(
+                    color: XTheme.danger, fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await widget.api.chatDelete(m.id);
+      if (!mounted) return;
+      setState(() => _messages.removeWhere((x) => x.id == m.id));
+      _syncChatList();
+      _toast('حُذفت الرسالة');
+    } on ApiException catch (e) {
+      _toast(e.message);
+    } catch (_) {
+      _toast('تعذر الحذف — تحقق من الإنترنت');
+    }
+  }
+
   // ───────────────────────── شريط الكتابة ─────────────────────────
 
   Widget _composer() {
@@ -1103,13 +1525,18 @@ class _ChatScreenState extends State<ChatScreen>
       final secs =
           ((DateTime.now().millisecondsSinceEpoch - _recordStart) ~/ 1000)
               .clamp(0, _state.mediaSeconds);
-      return Container(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-        decoration: BoxDecoration(
-          color: XTheme.surface,
-          border: Border(top: BorderSide(color: XTheme.danger.withOpacity(.24))),
-        ),
-        child: Row(
+      return Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+          decoration: BoxDecoration(
+            color: XTheme.surface,
+            border:
+                Border(top: BorderSide(color: XTheme.danger.withOpacity(.24))),
+          ),
+          child: Row(
           children: [
             const _PulsingDot(),
             const SizedBox(width: 10),
@@ -1128,53 +1555,83 @@ class _ChatScreenState extends State<ChatScreen>
                 await _recorder.stop();
                 setState(() => _recording = false);
               },
-              icon: Icon(Icons.delete_outline, color: XTheme.textDim),
-            ),
-          ],
+                icon: Icon(Icons.delete_outline, color: XTheme.textDim),
+              ),
+            ],
+          ),
         ),
       );
     }
 
     if (!_state.canWrite) {
-      return Container(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-        decoration: BoxDecoration(
-          color: XTheme.surface,
-          border: Border(top: BorderSide(color: XTheme.textDim.withOpacity(.12))),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.lock_outline, size: 16, color: XTheme.textDim),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                _state.writeBlockedReason.isEmpty
-                    ? 'لا يمكنك الكتابة في الدردشة حالياً'
-                    : _state.writeBlockedReason,
-                style: TextStyle(fontSize: 12.5, color: XTheme.textDim),
+      // `Positioned` لا `Container` عارياً: بانية الكومبوزر تُركَّب داخل `Stack`
+      // في الحزمة، وعنصر بلا موضع يُرسم في أعلى المكدّس فوق الرسائل.
+      return Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 13, 16, 15),
+          decoration: BoxDecoration(
+            color: XTheme.surface,
+            border: Border(
+                top: BorderSide(color: XTheme.textDim.withOpacity(.12))),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.lock_outline, size: 16, color: XTheme.textDim),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _state.writeBlockedReason.isEmpty
+                      ? 'لا يمكنك الكتابة في الدردشة حالياً'
+                      : _state.writeBlockedReason,
+                  style: TextStyle(fontSize: 12.5, color: XTheme.textDim),
+                ),
               ),
-            ),
-            TextButton(
-              onPressed: () => openExternal(context, 'https://t.me/',
-                  label: 'تواصل'),
-              child: const Text('تواصل',
-                  style: TextStyle(color: XTheme.accent)),
-            ),
-          ],
+              TextButton(
+                onPressed: () => openExternal(context, 'https://t.me/',
+                    label: 'تواصل'),
+                child: const Text('تواصل',
+                    style: TextStyle(color: XTheme.accent)),
+              ),
+            ],
+          ),
         ),
       );
     }
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
-      decoration: BoxDecoration(
-        color: XTheme.surface,
-        border: Border(top: BorderSide(color: XTheme.textDim.withOpacity(.12))),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+    // `fchat.Composer` يعيد `Positioned` **دائماً**، فهو لا يصلح إلا طفلاً
+    // مباشراً في `Stack` الداخلي للحزمة. لفّه في `Row`/`Expanded` يهدم
+    // ParentData فيتعطّل الكومبوزر بأكمله ويظهر الفراغ الأبيض الذي رآه
+    // المستخدم. لذلك نمرّر أزرارنا عبر `topWidget` — وهي الوسيلة المدعومة.
+    return fchat.Composer(
+      textEditingController: _input,
+      focusNode: _focus,
+      hintText: 'اكتب رسالة…',
+      maxLines: 4,
+      maxLength: _state.maxLength,
+      textColor: XTheme.text,
+      hintColor: XTheme.textDim,
+      backgroundColor: XTheme.surface,
+      inputFillColor: XTheme.surface2,
+      sendIconColor: chatOnAccent,
+      emptyFieldSendIconColor: XTheme.textDim,
+      sendButtonVisibilityMode: fchat.SendButtonVisibilityMode.hidden,
+      padding: const EdgeInsets.fromLTRB(8, 9, 8, 8),
+      topWidget: _attachBar(),
+    );
+  }
+
+  /// شريط الإرفاق فوق حقل الكتابة.
+  ///
+  /// كان إلى جانب الحقل قبل أن نكتشف أن الكومبوزر عنصر مكدّس لا صفّي. وضعه
+  /// في `topWidget` يحفظ الأزرار الثلاثة (صورة، فيديو، صوت) كما كان المستخدم
+  /// يعرفها بلا مصادمة تخطيط.
+  Widget _attachBar() => Row(
         children: [
-          _composerIcon(Icons.add_photo_alternate_outlined, 'صورة', _pickImage),
+          _composerIcon(
+              Icons.add_photo_alternate_outlined, 'صورة', _pickImage),
           if (_state.mediaScope != 'none')
             _composerIcon(Icons.videocam_outlined, 'فيديو', _pickVideo),
           _composerIcon(
@@ -1183,66 +1640,8 @@ class _ChatScreenState extends State<ChatScreen>
             _toggleRecording,
             tint: _recording ? XTheme.danger : null,
           ),
-          Expanded(
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 6),
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              decoration: BoxDecoration(
-                color: XTheme.surface2,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(
-                    color: _focus.hasFocus
-                        ? XTheme.accent.withOpacity(.45)
-                        : XTheme.textDim.withOpacity(.14)),
-              ),
-              child: TextField(
-                controller: _input,
-                focusNode: _focus,
-                maxLines: 4,
-                minLines: 1,
-                maxLength: _state.maxLength,
-                textInputAction: TextInputAction.newline,
-                keyboardType: TextInputType.multiline,
-                style: const TextStyle(fontSize: 14.5),
-                decoration: const InputDecoration(
-                  hintText: 'اكتب رسالة…',
-                  counterText: '',
-                  border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(vertical: 12),
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-            ),
-          ),
-          GestureDetector(
-            onTap: _input.text.trim().isEmpty ? null : _sendText,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              width: 44, height: 44,
-              decoration: BoxDecoration(
-                gradient: _input.text.trim().isEmpty
-                    ? null
-                    : XTheme.gradient,
-                color: _input.text.trim().isEmpty
-                    ? XTheme.surface2
-                    : null,
-                shape: BoxShape.circle,
-                boxShadow: _input.text.trim().isEmpty
-                    ? null
-                    : XTheme.glow(XTheme.accent, strength: .6),
-              ),
-              child: Icon(Icons.send_rounded,
-                  size: 20,
-                  color: _input.text.trim().isEmpty
-                      ? XTheme.textDim
-                      : Colors.white),
-            ),
-          ),
         ],
-      ),
-    );
-  }
+      );
 
   Widget _composerIcon(IconData icon, String tip, VoidCallback onTap,
       {Color? tint}) {
@@ -1367,10 +1766,20 @@ class _PulsingDotState extends State<_PulsingDot>
 
 /// مشغّل الرسالة الصوتية — تحميل بكسل عند أول تشغيل ثم تشغيل/إيقاف.
 class _VoicePlayer extends StatefulWidget {
-  const _VoicePlayer({required this.api, required this.url, required this.mine});
+  const _VoicePlayer({
+    required this.api,
+    required this.url,
+    required this.mine,
+    this.waveform = const [],
+    this.seconds = 0,
+  });
   final Api api;
   final String url;
   final bool mine;
+
+  /// مخطط الموجة الفعلي للرسالة، ومدتها بالثواني كما أرسلها صاحبها.
+  final List<double> waveform;
+  final int seconds;
 
   @override
   State<_VoicePlayer> createState() => _VoicePlayerState();
@@ -1444,20 +1853,24 @@ class _VoicePlayerState extends State<_VoicePlayer> {
   Widget build(BuildContext context) {
     final fg = widget.mine ? Colors.white : XTheme.text;
     final total = _total.inMilliseconds <= 0
-        ? 1
+        ? (widget.seconds > 0 ? widget.seconds * 1000 : 1)
         : _total.inMilliseconds;
-    final progress = (_pos.inMilliseconds / total).clamp(0.0, 1.0);
-    return Container(
-      width: 210,
-      padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
-      margin: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+    final progress =
+        total <= 0 ? 0.0 : (_pos.inMilliseconds / total).clamp(0.0, 1.0);
+    final elapsed = _playing || _pos > Duration.zero
+        ? _pos.inSeconds
+        : (total ~/ 1000);
+    final wave = widget.waveform.isEmpty
+        ? _fallbackWave
+        : widget.waveform;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 8, 6, 4),
       child: Row(
         children: [
-          InkWell(
+          GestureDetector(
             onTap: _toggle,
-            borderRadius: BorderRadius.circular(30),
             child: Container(
-              width: 34, height: 34,
+              width: 36, height: 36,
               decoration: BoxDecoration(
                 color: widget.mine
                     ? Colors.white.withOpacity(.22)
@@ -1465,43 +1878,50 @@ class _VoicePlayerState extends State<_VoicePlayer> {
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                _playing ? Icons.pause : Icons.play_arrow_rounded,
-                size: 20,
+                _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                size: 21,
                 color: widget.mine ? Colors.white : XTheme.accent,
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    minHeight: 4,
-                    backgroundColor: fg.withOpacity(.22),
-                    valueColor: AlwaysStoppedAnimation(
-                        widget.mine ? Colors.white : XTheme.accent),
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  _fmt(_playing || _pos > Duration.zero ? _pos : _total),
-                  style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      color: fg.withOpacity(.85)),
-                ),
-              ],
+          const SizedBox(width: 9),
+          // الأعمدة تُرسم بمقياس ثابت (ارتفاع كامل) واللون يميّز ما سُمع
+          // عمّا بقي. هذا سلوك تطبيقات المراسلة المعروفة: المستخدم يرى
+          // موضعه في المقطع بنظرة بدل قراءة رقم.
+          SizedBox(
+            width: 132,
+            height: 30,
+            child: CustomPaint(
+              painter: _WavePainter(
+                values: wave,
+                progress: progress,
+                dim: fg.withOpacity(.32),
+                active: widget.mine ? Colors.white : XTheme.accent,
+              ),
             ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _fmt(Duration(seconds: elapsed)),
+            style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: fg.withOpacity(.85)),
           ),
         ],
       ),
     );
   }
 
+  /// موجة رمزية حين لا يصل مخطط من الخادم (مقطع قديم أُرسل قبل الميزة).
+  ///
+  /// ثابتة لا عشوائية: العشوائية تُعاد مع كل بناء فيتغيّر شكل الموجة أمام
+  /// المستخدم أثناء التشغيل، فيبدو الرسم معطوباً.
+  static const _fallbackWave = <double>[
+    .2, .35, .5, .4, .65, .8, .55, .4, .6, .45, .3, .5,
+    .7, .6, .45, .35, .55, .75, .6, .4, .3, .5, .65, .45,
+    .35, .55, .4, .6, .5, .35, .45, .6, .7, .5, .35, .25,
+  ];
   static String _fmt(Duration d) {
     final m = d.inMinutes.toString().padLeft(2, '0');
     final s = (d.inSeconds % 60).toString().padLeft(2, '0');
@@ -1756,4 +2176,49 @@ class _ChatProfileSheetState extends State<ChatProfileSheet> {
       ),
     );
   }
+}
+
+/// يرسم مخطط الموجة: أعمدة، المُستمَع منها بلون بارز وما بقي باهتاً.
+class _WavePainter extends CustomPainter {
+  _WavePainter({
+    required this.values,
+    required this.progress,
+    required this.dim,
+    required this.active,
+  });
+
+  final List<double> values;
+  final double progress;
+  final Color dim;
+  final Color active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.isEmpty) return;
+    final n = values.length;
+    // فجوة ثابتة بين الأعمدة؛ العرض المتبقي يوزّع على الأعمدة، فتملأ الموجة
+    // الإطار مهما كان عدد النقاط (48 من التسجيل أو 36 في الموجة الرمزية).
+    const gap = 2.0;
+    final barW = ((size.width - gap * (n - 1)) / n).clamp(1.0, 6.0);
+    final paint = Paint()..strokeCap = StrokeCap.round;
+    final cut = progress * n;
+    for (var i = 0; i < n; i++) {
+      // أدنى ارتفاع 3 بكسل: الصمت المطلق لا يرسم خطاً غير مرئي يوهم بعطل.
+      final h = (values[i].clamp(0.0, 1.0) * size.height).clamp(3.0, size.height);
+      final x = i * (barW + gap) + barW / 2;
+      paint.color = i < cut ? active : dim;
+      canvas.drawLine(
+        Offset(x, (size.height - h) / 2),
+        Offset(x, (size.height + h) / 2),
+        paint..strokeWidth = barW,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WavePainter old) =>
+      old.values != values ||
+      old.progress != progress ||
+      old.dim != dim ||
+      old.active != active;
 }

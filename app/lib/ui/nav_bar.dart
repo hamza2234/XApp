@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -17,11 +16,11 @@ class NavItem {
   final String label;
 }
 
-/// شريط تنقل سفلي حيّ — حركة ولمعان بدل الأيقونات الساكنة.
+/// شريط تنقل سفلي زجاجي — انزلاق ولمعان بلا ذرّات ولا هالة.
 ///
-/// الفكرة: مؤشّر متدرّج ينزلق بين التبويبات، والأيقونة النشطة تكبر قليلاً
-/// مع هالة توهّج، ولمعة تعبر الشريط عند كل تغيير. كل هذه الحركات تُرسم في
-/// طبقات منفصلة عبر `AnimatedBuilder` فلا يُعاد بناء محتوى الشاشة.
+/// الفكرة: مؤشّر زجاجي شفّاف ينزلق بين التبويبات، ولمعة تعبر الشريط عند كل
+/// تغيير. كل هذه الحركات تُرسم في طبقات منفصلة عبر `AnimatedBuilder` فلا
+/// يُعاد بناء محتوى الشاشة.
 ///
 /// لماذا لا نستخدم `NavigationBar` الجاهز؟ لأنه يثبّت المؤشّر ويحرّكه بلا
 /// انزلاق حقيقي بين العناصر. هذا الشريط يمنح التبويب النشط حضوراً بصرياً
@@ -50,9 +49,6 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
   /// لمعان يعبر الشريط عند كل تغيير تبويب.
   late final AnimationController _sweep;
 
-  /// نبض مستمر خفيف على الأيقونة النشطة — يبقي الشريط حياً بلا إزعاج.
-  late final AnimationController _pulse;
-
   int _from = 0;
 
   @override
@@ -64,9 +60,6 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
       ..value = 1;
     _sweep = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 750));
-    _pulse = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 2200))
-      ..repeat(reverse: true);
   }
 
   @override
@@ -83,7 +76,6 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
   void dispose() {
     _slide.dispose();
     _sweep.dispose();
-    _pulse.dispose();
     super.dispose();
   }
 
@@ -121,7 +113,6 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
                         position: pos,
                         count: n,
                         sweep: _sweep.value,
-                        pulse: _pulse.value,
                         light: XTheme.isLight,
                         direction: Directionality.of(context),
                       ),
@@ -136,8 +127,6 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
                       child: _NavCell(
                         item: widget.items[i],
                         selected: i == widget.index,
-                        // نبض متدرّج: التبويب النشط وحده ينبض
-                        pulse: _pulse,
                         onTap: () => widget.onSelect(i),
                       ),
                     ),
@@ -151,18 +140,16 @@ class _AnimatedNavBarState extends State<AnimatedNavBar>
   }
 }
 
-/// خلية تبويب — أيقونة ونص، بتكبير وتوهّج عند التحديد.
+/// خلية تبويب — أيقونة ونص، بتكبير بسيط عند التحديد بلا توهّج.
 class _NavCell extends StatelessWidget {
   const _NavCell({
     required this.item,
     required this.selected,
-    required this.pulse,
     required this.onTap,
   });
 
   final NavItem item;
   final bool selected;
-  final Animation<double> pulse;
   final VoidCallback onTap;
 
   @override
@@ -181,33 +168,19 @@ class _NavCell extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              AnimatedBuilder(
-                animation: pulse,
-                builder: (context, child) {
-                  // تكبير 1.0 → 1.08 للتبويب النشط فقط
-                  final bump = selected ? 1 + pulse.value * .08 : 1.0;
-                  return Transform.scale(scale: bump, child: child);
-                },
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 240),
-                  transitionBuilder: (child, anim) => ScaleTransition(
-                    scale: anim,
-                    child: FadeTransition(opacity: anim, child: child),
-                  ),
-                  child: Icon(
-                    selected ? item.activeIcon : item.icon,
-                    // key لازم ليعرف AnimatedSwitcher أن الأيقونة تغيّرت
-                    key: ValueKey('${item.label}-$selected'),
-                    size: 24,
-                    color: selected ? XTheme.accent : XTheme.textDim,
-                    shadows: selected
-                        ? [
-                            Shadow(
-                                color: XTheme.accent.withOpacity(.55),
-                                blurRadius: 12),
-                          ]
-                        : null,
-                  ),
+              // بلا ظل ولا نبض: الأيقونة النشطة تُميَّز باللون والحجم وحدهما.
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 240),
+                transitionBuilder: (child, anim) => ScaleTransition(
+                  scale: anim,
+                  child: FadeTransition(opacity: anim, child: child),
+                ),
+                child: Icon(
+                  selected ? item.activeIcon : item.icon,
+                  // key لازم ليعرف AnimatedSwitcher أن الأيقونة تغيّرت
+                  key: ValueKey('${item.label}-$selected'),
+                  size: 24,
+                  color: selected ? XTheme.accent : XTheme.textDim,
                 ),
               ),
               const SizedBox(height: 3),
@@ -246,13 +219,12 @@ double navIndicatorCenterX(
   return direction == TextDirection.rtl ? width - leftBased : leftBased;
 }
 
-/// يرسم المؤشّر المنزلق هالةً متدرّجة خلف التبويب النشط، واللمعان العابر.
+/// يرسم اللوح الزجاجي خلف التبويب النشط، واللمعان العابر عند التغيير.
 class _NavIndicatorPainter extends CustomPainter {
   _NavIndicatorPainter({
     required this.position,
     required this.count,
     required this.sweep,
-    required this.pulse,
     required this.light,
     required this.direction,
   });
@@ -263,7 +235,6 @@ class _NavIndicatorPainter extends CustomPainter {
 
   /// تقدّم اللمعان 0..1 (0 يعني انتهى).
   final double sweep;
-  final double pulse;
   final bool light;
   final TextDirection direction;
 
@@ -272,90 +243,37 @@ class _NavIndicatorPainter extends CustomPainter {
     if (count == 0) return;
     final cell = size.width / count;
     final center = navIndicatorCenterX(size.width, count, position, direction);
-    // إشارة الاتجاه: تُحرك الجسيمات مع اتجاه القراءة لا عكسه.
-    final dir = direction == TextDirection.rtl ? -1.0 : 1.0;
 
-    // ===== هالة متدرّجة خلف التبويب النشط =====
-    final haloW = cell * .92;
-    final halo = Rect.fromCenter(
-      center: Offset(center, size.height * .52),
-      width: haloW,
-      height: size.height * .74,
+    // ===== لوح زجاجي فوق التبويب النشط =====
+    // الطلب: «معنان زجاج فقط» بلا ذرّات ولا مدارات. الزجاج هنا طبقة بيضاء
+    // شبه شفافة داخل حدّ فاتح — تعطي عمقاً بلا أي توهّج حول الأيقونة.
+    final pill = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(center, size.height * .52),
+        width: cell * .70,
+        height: size.height * .60,
+      ),
+      const Radius.circular(18),
     );
-    final rrect = RRect.fromRectAndRadius(halo, const Radius.circular(18));
-
-    // التوهّج ينبض بين .10 و .18 — حضور واضح لا إزعاج
-    final glow = light ? .10 + pulse * .08 : .16 + pulse * .10;
     canvas.drawRRect(
-      rrect,
+      pill,
       Paint()
         ..shader = LinearGradient(
           colors: [
-            XTheme.accent.withOpacity(glow),
-            XTheme.accent2.withOpacity(glow * .7),
+            Colors.white.withOpacity(light ? .55 : .13),
+            Colors.white.withOpacity(light ? .16 : .04),
           ],
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-        ).createShader(halo)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 7 + pulse * 4),
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ).createShader(pill.outerRect),
     );
-
-    // ===== نواة ذرّية: مدارات وجسيمات تدور حول التبويب النشط =====
-    // `pulse` متحرّك دائماً، فالمدارات لا تتوقف أبداً — حركة مستمرة لا وميض.
-    final orbitCenter = Offset(center, size.height * .52);
-    for (var o = 0; o < 3; o++) {
-      // مدارات بأقطار مختلفة واتجاهات متعاكسة لإحساس ذرّي حقيقي.
-      final radius = cell * (.30 + o * .16);
-      final spin = pulse * 2 * 3.14159265 * (o.isEven ? 1 : -1) + o * 2.1;
-      final ellY = .55 + o * .05;
-
-      // حلقة المدار — باهتة حتى لا تزاحم الأيقونة.
-      canvas.drawOval(
-        Rect.fromCenter(
-          center: orbitCenter,
-          width: radius * 2,
-          height: radius * 2 * ellY,
-        ),
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1
-          ..color = XTheme.accent.withOpacity(light ? .16 : .22),
-      );
-
-      // جسيم واحد يدور على كل مدار.
-      final p = Offset(
-        orbitCenter.dx + dir * radius * _cos(spin),
-        orbitCenter.dy + radius * ellY * _sin(spin),
-      );
-      // وهج خفيف حول الجسيم ثم الجسيم نفسه.
-      canvas.drawCircle(
-        p,
-        2.6,
-        Paint()
-          ..color = XTheme.accent.withOpacity(light ? .45 : .6)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
-      );
-      canvas.drawCircle(
-        p,
-        1.5,
-        Paint()..color = XTheme.accent.withOpacity(.95),
-      );
-    }
-
-    // خط سفلي رفيع تحت التبويب النشط — يثبّت المؤشّر بصرياً
-    final barW = cell * .34;
-    final barRect = RRect.fromRectAndRadius(
-      Rect.fromCenter(
-        center: Offset(center, size.height - 7),
-        width: barW,
-        height: 3,
-      ),
-      const Radius.circular(2),
-    );
+    // حدّ فاتح رفيع: يقرأ العينُ الحافةَ زجاجاً لا بقعةَ لون.
     canvas.drawRRect(
-      barRect,
+      pill,
       Paint()
-        ..shader = XTheme.gradient.createShader(barRect.outerRect),
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = Colors.white.withOpacity(light ? .75 : .16),
     );
 
     // ===== اللمعان العابر عند تغيير التبويب =====
@@ -382,11 +300,6 @@ class _NavIndicatorPainter extends CustomPainter {
   bool shouldRepaint(_NavIndicatorPainter old) =>
       old.position != position ||
       old.sweep != sweep ||
-      old.pulse != pulse ||
       old.count != count ||
       old.direction != direction;
 }
-
-// دوال مثلثية محلية — تتجنّب استيراد dart:math كلّه من أجل دالتين.
-double _sin(double x) => math.sin(x);
-double _cos(double x) => math.cos(x);

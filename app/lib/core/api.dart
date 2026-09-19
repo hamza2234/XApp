@@ -70,9 +70,41 @@ class Api {
   Api(this.store);
   final Store store;
 
-  /// ترويسات توقيع جاهزة — تُستخدم لتحميل الصور الموقّعة (إعلانات المالك)
-  Map<String, String> signFor(String method, String pathWithQuery) =>
-      _sign(method, pathWithQuery);
+  /// ترويسات توقيع جاهزة — تُستخدم لتحميل الصور الموقّعة (إعلانات المالك).
+  ///
+  /// تُخزَّن مؤقتاً لأن التوقيع يتضمّن الطابع الزمني، وتوليده في كل بناء يعني
+  /// رابطاً جديداً لكل صورة في كل إطار. Flutter يخزّن الصور بمفتاح يشمل
+  /// الترويسات، فتغيّرها يُبطل التخزين ويُعيد التنزيل — وهذا سبب ارتجاف
+  /// الصور واهتزاز القائمة عند الكتابة أو كل دورة تحديث. ترويسة ثابتة داخل
+  /// نافذة الصلاحية (10 دقائق في الخادم) تُعيد التخزين إلى العمل.
+  final _sigCache = <String, Map<String, String>>{};
+  final _sigCacheAt = <String, int>{};
+
+  /// صلاحية ترويسة الوسائط — أقصر من نافذة الخادم (10 دقائق) بهامش أمان
+  /// يستوعب فرق ساعة الجهاز، فلا يُرفض رابط ثُبّت لتوّه.
+  static const _mediaSigTtlMs = 6 * 60 * 1000;
+
+  Map<String, String> signFor(String method, String pathWithQuery) {
+    // الجلسة جزء من المفتاح: تخزين ترويسة تحمل رمز جلسة قديم بعد تبديل
+    // الحساب يعني تحميل وسائط بصلاحية من سجّل خروجه — وهذا خلل أمني لا
+    // مجرّد خطأ عرض. تغيّر الرمز يُبطل المفتاح فيُوقَّع من جديد فوراً.
+    final key = '${store.token ?? ''}\u0000$method $pathWithQuery';
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final cached = _sigCache[key];
+    if (cached != null && now - (_sigCacheAt[key] ?? 0) < _mediaSigTtlMs) {
+      return cached;
+    }
+    final fresh = _sign(method, pathWithQuery);
+    // حدّ أعلى للمفاتيح: كل قسم/صورة مدخل، وقائمة بلا سقف تنمو بلا نهاية
+    // في جلسة طويلة. 256 مدخلاً تكفي شاشات مفتوحة فعلياً.
+    if (_sigCache.length >= 256) {
+      _sigCache.clear();
+      _sigCacheAt.clear();
+    }
+    _sigCache[key] = fresh;
+    _sigCacheAt[key] = now;
+    return fresh;
+  }
 
   Map<String, String> _sign(String method, String pathWithQuery) {
     final ts = DateTime.now().millisecondsSinceEpoch.toString();
@@ -507,7 +539,17 @@ class Api {
           .map((e) => ChatMessage.fromJson(e.cast<String, dynamic>()))
           .toList(),
       hasMore: j['hasMore'] == true,
+      members: (j['members'] as num?)?.toInt(),
+      online: (j['online'] as num?)?.toInt(),
     );
+  }
+
+  /// يحذف رسالة — صاحبها فقط، أو المالك على أي رسالة.
+  ///
+  /// الحذف على الخادم لا محلياً: لو حذفناها من القائمة وحدها لعادت في أول
+  /// تحديث دوري، فيبدو الحذف كأنه لم يحدث.
+  Future<void> chatDelete(String id) async {
+    await post('/v1/chat/delete', {'id': id});
   }
 
   /// إعلام الخادم أن المستخدم بلغ آخر رسالة — أساس «من رأى الرسالة».
@@ -520,6 +562,7 @@ class Api {
     String text = '',
     String? mediaB64,
     int mediaSeconds = 0,
+    List<double> waveform = const [],
   }) async {
     final j = await post(
       '/v1/chat/send',
@@ -528,6 +571,7 @@ class Api {
         'text': text,
         if (mediaB64 != null) 'mediaB64': mediaB64,
         if (mediaSeconds > 0) 'mediaSeconds': mediaSeconds,
+        if (waveform.isNotEmpty) 'waveform': waveform,
       },
       // رفع مقطع يحتاج مهلة أطول من رسالة نصية.
       timeout: mediaB64 == null

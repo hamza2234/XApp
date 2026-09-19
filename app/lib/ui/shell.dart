@@ -29,6 +29,21 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> with WidgetsBindingObserver {
   int _tab = 0;
+
+  /// آخر تبويب غير الدردشة — نعود إليه عند الخروج من الدردشة.
+  ///
+  /// الرجوع إلى تبويب ثابت (التوافقات) يفقد المستخدم مكانه إن كان يتنقل
+  /// بين المخططات والدردشة، فيبدو الرجوع كأنه نقلة عشوائية.
+  int _lastNonChatTab = 0;
+
+  /// الدردشة تعمل بملء الشاشة دائماً: الشريطان مخفيّان ما دام تبويب
+  /// الدردشة مفتوحاً. هذا مطلب صريح — لا زر تكبير يضغطه المستخدم.
+  bool get _chatOpen => _tab == 2;
+
+  /// الخروج من الدردشة يعيد الشريطين ويعود للتبويب السابق.
+  void _exitChat() {
+    setState(() => _tab = _lastNonChatTab);
+  }
   // العدّاد الموحّد: منحة يومية + رصيد عملات، مصدره /v1/me وحده.
   int _freeLeft = 0;
   int _freeLimit = 0;
@@ -40,6 +55,25 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// فحص دوري للإعلانات الجديدة. لا دفع حقيقي (FCM) في هذا المشروع،
   /// فالاستقصاء هو الوسيلة المتاحة لإبلاغ الأجهزة الأخرى.
   Timer? _annTimer;
+
+  /// قسم مطلوب فتحه — يأتي من ضغط إشعار دردشة، ويُمرَّر للدردشة.
+  String _openRoomId = '';
+
+  /// القسم المعروض في تبويب الدردشة الآن — يمنع الإشعار عن قسم يراه المستخدم.
+  String _activeRoomId = '';
+
+  /// وجهة إشعار محفوظة السحب (ضغط والتطبيق مغلق أو قبل جاهزية الواجهة).
+  bool _pendingRouteDrained = false;
+
+  /// نبضة إشعارات الدردشة — منفصلة عن نبضة الإعلانات لأن دورها أطول:
+  /// الإعلان حدث نادر، والرسالة قد تصل كل ثانية في قسم نشِط.
+  Timer? _chatTimer;
+
+  /// آخر ختم زمني رأيناه لكل قسم — أساس تمييز الجديد عن القديم.
+  final Map<String, int> _chatLastSeen = {};
+
+  /// عدد الرسائل غير المقروءة لكل قسم منذ آخر إشعار.
+  final Map<String, int> _chatUnread = {};
 
   /// ما تبقّى فعلاً = المجاني اليومي + العملات. رقم واحد يُعرض ويُخصم.
   int get _totalLeft => _freeLeft + _coins;
@@ -54,14 +88,48 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     // طلب إذن الإشعارات بعد استقرار الشاشة الأولى، لا أثناءها: نافذة
     // النظام فوق شاشة التهيئة تبدو خللاً، وتُرفض بلا قراءة.
     WidgetsBinding.instance.addPostFrameCallback((_) => _askNotifications());
+    // الوجهة الأولى تُسحب بعد أول إطار: الضغط قد يكون فتح التطبيق من الصفر،
+    // والشجرة لم تكن جاهزة لحظة قراءتها.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _drainPendingRoute());
+    Notifications.listen(_route);
     _annTimer = Timer.periodic(
         const Duration(minutes: 5), (_) => _pollAnnouncements());
+    _chatTimer = Timer.periodic(
+        const Duration(seconds: 20), (_) => _pollChatMessages());
   }
+
+  /// يوجّه ضغط الإشعار إلى الشاشة الصحيحة.
+  void _route(NotificationTarget t) {
+    if (!mounted) return;
+    switch (t.kind) {
+      case 'chat':
+        setState(() {
+          _openRoomId = t.roomId;
+          _lastNonChatTab = _tab;
+          _tab = 2;
+        });
+      case 'ad':
+        // الإعلانات تُعرض في تبويب التوافقات أعلى الشاشة.
+        setState(() => _tab = 0);
+    }
+  }
+
+  /// يقرأ وجهة ضغط سابقة قبل جاهزية الواجهة، إن وُجدت.
+  Future<void> _drainPendingRoute() async {
+    if (_pendingRouteDrained) return;
+    _pendingRouteDrained = true;
+    final t = Notifications.takePending();
+    if (t != null) _route(t);
+  }
+
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // العودة إلى التطبيق أهمّ لحظة: المستخدم ينظر إلى الشاشة الآن.
-    if (state == AppLifecycleState.resumed) _pollAnnouncements();
+    if (state == AppLifecycleState.resumed) {
+      _pollAnnouncements();
+      _pollChatMessages();
+    }
   }
 
   /// يجلب الإعلانات ويُنبّه عن الجديد منها على هذا الجهاز.
@@ -71,6 +139,76 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
       final boot = await widget.api.bootstrap();
       final anns = boot['announcements'];
       if (anns is List) await Notifications.notifyNewAnnouncements(anns);
+    } catch (_) {
+      // فشل الشبكة لا يستحق إزعاج المستخدم — تُعاد المحاولة في الدورة التالية.
+    }
+  }
+
+  /// يفحص أقسام الدردشة وينبّه عن الرسائل الجديدة.
+  ///
+  /// لا دفع حقيقي (FCM) في هذا المشروع، فالاستقصاء هو الوسيلة المتاحة: كل
+  /// نبضة تسأل كل قسم عن الجديد بعد آخر ختم رأيناه. أول نبضة لكل قسم
+  /// **تؤسّس** الختم ولا تُنبّه، وإلا وصل إشعار بكل تاريخ المحادثة لحظة
+  /// التثبيت — وهو أسوأ عطل ممكن في هذه الميزة.
+  ///
+  /// أما القسم المفتوح أمام المستخدم فلا يُنبَّه عنه: هو يراه بعينه.
+  Future<void> _pollChatMessages() async {
+    if (!mounted) return;
+    try {
+      final state = await widget.api.chatState();
+      if (!mounted) return;
+      if (!state.enabled) return;
+
+      // القسم مفتوح أمام المستخدم فقط إن كان تبويب الدردشة هو المعروض.
+      final openRoom = _chatOpen ? _activeRoomId : '';
+      for (final room in state.rooms) {
+        // القسم الذي فتحه المستخدم من الإشعار ليس بعد في `_openRoomId`
+        // بعد، فيُترك بلا إشعار — وهو المطلوب.
+        final last = _chatLastSeen[room.id];
+        final page = await widget.api.chatMessages(room.id, limit: 20);
+        if (!mounted) return;
+        final newest = page.messages.isEmpty
+            ? 0
+            : page.messages.map((m) => m.at).reduce((a, b) => a > b ? a : b);
+
+        if (last == null) {
+          // أول رؤية لهذا القسم: نؤسّس ولا نُنبّه.
+          _chatLastSeen[room.id] = newest;
+          continue;
+        }
+
+        final fresh = page.messages.where((m) => m.at > last).toList();
+        if (fresh.isEmpty) continue;
+        _chatLastSeen[room.id] = newest;
+
+        // رسالة واحدة تكفي للقرار: رسالتي أنا لا تُنبَّه، والقسم المفتوح لا.
+        final latest = fresh.last;
+        final notify = ChatNotifyGate.shouldNotify(
+          chatEnabled: state.enabled,
+          notifyEnabled: state.notify,
+          mine: latest.mine,
+          roomId: room.id,
+          openRoomId: openRoom,
+        );
+        if (!notify) {
+          _chatUnread[room.id] = 0;
+          continue;
+        }
+
+        // نعدّ الجديد غير المقروء التراكمي في القسم، لا رسائل هذه النبضة
+        // وحدها، فيرى المستخدم حجم ما ينتظره فعلاً.
+        final count = (_chatUnread[room.id] ?? 0) +
+            fresh.where((m) => !m.mine).length;
+        _chatUnread[room.id] = count;
+
+        await Notifications.notifyChatMessage(
+          roomId: room.id,
+          roomName: room.name,
+          author: latest.author.label,
+          preview: latest.preview,
+          count: count,
+        );
+      }
     } catch (_) {
       // فشل الشبكة لا يستحق إزعاج المستخدم — تُعاد المحاولة في الدورة التالية.
     }
@@ -94,6 +232,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   @override
   void dispose() {
     _annTimer?.cancel();
+    _chatTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _cfg.removeListener(_onConfigChanged);
     super.dispose();
@@ -153,8 +292,19 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     final isOwner = widget.store.isOwner;
     final isGuest = widget.store.isGuest;
 
-    return Scaffold(
-      appBar: AppBar(
+    return PopScope(
+      // في الدردشة يخرج زر الرجوع النظامي إلى الشرائط بدل إغلاق التطبيق،
+      // وإلا بدا للمستخدم أن التطبيق أُغلق فجأة.
+      canPop: !_chatOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _chatOpen) _exitChat();
+      },
+      child: Scaffold(
+      // الدردشة تعمل بملء الشاشة تلقائياً: يُخفي الشريطين لتتسع مساحة
+      // الرسائل، والرجوع يُعيدهما.
+      appBar: _chatOpen
+          ? null
+          : AppBar(
         title: ShaderMask(
           shaderCallback: (b) =>
               XTheme.gradient.createShader(Rect.fromLTWH(0, 0, 120, 40)),
@@ -203,18 +353,45 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         ],
       ),
       drawer: _drawer(user, isOwner, isGuest),
-      body: IndexedStack(
-        index: _tab,
-        children: [
-          CompatScreen(api: widget.api, store: widget.store),
-          SchemScreen(api: widget.api, onFileOpened: refreshQuota),
-          ChatScreen(api: widget.api, store: widget.store),
-        ],
+      // بلا شريط علوي يتمدّد المحتوى تحت شريط الحالة، فنُزاح بمقدار الحافة
+      // العليا في الدردشة وحدها.
+      body: SafeArea(
+        top: _chatOpen,
+        bottom: false,
+        child: IndexedStack(
+          index: _tab,
+          children: [
+            CompatScreen(api: widget.api, store: widget.store),
+            SchemScreen(api: widget.api, onFileOpened: refreshQuota),
+            ChatScreen(
+              api: widget.api,
+              store: widget.store,
+              onExit: _exitChat,
+              openRoomId: _openRoomId,
+              onRoomOpened: () {
+                if (_openRoomId.isNotEmpty) setState(() => _openRoomId = '');
+              },
+              onRoomChanged: (id) {
+                _activeRoomId = id;
+                // فتح القسم يعني أن المستخدم رأى ما فيه، فيعود عدّاد
+                // الإشعارات إلى الصفر بلا انتظار النبضة التالية.
+                _chatUnread[id] = 0;
+              },
+            ),
+          ],
+        ),
       ),
-      bottomNavigationBar: AnimatedNavBar(
-        index: _tab,
-        onSelect: (i) => setState(() => _tab = i),
-        items: const [
+      bottomNavigationBar: _chatOpen
+          ? null
+          : AnimatedNavBar(
+              index: _tab,
+              onSelect: (i) {
+                setState(() {
+                  if (i != 2) _lastNonChatTab = i;
+                  _tab = i;
+                });
+              },
+              items: const [
           NavItem(
               icon: Icons.hub_outlined,
               activeIcon: Icons.hub,
@@ -227,7 +404,8 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
               icon: Icons.forum_outlined,
               activeIcon: Icons.forum,
               label: 'الدردشة'),
-        ],
+              ],
+            ),
       ),
     );
   }

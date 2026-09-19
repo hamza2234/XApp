@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,10 +7,74 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ui/theme.dart';
 
-/// إشعارات التطبيق — إعلانات المالك تصل إلى شريط الهاتف.
+/// وجهة الإشعار — ما يُفتح عند ضغط المستخدم عليه.
+///
+/// الضغط بلا وجهة إشعار ميّت: يفتح التطبيق على آخر شاشة كان عليها المستخدم،
+/// فيظنّ أن الضغط لم يعمل. لذلك نضع الوجهة في `payload` ونحملها معنا عبر
+/// مسارات الإشعار الثلاثة (التطبيق مفتوح، في الخلفية، مغلق).
+class NotificationTarget {
+  const NotificationTarget._(this.kind, this.roomId);
+
+  /// `ad` إعلان · `chat` رسالة في قسم.
+  final String kind;
+  final String roomId;
+
+  static const NotificationTarget ads = NotificationTarget._('ad', '');
+
+  static NotificationTarget chat(String roomId) =>
+      NotificationTarget._('chat', roomId);
+
+  String encode() => jsonEncode({'k': kind, if (roomId.isNotEmpty) 'r': roomId});
+
+  /// يفكّ الحمولة، ويرفض ما لا يعرفه بدل أن يفتح شاشة عشوائية.
+  static NotificationTarget? decode(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final j = jsonDecode(raw);
+      if (j is! Map) return null;
+      switch (j['k']) {
+        case 'ad':
+          return NotificationTarget.ads;
+        case 'chat':
+          final room = j['r']?.toString() ?? '';
+          if (room.isEmpty) return null;
+          return NotificationTarget.chat(room);
+        default:
+          return null;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// بوّابة قرار إظهار إشعار الدردشة — منطق صافٍ بلا منصة، فيُختبر مباشرة.
+///
+/// ثلاثة شروط تمنع الإشعار المزعج أو الكاذب:
+///   - الدردشة موقوفة من الإعدادات، أو المستخدم كاتم الإشعارات.
+///   - الرسالة رسالتي: إشعاري عن رسالتي أنا ضجيج محض.
+///   - القسم مفتوح أمام المستخدم الآن: هو يراه بعينه، والإشعار تكرار.
+class ChatNotifyGate {
+  const ChatNotifyGate._();
+
+  static bool shouldNotify({
+    required bool chatEnabled,
+    required bool notifyEnabled,
+    required bool mine,
+    required String roomId,
+    required String openRoomId,
+  }) {
+    if (!chatEnabled || !notifyEnabled) return false;
+    if (mine) return false;
+    if (roomId.isEmpty) return false;
+    return roomId != openRoomId;
+  }
+}
+
+/// إشعارات التطبيق — إعلانات المالك ورسائل الدردشة تصل إلى شريط الهاتف.
 ///
 /// إذن الإشعارات في أندرويد 13+ لا يُمنح تلقائياً، ورفضه يعني ألا يرى
-/// المستخدم أي إعلان أبداً بلا أي رسالة خطأ — يظن التطبيق معطّلاً. لذلك
+/// المستخدم أي إشعار أبداً بلا أي رسالة خطأ — يظن التطبيق معطّلاً. لذلك
 /// نطلب الإذن صراحة مع شرح سبب الطلب قبل نافذة النظام، وهو ما يرفع نسبة
 /// الموافقة ويحترم المستخدم في الوقت نفسه.
 class Notifications {
@@ -18,17 +83,83 @@ class Notifications {
   static final _plugin = FlutterLocalNotificationsPlugin();
   static const _kAsked = 'x_notif_asked';
   static const _kSeenAnns = 'x_seen_announcements';
-  static const _channelId = 'mapx_announcements';
+  static const _kPendingKey = 'x_notif_pending';
+
+  /// وجهة إشعار ضُغط بينما التطبيق لم يكن جاهزاً بعد.
+  ///
+  /// الضغط من شريط الهاتف يقع قبل بناء الواجهة، فلو أكملنا الوجهة مباشرة
+  /// ضاعت في الفراغ. نحفظها هنا ويسحبها الغلاف عند أول إطار.
+  static NotificationTarget? _pending;
+
+  static void Function(NotificationTarget target)? _listener;
+
+  /// يسجّل مستمعاً للضغط على الإشعار.
+  static void listen(void Function(NotificationTarget target) cb) {
+    _listener = cb;
+  }
+
+  /// يسحب وجهة معلّقة إن وُجدت (يُستدعى عند أول إطار بعد الإقلاع).
+  static NotificationTarget? takePending() {
+    final t = _pending;
+    _pending = null;
+    return t;
+  }
+
+  /// يوجّه الوجهة إلى الواجهة إن كانت جاهزة، وإلا يخزّنها للاحقاً.
+  static void _deliver(NotificationTarget? target) {
+    if (target == null) return;
+    final cb = _listener;
+    if (cb == null) {
+      _pending = target;
+      return;
+    }
+    cb(target);
+  }
 
   /// قناة الإعلانات — أهمية عالية حتى يظهر الإشعار كرأس منبثق.
-  static const _channel = AndroidNotificationChannel(
-    _channelId,
+  static const _annChannelId = 'mapx_announcements';
+
+  /// قناة الدردشة منفصلة عن الإعلانات.
+  ///
+  /// الفصل مقصود: من وجد الإعلانات مزعجة يكتم قناتها وحدها فيبقى يعرف أن
+  /// أحداً ناداه في الدردشة. قناة واحدة تخلط النوعين تجبره على الاختيار بين
+  /// الضجيج والعزلة.
+  static const _chatChannelId = 'mapx_chat';
+
+  static const _annChannel = AndroidNotificationChannel(
+    _annChannelId,
     'إعلانات MAPX',
     description: 'إشعارات إعلانات المالك والعروض الجديدة',
     importance: Importance.high,
     playSound: true,
     enableVibration: true,
   );
+
+  static const _chatChannel = AndroidNotificationChannel(
+    _chatChannelId,
+    'رسائل الدردشة',
+    description: 'إشعارات الرسائل الجديدة في أقسام الدردشة',
+    importance: Importance.high,
+    playSound: true,
+    enableVibration: true,
+  );
+
+  /// معالجة الضغط داخل معزل الخلفية.
+  ///
+  /// لازم منفصلة ومعلَّمة `vm:entry-point`: حين يكون التطبيق مغلقاً تماماً
+  /// يبدأ أندرويد معزلاً جديداً بلا شجرة واجهة، ولا سبيل فيه لنداء مستمع
+  /// الواجهة. نكتب الوجهة في التخزين ليقرأها التطبيق عند نهوضه.
+  @pragma('vm:entry-point')
+  static void _onBackgroundTap(NotificationResponse response) {
+    final t = NotificationTarget.decode(response.payload);
+    if (t == null) return;
+    // معزل الخلفية قد لا تكون مكوّنات الإضافة مسجّلة فيه على بعض الأجهزة؛
+    // فشل الكتابة يجب ألّا يُسقط التطبيق — الوجهة تُستعاد عندها من تفاصيل
+    // الإطلاق التي يحملها المكوّن نفسه.
+    SharedPreferences.getInstance()
+        .then((p) => p.setString(_kPendingKey, t.encode()))
+        .catchError((_) => false);
+  }
 
   /// تهيئة المكوّن مرة واحدة عند الإقلاع.
   static Future<void> init() async {
@@ -37,12 +168,30 @@ class Notifications {
       settings: const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       ),
-      onDidReceiveNotificationResponse: (_) {},
+      onDidReceiveNotificationResponse: (response) =>
+          _deliver(NotificationTarget.decode(response.payload)),
+      onDidReceiveBackgroundNotificationResponse: _onBackgroundTap,
     );
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(_channel);
+    final android = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    await android?.createNotificationChannel(_annChannel);
+    await android?.createNotificationChannel(_chatChannel);
+
+    // ضغط أغلق التطبيق ثم فتحه: الوجهة إمّا في التخزين (كتبها معزل الخلفية)
+    // أو في تفاصيل الإطلاق التي يحملها المكوّن نفسه.
+    final p = await SharedPreferences.getInstance();
+    final stored = p.getString(_kPendingKey);
+    if (stored != null) {
+      await p.remove(_kPendingKey);
+      _pending = NotificationTarget.decode(stored);
+    }
+    if (_pending == null) {
+      final launch = await _plugin.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp == true) {
+        _pending =
+            NotificationTarget.decode(launch?.notificationResponse?.payload);
+      }
+    }
   }
 
   /// حالة الإذن الحالية.
@@ -87,7 +236,7 @@ class Notifications {
     if (!await granted) return;
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
-        _channelId,
+        _annChannelId,
         'إعلانات MAPX',
         channelDescription: 'إشعارات إعلانات المالك والعروض الجديدة',
         importance: Importance.high,
@@ -105,11 +254,11 @@ class Notifications {
       ),
     );
     await _plugin.show(
-      id: title.hashCode & 0x7fffffff,
+      id: 9001,
       title: title,
       body: body,
       notificationDetails: details,
-      payload: payload,
+      payload: payload ?? NotificationTarget.ads.encode(),
     );
   }
 
@@ -150,7 +299,7 @@ class Notifications {
           : '${fresh.first['title'] ?? ''} و${fresh.length - 1} غيرها',
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
-          _channelId,
+          _annChannelId,
           'إعلانات MAPX',
           channelDescription: 'إشعارات إعلانات المالك والعروض الجديدة',
           importance: Importance.high,
@@ -166,6 +315,7 @@ class Notifications {
           icon: '@mipmap/ic_launcher',
         ),
       ),
+      payload: NotificationTarget.ads.encode(),
     );
 
     // تُحفظ بعد العرض الناجح فقط — إخفاق الإشعار يجب ألّا يمنع المحاولة لاحقاً.
@@ -173,6 +323,55 @@ class Notifications {
     await p.setStringList(
         _kSeenAnns, {...seen, ...fresh.map((a) => '${a['id']}')}.toList());
     return fresh.length;
+  }
+
+  /// يعرض إشعار رسالة دردشة جديدة، والضغط عليه يفتح القسم نفسه.
+  ///
+  /// معرّف الإشعار مشتقّ من القسم، فرسائل القسم الواحد تُحدِّث إشعاراً واحداً
+  /// بدل أن تصير عشرة صفوف في الشريط. و[count] عدد الرسائل المنتظرة في القسم
+  /// فيرى المستخدم حجم ما ينتظره بلا فتح التطبيق.
+  static Future<void> notifyChatMessage({
+    required String roomId,
+    required String roomName,
+    required String author,
+    required String preview,
+    int count = 1,
+  }) async {
+    if (!Platform.isAndroid) return;
+    if (roomId.isEmpty) return;
+    if (!await granted) return;
+
+    final title = count > 1 ? '$roomName • $count رسائل' : roomName;
+    final body =
+        preview.trim().isEmpty ? '$author أرسل مرفقاً' : '$author: $preview';
+
+    await _plugin.show(
+      // نطاق 10000+ يمنع تصادم معرّف القسم مع معرّف الإعلان الثابت 9001.
+      id: 10000 + (roomId.hashCode.abs() % 100000),
+      title: title,
+      body: body,
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          _chatChannelId,
+          'رسائل الدردشة',
+          channelDescription: 'إشعارات الرسائل الجديدة في أقسام الدردشة',
+          importance: Importance.high,
+          priority: Priority.high,
+          styleInformation: BigTextStyleInformation(
+            body,
+            contentTitle: title,
+            summaryText: 'MAPX',
+          ),
+          color: XTheme.accent,
+          icon: '@mipmap/ic_launcher',
+          ticker: roomName,
+          category: AndroidNotificationCategory.message,
+          // تجميع حسب القسم: كل أقسام الدردشة تحت عنوان واحد في الشريط.
+          groupKey: 'mapx_chat_group',
+        ),
+      ),
+      payload: NotificationTarget.chat(roomId).encode(),
+    );
   }
 }
 

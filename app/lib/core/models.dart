@@ -359,9 +359,11 @@ class ChatMessage {
     required this.mediaMime,
     required this.mediaSize,
     required this.at,
+    this.seconds = 0,
     required this.mine,
     required this.author,
     this.seenBy = const [],
+    this.waveform = const [],
     this.pending = false,
     this.failed = false,
   });
@@ -382,6 +384,11 @@ class ChatMessage {
   /// من رأى الرسالة (حتى 8 صور مصغّرة).
   final List<ChatAuthor> seenBy;
 
+  /// مخطط موجة الرسالة الصوتية — قيم 0..1. فارغ يعني مخططاً افتراضياً.
+  final List<double> waveform;
+  /// مدة المقطع بالثواني كما أرسلها صاحبها — تُعرض قبل بدء التشغيل.
+  final int seconds;
+
   /// أُرسلت محلياً ولم يتأكد وصولها بعد — تُعرض باهتة.
   final bool pending;
   final bool failed;
@@ -393,8 +400,27 @@ class ChatMessage {
 
   DateTime get time => DateTime.fromMillisecondsSinceEpoch(at);
 
+  /// سطر مختصر للرسالة يُعرض في إشعار الهاتف.
+  ///
+  /// رسالة الوسائط جسدها فارغ غالباً، فتظهر في الإشعار فراغاً بلا معنى.
+  /// نستبدلها بوصف قصير، ونجعل الوصف بلا علامة «صورة:» المكرّرة.
+  String get preview {
+    final text = body.trim();
+    if (text.isNotEmpty) {
+      return text.length <= 120 ? text : '${text.substring(0, 120)}…';
+    }
+    if (isImage) return 'أرسل صورة';
+    if (isVideo) return 'أرسل مقطع فيديو';
+    if (isAudio) {
+      final d = seconds > 0 ? ' ($seconds ث)' : '';
+      return 'أرسل رسالة صوتية$d';
+    }
+    return '';
+  }
+
   ChatMessage copyWith({
     List<ChatAuthor>? seenBy,
+    List<double>? waveform,
     bool? pending,
     bool? failed,
   }) =>
@@ -407,9 +433,11 @@ class ChatMessage {
         mediaMime: mediaMime,
         mediaSize: mediaSize,
         at: at,
+        seconds: seconds,
         mine: mine,
         author: author,
         seenBy: seenBy ?? this.seenBy,
+        waveform: waveform ?? this.waveform,
         pending: pending ?? this.pending,
         failed: failed ?? this.failed,
       );
@@ -423,6 +451,7 @@ class ChatMessage {
         mediaMime: j['mediaMime']?.toString() ?? '',
         mediaSize: (j['mediaSize'] as num?)?.toInt() ?? 0,
         at: (j['at'] as num?)?.toInt() ?? 0,
+        seconds: (j['seconds'] as num?)?.toInt() ?? 0,
         mine: j['mine'] == true,
         author: ChatAuthor.fromJson(
             (j['author'] as Map?)?.cast<String, dynamic>() ?? const {}),
@@ -430,7 +459,23 @@ class ChatMessage {
             .whereType<Map>()
             .map((e) => ChatAuthor.fromJson(e.cast<String, dynamic>()))
             .toList(),
+        waveform: _parseWaveform(j['waveform']),
       );
+
+  /// يفكّ مخطط الموجة من سلسلة «0.120,0.480,...».
+  ///
+  /// صيغة نصّية لأن JSON يحوّل كل رقم إلى عنصر مستقل، ورسالة صوتية بعشرات
+  /// النقاط تُثقل الرد بلا سبب. القيم خارج النطاق أو غير الرقمية تُسقَط بدل
+  /// أن تُرسم مشوّهة.
+  static List<double> _parseWaveform(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    final out = <double>[];
+    for (final part in raw.split(',')) {
+      final v = double.tryParse(part);
+      if (v != null) out.add(v.clamp(0.0, 1.0));
+    }
+    return out;
+  }
 }
 
 /// حالة الدردشة كما يراها المستخدم الحالي: الصلاحيات والأقسام والقيود.
@@ -525,9 +570,21 @@ class ChatState {
 
 /// صفحة رسائل من الخادم: الرسائل وهل توجد أقدم منها.
 class ChatPage {
-  const ChatPage({required this.messages, this.hasMore = false});
+  const ChatPage({
+    required this.messages,
+    this.hasMore = false,
+    this.members,
+    this.online,
+  });
   final List<ChatMessage> messages;
   final bool hasMore;
+
+  /// عدد من شاركوا في القسم، وعدد المتصلين الآن.
+  ///
+  /// يُرسلهما الخادم في وضع الفتح وحده (لا في التحديث الدوري) فيكونان
+  /// null في معظم النبضات — والقيمة القديمة تبقى معروضة حتى يتغيّر القسم.
+  final int? members;
+  final int? online;
 }
 
 /// إجراء إشراف على عضو: كتم أو طرد، وقد يكون مقيّداً بقسم واحد.

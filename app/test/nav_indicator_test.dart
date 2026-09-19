@@ -68,7 +68,6 @@ void main() {
         ),
       ),
     );
-    // النبض حركة مستمرة لا تنتهي، فلا يصلح pumpAndSettle هنا.
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('التوافقات'), findsOneWidget);
     expect(find.text('الدردشة'), findsOneWidget);
@@ -102,5 +101,42 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(find.text('المخططات'));
     expect(tapped, 1, reason: 'النقر على العنصر الثاني يجب أن يعطي الفهرس 1');
+  });
+
+  // الطلب كان «معنان زجاج فقط»: أُزيلت الذرّات والمدارات، ثم بقي ظلّ
+  // توهّج حول الأيقونة النشطة. هذا الاختبار يمنع رجوعه: أي ظل على الأيقونة
+  // يعني هالة متوهّجة حول التبويب النشط.
+  testWidgets('لا توهّج حول الأيقونة النشطة', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: AnimatedNavBar(
+            index: 0,
+            onSelect: (_) {},
+            items: const [
+              NavItem(
+                  icon: Icons.hub_outlined,
+                  activeIcon: Icons.hub,
+                  label: 'التوافقات'),
+              NavItem(
+                  icon: Icons.schema_outlined,
+                  activeIcon: Icons.schema,
+                  label: 'المخططات'),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // الأيقونة النشطة هي أيقونة العنصر المحدَّد في الموضع 0.
+    final icons = tester
+        .widgetList<Icon>(find.byType(Icon))
+        .toList();
+    expect(icons, isNotEmpty);
+    for (final icon in icons) {
+      expect(icon.shadows, isNull,
+          reason: 'أيقونات الشريط يجب أن تكون بلا ظل توهّج');
+    }
   });
 }

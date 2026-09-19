@@ -28,3 +28,4 @@ app/android/build/
 app/android/local.properties
 app/android/app/.cxx/
 app/android/.gradle/
+dist/

@@ -76,11 +76,16 @@ class XTheme {
         ];
 
   /// توهّج ملوّن — للعناصر النشطة فقط (الزر الرئيسي، الشريحة المحددة).
+  /// هالة ضوئية ناعمة.
+  ///
+  /// الشفافية والضباب يتناسبان مع القوة، والضباب مسقوف: الظل المُضبَّب
+  /// يُرسم على وحدة الرسوم في كل إطار، وضباب واسع داخل عنصر متحرّك يُسقط
+  /// الإطارات على الأجهزة الضعيفة. السقف يحفظ النعومة بلا هذا الثمن.
   static List<BoxShadow> glow(Color c, {double strength = 1}) => [
         BoxShadow(
-          color: c.withOpacity((isLight ? .26 : .38) * strength),
-          blurRadius: 18 * strength,
-          offset: Offset(0, 6 * strength),
+          color: c.withOpacity((isLight ? .20 : .30) * strength),
+          blurRadius: (14 * strength).clamp(4.0, 18.0),
+          offset: Offset(0, 5 * strength),
         ),
       ];
 

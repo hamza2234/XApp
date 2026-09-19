@@ -46,8 +46,19 @@ class _OwnerGateState extends State<OwnerGate> {
     setState(() {
       _bioChecked = true;
       // لا بصمة بلا جلسة: نافذة بصمة قبل الدخول بلا معنى
-      _bioOk = !hasSession || !enabled;
+      _bioOk = !hasSession || !enabled || _recentlyUnlocked;
     });
+  }
+
+  /// مهلة سماح بعد فتح ناجح: التنقّل بين أقسام اللوحة يُعيد بناء هذه
+  /// البوابة، فبغير السماح تُطلب البصمة عند كل رجوع فيتوهّم المالك أن
+  /// القفل «لا يثبت». الطلب يبقى عند فتح اللوحة من جديد بعد المهلة.
+  static const _grace = Duration(minutes: 10);
+
+  bool get _recentlyUnlocked {
+    final at = widget.store.ownerUnlockedAt;
+    if (at <= 0) return false;
+    return DateTime.now().millisecondsSinceEpoch - at < _grace.inMilliseconds;
   }
 
   @override

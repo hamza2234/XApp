@@ -120,3 +120,18 @@ CREATE TABLE IF NOT EXISTS x_chat_actions (
   at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS x_chat_actions_user ON x_chat_actions (user_id, kind);
+
+-- رموز أجهزة الدفع (FCM). الرمز واحد لكل تثبيت، ويُربط بمعرّف الدردشة
+-- (حساب أو زائر) ليصل الإشعار لمن يهمّه وحده.
+--
+-- لماذا جدول منفصل عن x_installs؟ لأن الدفع يحتاج رمز الجهاز نفسه لا بصمة
+-- التثبيت، والرمز يتغيّر عند إعادة تثبيت التطبيق أو مسح بياناته، فيُحدَّث
+-- هنا بلا أن يمسّ سجل التثبيت.
+CREATE TABLE IF NOT EXISTS x_push_tokens (
+  token      TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  platform   TEXT NOT NULL DEFAULT 'android',
+  updated_at TEXT NOT NULL
+);
+-- الإرسال يبدأ دائماً من المستخدم: «أرسل لكل من ليس أنا».
+CREATE INDEX IF NOT EXISTS x_push_tokens_user ON x_push_tokens (user_id);

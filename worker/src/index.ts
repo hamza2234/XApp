@@ -142,6 +142,10 @@ interface Env {
   X_OWNER_KEY: string
   X_OWNER_JWT_SECRET?: string
   X_FILE_KEY: string
+  /** حساب خدمة Firebase (JSON كامل) — إن غاب، الدفع معطّل بهدوء. */
+  FCM_SERVICE_ACCOUNT?: string
+  /** معرّف مشروع Firebase — يُقرأ من الحساب إن لم يُضبط هنا. */
+  FCM_PROJECT_ID?: string
 }
 
 interface Caller { uid: string; role: string }
@@ -1195,7 +1199,13 @@ const CHAT_KINDS = ['text', 'image', 'audio', 'video', 'system'] as const
 type ChatKind = typeof CHAT_KINDS[number]
 
 /** أنواع الوسائط التي يُقبل رفعها، والتحقق من بايتها السحرية لا من ادّعاء العميل. */
-interface MediaSig { kind: 'image' | 'audio' | 'video'; ext: string; mime: string; test: (b: Uint8Array) => boolean }
+/** نوع وسيط مكتشَف. `test` غائب في نتائج التفريع الداخلي (عائلة MP4). */
+interface MediaSig {
+  kind: 'image' | 'audio' | 'video'
+  ext: string
+  mime: string
+  test?: (b: Uint8Array) => boolean
+}
 
 const MEDIA_SIGNATURES: MediaSig[] = [
   { kind: 'image', ext: 'png', mime: 'image/png', test: b => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
@@ -1204,11 +1214,8 @@ const MEDIA_SIGNATURES: MediaSig[] = [
   { kind: 'image', ext: 'webp', mime: 'image/webp', test: b => b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 },
   // فحص webm قبل mkv: الترويسة نفسها، والفرق في نوع المحتوى داخل الملف.
   { kind: 'video', ext: 'webm', mime: 'video/webm', test: b => b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3 },
-  { kind: 'video', ext: 'mp4', mime: 'video/mp4', test: b => b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70 },
-  // 3gp هو mp4 مبسّط للجوال — نفس علامة ftyp، وترتيبه قبل mp4 ليس مهماً
-  // لأن الفحص يختار أول تطابق، وكلاهما يُخدم بنوعه الصحيح.
-  { kind: 'video', ext: '3gp', mime: 'video/3gpp', test: b => b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70 },
-  { kind: 'audio', ext: 'm4a', mime: 'audio/mp4', test: b => b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70 },
+  // عائلة MP4 (mp4/3gp/m4a) لا تُفحص هنا: علامتها واحدة `ftyp`، والتمييز
+  // يحتاج قراءة العلامة الداخلية ومسارات الملف — انظر sniffMp4Family.
   { kind: 'audio', ext: 'ogg', mime: 'audio/ogg', test: b => b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53 },
   { kind: 'audio', ext: 'wav', mime: 'audio/wav', test: b => b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x41 && b[10] === 0x56 && b[11] === 0x45 },
   { kind: 'audio', ext: 'mp3', mime: 'audio/mpeg', test: b => b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33 },
@@ -1225,8 +1232,52 @@ const MEDIA_SIGNATURES: MediaSig[] = [
  */
 function sniffMedia(bytes: Uint8Array): MediaSig | null {
   if (bytes.length < 16) return null
-  for (const s of MEDIA_SIGNATURES) if (s.test(bytes)) return s
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    return sniffMp4Family(bytes)
+  }
+  for (const s of MEDIA_SIGNATURES) if (s.test?.(bytes)) return s
   return null
+}
+
+/**
+ * يميّز داخل عائلة MP4 بين فيديو و3gp وصوت m4a.
+ *
+ * كلها تشترك في علامة `ftyp` عند البايت الرابع، فترتيب الجدول وحده كان
+ * يجعل أول قاعدة mp4 تلتقط كل ملفات m4a أيضاً — أي أن كل رسالة صوتية
+ * سُجّلت من التطبيق خُزّنت كـ«فيديو»، فعُرضت بمشغّل فيديو بدل موجة صوتية.
+ * التمييز الصحيح: العلامة الداخلية (bytes 8..11) ثم وجود مسار فيديو `vide`
+ * داخل الملف؛ ملف صوتي لا مسار فيديو فيه.
+ */
+function sniffMp4Family(bytes: Uint8Array): MediaSig {
+  const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11])
+  const audioBrand = brand === 'M4A ' || brand === 'M4B ' ||
+    brand === 'M4P ' || brand === 'F4A '
+  const is3gp = brand.startsWith('3gp') || brand.startsWith('3g2')
+  // مسارات الملف تكون في `moov`، وهو إمّا في مقدّمة الملف (faststart) أو في
+  // آخر. نفحص الطرفين فقط بدل فكّ الملف كله: يكفي للتمييز ويظل رخيصاً على
+  // المقاطع الكبيرة. فكّ latin1 يكفي لمقارنة ASCII بلا تحقق UTF-8.
+  const dec = new TextDecoder('latin1')
+  const edge = 64 * 1024
+  const head = dec.decode(bytes.subarray(0, Math.min(edge, bytes.length)))
+  const tail = bytes.length > edge
+    ? dec.decode(bytes.subarray(Math.max(0, bytes.length - edge)))
+    : ''
+  const hasVideo = head.includes('vide') || tail.includes('vide')
+  const hasAudio = head.includes('soun') || tail.includes('soun')
+
+  if (hasVideo) {
+    return is3gp
+      ? { kind: 'video', ext: '3gp', mime: 'video/3gpp' }
+      : { kind: 'video', ext: 'mp4', mime: 'video/mp4' }
+  }
+  if (hasAudio || audioBrand || is3gp) {
+    return { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' }
+  }
+  // بلا مسار ظاهر — الغالب في مقاطع الجوال فيديو، وهذا الاحتياط يحفظ
+  // السلوك القديم بدل رفض الملف.
+  return audioBrand
+    ? { kind: 'audio', ext: 'm4a', mime: 'audio/mp4' }
+    : { kind: 'video', ext: 'mp4', mime: 'video/mp4' }
 }
 
 /** تنقية النص: نحذف محارف التحكم وعلامات الاتجاه المزيفة. */
@@ -1321,7 +1372,7 @@ function chatMessageJson(
   m: {
     id: string; room_id: string; user_id: string; kind: string
     body: string; media_key: string; media_mime: string; media_size: number
-    created_at: number
+    created_at: number; waveform?: string; media_seconds?: number
   },
   p: ChatProfile | undefined,
   meId: string,
@@ -1334,6 +1385,10 @@ function chatMessageJson(
     mediaUrl: m.media_key ? `/v1/media/${m.media_key}` : '',
     mediaMime: m.media_mime,
     mediaSize: m.media_size,
+    // مخطط الموجة يُرسل كسلسلة أرقام مفصولة بفواصل ويُفكّ في التطبيق.
+    // الصيغة النصّية توفّر تحويلات JSON لعشرات الأرقام في كل رسالة صوتية.
+    waveform: m.waveform ?? '',
+    seconds: m.media_seconds ?? 0,
     at: m.created_at,
     mine: m.user_id === meId,
     author: {
@@ -1383,6 +1438,30 @@ async function chatSeers(
 }
 
 /**
+ * إحصاء أعضاء القسم: كم عضواً شارك فيه، وكم منهم متصل الآن.
+ *
+ * «متصل» يعني ختم مشاهدة حُدّث قبل دقيقتين. الختم يُحدَّث في كل دورة تحديث
+ * دوري، فالرقم يعكس وجوداً فعلياً لا تخميناً. العتبة دقيقتان لأن أبطأ دورة
+ * تحديث مسموحة 30 ثانية، فدقيقتان تمنع ظهور العضو متصلاً وهو خرج للتوّ.
+ */
+async function chatRoomStats(
+  env: Env, roomId: string,
+): Promise<{ members: number; online: number }> {
+  const since = Date.now() - 120_000
+  const [mem, on] = await Promise.all([
+    env.XDB.prepare(
+      `SELECT COUNT(DISTINCT user_id) c FROM x_chat_messages
+       WHERE room_id = ?1 AND deleted = 0`
+    ).bind(roomId).first<{ c: number }>(),
+    env.XDB.prepare(
+      `SELECT COUNT(*) c FROM x_chat_seen
+       WHERE room_id = ?1 AND seen_at >= ?2`
+    ).bind(roomId, since).first<{ c: number }>(),
+  ])
+  return { members: Number(mem?.c ?? 0), online: Number(on?.c ?? 0) }
+}
+
+/**
  * البثّ التفاضلي: يُرجع الجديد بعد `since` وحده، أو الأحدث صفحةً واحدة.
  *
  * هذا ما يمنع تحميل المحادثة كاملة كل مرة، ويمنع الانهيار عند آلاف الرسائل:
@@ -1397,7 +1476,7 @@ async function chatPage(
   if (since > 0) {
     // رسائل جديدة منذ آخر تحديث — تصاعدي لنعرضها بترتيبها الطبيعي
     rows = await env.XDB.prepare(
-      `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at
+      `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds
        FROM x_chat_messages
        WHERE room_id = ?1 AND deleted = 0 AND created_at > ?2
        ORDER BY created_at ASC LIMIT ?3`
@@ -1405,7 +1484,7 @@ async function chatPage(
     return { messages: rows.results ?? [], hasMore: false }
   }
   rows = await env.XDB.prepare(
-    `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at
+    `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds
      FROM x_chat_messages
      WHERE room_id = ?1 AND deleted = 0 ${before > 0 ? 'AND created_at < ?3' : ''}
      ORDER BY created_at DESC LIMIT ?2`
@@ -1417,6 +1496,255 @@ async function chatPage(
 
 
 
+
+
+// ───────────────────────── الدفع عبر FCM ─────────────────────────
+
+/**
+ * الدفع الحقيقي لإشعارات أندرويد.
+ *
+ * يحتاج حساب خدمة Firebase (سرّ `FCM_SERVICE_ACCOUNT`). بلا هذا السرّ تبقى
+ * كل الدوال هنا صامتة: التطبيق يعمل، والإشعارات المحلية تعمل، ولا دفع.
+ * هذا مقصود — لا نريد بناءً يفشل لأن سرّاً غير مضبوط في بيئة لم تُهيّأ بعد.
+ *
+ * المسار: نوقّع JWT بـ RS256 بمفتاح الحساب، نستبدله برمز وصول من Google،
+ * ثم نرسل للجهاز عبر FCM HTTP v1. لا نستخدم المفتاح القديم (server key):
+ * أوقفت Google الدفع به وأصبح غير موثوق.
+ */
+
+interface FcmAccount {
+  project_id: string
+  client_email: string
+  private_key: string
+}
+
+let _fcmAccount: FcmAccount | null | undefined
+let _fcmToken: { value: string; exp: number } | null = null
+
+function fcmAccount(env: Env): FcmAccount | null {
+  if (_fcmAccount !== undefined) return _fcmAccount
+  const raw = env.FCM_SERVICE_ACCOUNT
+  if (!raw) return (_fcmAccount = null)
+  try {
+    const j = JSON.parse(raw) as FcmAccount
+    if (!j.client_email || !j.private_key) return (_fcmAccount = null)
+    // الأسرار تُخزَّن غالباً بأسطر مهرَّبة؛ نعيدها قبل الاستخدام وإلا فشل
+    // تحليل المفتاح برسالة غامضة.
+    if (!j.private_key.includes('\n')) j.private_key = j.private_key.replace(/\\n/g, '\n')
+    if (env.FCM_PROJECT_ID) j.project_id = env.FCM_PROJECT_ID
+    return (_fcmAccount = j)
+  } catch {
+    return (_fcmAccount = null)
+  }
+}
+
+function b64url(bytes: Uint8Array | string): string {
+  const bin = typeof bytes === 'string'
+    ? bytes
+    : Array.from(bytes, b => String.fromCharCode(b)).join('')
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function pemToPkcs8(pem: string): ArrayBuffer {
+  const body = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')
+  const bin = atob(body)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out.buffer
+}
+
+/** رمز وصول Google، ويُخزَّن حتى انتهائه لتجنّب توقيع JWT لكل إشعار. */
+async function fcmAccessToken(account: FcmAccount): Promise<string | null> {
+  const now = Math.floor(Date.now() / 1000)
+  if (_fcmToken && _fcmToken.exp > now + 60) return _fcmToken.value
+  try {
+    const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+    const claim = b64url(JSON.stringify({
+      iss: account.client_email,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    }))
+    const key = await crypto.subtle.importKey(
+      'pkcs8', pemToPkcs8(account.private_key),
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'],
+    )
+    const sig = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(`${header}.${claim}`),
+    )
+    const jwt = `${header}.${claim}.${b64url(new Uint8Array(sig))}`
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
+    })
+    if (!res.ok) return null
+    const j = await res.json() as { access_token?: string; expires_in?: number }
+    if (!j.access_token) return null
+    _fcmToken = { value: j.access_token, exp: now + (j.expires_in ?? 3600) }
+    return _fcmToken.value
+  } catch {
+    return null
+  }
+}
+
+interface PushPayload {
+  title: string
+  body: string
+  /** حمولة الوجهة كما يفكّها التطبيق: {k:'chat',r:'...'} أو {k:'ad'}. */
+  target: { k: string; r?: string }
+  /** معرّف لإزالة التكرار عند إعادة المحاولة. */
+  collapseKey?: string
+}
+
+/**
+ * يرسل إشعاراً لرموز أجهزة. يُعيد عدد ما قُبل، ويمسح الرموز الميتة.
+ *
+ * الرمز الميت (`UNREGISTERED` أو `INVALID_ARGUMENT`) يُحذف فوراً: إبقاؤه
+ * يجعل كل إرسال لاحق يدفع ثمناً بلا أمل، ويخفي أن التثبيت زال.
+ */
+async function fcmSend(
+  env: Env, tokens: string[], payload: PushPayload,
+): Promise<number> {
+  const account = fcmAccount(env)
+  if (!account || tokens.length === 0) return 0
+  const token = await fcmAccessToken(account)
+  if (!token) return 0
+
+  const url = `https://fcm.googleapis.com/v1/projects/${account.project_id}/messages:send`
+  let sent = 0
+  const dead: string[] = []
+
+  // التزامن المحدود: قسم نشِط قد يحمل مئات الأجهزة، وفتح نداء لكل رمز دفعة
+  // واحدة يستهلك حدود الاتصال. عشرات متوازية تكفي بلا انفجار.
+  const queue = [...tokens]
+  const workers = Array.from({ length: Math.min(10, queue.length) }, async () => {
+    for (;;) {
+      const t = queue.shift()
+      if (!t) return
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: {
+              token: t,
+              // `data` لا `notification`: نريد التطبيق يبني الإشعار بنفسه
+              // فيظهر بنفس القناة والأيقونة والوجهة التي يعرفها.
+              data: {
+                title: payload.title,
+                body: payload.body,
+                target: JSON.stringify(payload.target),
+              },
+              android: {
+                priority: 'HIGH',
+                ...(payload.collapseKey ? { collapse_key: payload.collapseKey } : {}),
+              },
+            },
+          }),
+        })
+        if (res.ok) { sent++; continue }
+        const j = await res.json().catch(() => null) as
+          { error?: { status?: string; details?: Array<{ errorCode?: string }> } } | null
+        const status = j?.error?.status ?? ''
+        const code = j?.error?.details?.[0]?.errorCode ?? ''
+        if (status === 'NOT_FOUND' || status === 'INVALID_ARGUMENT' ||
+            code === 'UNREGISTERED' || code === 'INVALID_ARGUMENT') {
+          dead.push(t)
+        }
+      } catch {
+        // خطأ شبكة عابر: الرمز سليم، نتركه للمحاولة القادمة.
+      }
+    }
+  })
+  await Promise.all(workers)
+
+  if (dead.length > 0) {
+    await env.XDB.prepare(
+      `DELETE FROM x_push_tokens WHERE token IN (${dead.map(() => '?').join(',')})`
+    ).bind(...dead).run().catch(() => {})
+  }
+  return sent
+}
+
+/** يرسل لكل أجهزة مستخدم إلا جهازه الحالي. */
+async function pushToUser(
+  env: Env, userId: string, payload: PushPayload, exceptToken = '',
+): Promise<number> {
+  if (!userId) return 0
+  const rows = await env.XDB.prepare(
+    'SELECT token FROM x_push_tokens WHERE user_id = ?1'
+  ).bind(userId).all<{ token: string }>()
+  const tokens = (rows.results ?? []).map(r => r.token).filter(t => t && t !== exceptToken)
+  return fcmSend(env, tokens, payload)
+}
+
+/** يرسل لكل الأجهزة المسجّلة — لإعلان عام. */
+async function pushToAll(
+  env: Env, payload: PushPayload, exceptToken = '',
+): Promise<number> {
+  const rows = await env.XDB.prepare('SELECT token FROM x_push_tokens')
+    .all<{ token: string }>()
+  const tokens = (rows.results ?? []).map(r => r.token).filter(t => t && t !== exceptToken)
+  return fcmSend(env, tokens, payload)
+}
+
+/** هل الدفع مهيّأ؟ يظهر للتشخيص في رد لوحة المالك. */
+function pushEnabled(env: Env): boolean {
+  return fcmAccount(env) !== null
+}
+
+/**
+ * ينبّه أعضاء القسم برسالة جديدة.
+ *
+ * الشروط مطابقة لما يقرّره التطبيق في جانبه، لأن الخادم هو من يملك القائمة
+ * الكاملة للأجهزة: لا إشعار لصاحب الرسالة، ولا لمن كتم الإشعارات.
+ *
+ * ولا ننتظر النتيجة في مسار الطلب: الإرسال قد يستغرق ثواني مع مئات الأجهزة،
+ * وإرسال الرسالة نفسه يجب أن يعود فوراً. النداء يقع عبر `waitUntil` فيتمّ
+ * في الخلفية بلا تأخير المستخدم.
+ */
+async function pushRoomMessage(
+  env: Env, roomId: string, authorId: string, authorName: string, preview: string,
+): Promise<number> {
+  if (!pushEnabled(env)) return 0
+  const rows = await env.XDB.prepare(
+    `SELECT t.token AS token, COALESCE(p.notify, 1) AS notify
+     FROM x_push_tokens t
+     LEFT JOIN x_chat_profiles p ON p.user_id = t.user_id
+     WHERE t.user_id <> ?1`
+  ).bind(authorId).all<{ token: string; notify: number }>()
+  const tokens = (rows.results ?? [])
+    .filter(r => r.notify !== 0)
+    .map(r => r.token)
+  if (!tokens.length) return 0
+  return fcmSend(env, tokens, {
+    title: authorName || 'رسالة جديدة',
+    body: preview || 'أرسل مرفقاً',
+    target: { k: 'chat', r: roomId },
+    // الرسائل المتتابعة في القسم نفسه تُطوى لا تُكدَّس.
+    collapseKey: `room_${roomId}`,
+  })
+}
+
+/**
+ * سطر مختصر للرسالة يُعرض في الإشعار.
+ *
+ * رسالة الوسائط جسدها فارغ غالباً، فتظهر في الإشعار فراغاً بلا معنى. نستبدلها
+ * بوصف قصير، ونطابق ما يعرضه التطبيق في جانبه حتى لا يختلف النصّان.
+ */
+function chatPreview(kind: string, body: string, seconds: number): string {
+  const text = (body ?? '').trim()
+  if (text) return text.length <= 120 ? text : `${text.slice(0, 120)}…`
+  if (kind === 'image') return 'أرسل صورة'
+  if (kind === 'video') return 'أرسل مقطع فيديو'
+  if (kind === 'audio') return seconds > 0 ? `أرسل رسالة صوتية (${seconds} ث)` : 'أرسل رسالة صوتية'
+  return ''
+}
 
 
 export default {
@@ -1966,6 +2294,11 @@ export default {
         // التحديث الدوري للرسائل الجديدة وحدها.
         const others = list.filter(m => m.user_id !== meId).map(m => m.created_at)
         const seers = await chatSeers(env, roomId, others, meId)
+        // إحصاء الأعضاء في نمط الفتح فقط: عدّاد لا يتغيّر كل أربع ثوانٍ،
+        // وحسابه في كل دورة تحديث دوري هدر بلا فائدة.
+        const stats = since > 0
+          ? null
+          : await chatRoomStats(env, roomId)
         return json({
           room: room.id,
           messages: list.map(m => ({
@@ -1973,7 +2306,40 @@ export default {
             seenBy: seers.get(m.created_at) ?? [],
           })),
           hasMore: page.hasMore,
+          members: stats?.members ?? null,
+          online: stats?.online ?? null,
         })
+      }
+
+      /**
+       * حذف رسالة — لصاحبها فقط، وللمالك على أي رسالة.
+       *
+       * الحذف نصفي (deleted = 1) لا محو للصف: يحفظ سجل الإشراف ويحول دون
+       * أن يعيد الطلبُ الدوري رسالةً حُذفت لأن اتصالاً قديماً ما زال يراقب.
+       * ولا يُحذف ملف الوسيط من R2: يفعل ذلك مهمة تنظيف مستقلة، وحذفه هنا
+       * يُبقي الرسائل القديمة في نوافذ مفتوحة بلا صورة فجأة.
+       */
+      if (path === '/v1/chat/delete' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 40, 60)
+        const body = await request.json<{ id?: string }>()
+          .catch(() => ({} as { id?: string }))
+        const msgId = String(body.id ?? '').trim().slice(0, 80)
+        if (!msgId) throw new HttpError(400, 'معرّف الرسالة مطلوب')
+        const row = await env.XDB.prepare(
+          'SELECT user_id, room_id, media_key FROM x_chat_messages WHERE id = ?1 AND deleted = 0'
+        ).bind(msgId).first<{ user_id: string; room_id: string; media_key: string }>()
+        if (!row) throw new HttpError(404, 'الرسالة غير موجودة')
+        const meId = chatUser?.id ?? `guest:${caller.uid}`
+        // المالك يحذف أي رسالة؛ غيره يحذف رسالته وحدها.
+        if (caller.role !== 'owner' && row.user_id !== meId) {
+          throw new HttpError(403, 'يمكنك حذف رسائلك وحدها')
+        }
+        await env.XDB.prepare(
+          'UPDATE x_chat_messages SET deleted = 1 WHERE id = ?1'
+        ).bind(msgId).run()
+        await logSecurity(env, request, 'chat_delete',
+          `حذف رسالة ${msgId} في ${row.room_id}${caller.role === 'owner' ? ' (المالك)' : ''}`)
+        return json({ ok: true, id: msgId, roomId: row.room_id })
       }
 
       /**
@@ -2011,12 +2377,29 @@ export default {
         const write = chatWriteAllowed(settings, caller, chatUser)
         if (!write.ok) throw new HttpError(403, write.reason)
 
+        // لا كتابة بلا هوية: من يدخل باسم «عضو» يملأ الدردشة بأسماء متطابقة
+        // يتعذّر تمييز أصحابها، ولا يمكن ردّ رسالة على أحدهم. الكنية أو الصورة
+        // شرط قبل أول رسالة — والمطالبة بها عند الإرسال لا عند القراءة، حتى
+        // يبقى التصفّح مفتوحاً لمن لم يقرّر بعد.
+        if (chatUser && caller.role !== 'owner') {
+          const prof = await env.XDB.prepare(
+            'SELECT nickname, avatar_key FROM x_chat_profiles WHERE user_id = ?1'
+          ).bind(chatUser.id)
+            .first<{ nickname: string; avatar_key: string }>()
+          const hasNick = (prof?.nickname ?? '').trim().length >= 2
+          const hasAvatar = (prof?.avatar_key ?? '').length > 0
+          if (!hasNick && !hasAvatar) {
+            throw new HttpError(403,
+              'اختر كنية أو صورة شخصية قبل المراسلة')
+          }
+        }
+
         const body = await request.json<{
           room?: string; text?: string; mediaB64?: string
-          imageB64?: string; mediaSeconds?: number
+          imageB64?: string; mediaSeconds?: number; waveform?: number[]
         }>().catch(() => ({} as {
           room?: string; text?: string; mediaB64?: string
-          imageB64?: string; mediaSeconds?: number
+          imageB64?: string; mediaSeconds?: number; waveform?: number[]
         }))
         const roomId = String(body.room ?? '')
         const room = settings.chatRooms.find(r => r.id === roomId)
@@ -2043,6 +2426,20 @@ export default {
         let mediaKey = ''
         let mediaMime = ''
         let mediaSize = 0
+        // مدة المقطع تُحفظ مع الرسالة: المشغّل يحتاجها لعرض الطول ورسم
+        // موضع الموجة قبل بدء التشغيل، وللتحقق من الحد الأقصى للمدة.
+        let mediaSeconds = 0
+
+        // مخطط الموجة اختياري وبلا قيمة أمنية: أرقام تُرسم فقط. نطبيعها
+        // بدل رفضها — مقطع قديم أو نسخة لا ترسله يبقى يعمل بمخطط افتراضي.
+        // 64 نقطة تكفي لعرض شريط صوتي على الجوال، ونطاق 0..1 يكفي للرسم.
+        let waveform = ''
+        if (Array.isArray(body.waveform) && body.waveform.length) {
+          const pts = body.waveform
+            .slice(0, 64)
+            .map(v => Math.max(0, Math.min(1, Number(v) || 0)))
+          if (pts.length) waveform = pts.map(v => v.toFixed(3)).join(',')
+        }
 
         if (rawMedia) {
           const payload = rawMedia.replace(/^data:[^,]+,/, '')
@@ -2072,12 +2469,13 @@ export default {
           } else {
             const media = chatMediaAllowed(settings, caller, chatUser)
             if (!media.ok) throw new HttpError(403, media.reason)
-            const secs = Math.floor(Number(body.mediaSeconds) || 0)
+            const secs = Math.max(0, Math.floor(Number(body.mediaSeconds) || 0))
             // المدة تُتحقق إن أرسلها التطبيق: الحجم وحده لا يمنع مقطعاً
             // طويلاً بجودة منخفضة، والمدة هي ما يثقل التخزين والبث.
-            if (secs > 0 && secs > settings.chatMediaSeconds) {
+            if (secs > settings.chatMediaSeconds) {
               throw new HttpError(413, `المقطع أطول من ${settings.chatMediaSeconds} ثانية`)
             }
+            mediaSeconds = secs
           }
 
           kind = sig.kind
@@ -2089,18 +2487,24 @@ export default {
           const at = Date.now()
           await env.XDB.prepare(
             `INSERT INTO x_chat_messages
-               (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`
+               (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
           ).bind(
-            id, roomId, chatUser!.id, kind, text, mediaKey, mediaMime, mediaSize, at
+            id, roomId, chatUser!.id, kind, text, mediaKey, mediaMime, mediaSize, at, waveform, mediaSeconds
           ).run()
           const profiles = await chatProfiles(env.XDB, [chatUser!.id])
+          const authorName = profiles.get(chatUser!.id)?.nickname || 'عضو'
+          const preview = chatPreview(kind, text, mediaSeconds)
+          ctx.waitUntil(pushRoomMessage(
+            env, roomId, chatUser!.id, authorName, preview,
+          ).catch(() => 0))
           return json({
             ok: true,
             message: chatMessageJson({
               id, room_id: roomId, user_id: chatUser!.id, kind,
               body: text, media_key: mediaKey, media_mime: mediaMime,
-              media_size: mediaSize, created_at: at,
+              media_size: mediaSize, created_at: at, waveform,
+              media_seconds: mediaSeconds,
             }, profiles.get(chatUser!.id), chatUser!.id),
           })
         }
@@ -2114,6 +2518,10 @@ export default {
            VALUES (?1, ?2, ?3, ?4, ?5, '', '', 0, ?6)`
         ).bind(id, roomId, chatUser!.id, kind, text, at).run()
         const profiles = await chatProfiles(env.XDB, [chatUser!.id])
+        const authorName = profiles.get(chatUser!.id)?.nickname || 'عضو'
+        ctx.waitUntil(pushRoomMessage(
+          env, roomId, chatUser!.id, authorName, chatPreview(kind, text, 0),
+        ).catch(() => 0))
         return json({
           ok: true,
           message: chatMessageJson({
@@ -2121,6 +2529,51 @@ export default {
             body: text, media_key: '', media_mime: '', media_size: 0, created_at: at,
           }, profiles.get(chatUser!.id), chatUser!.id),
         })
+      }
+
+      /**
+       * تسجيل رمز جهاز الدفع.
+       *
+       * يُستدعى كلما أمكن الحصول على رمز (عند الإقلاع، وبعد كل تدوير رمز)
+       * والحفظ `INSERT OR REPLACE` لأن الرمز قد ينتقل بين مستخدمين على الجهاز
+       * نفسه — تسجيل دخول آخر يملك الرمز، والقديم يجب ألا يبقى مالكاً له.
+       */
+      if (path === '/v1/push/register' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 40, 60)
+        const body = await request.json() as { token?: string; platform?: string }
+        const token = (body.token ?? '').trim()
+        // الرمز يأتي من FCM وطوله يتجاوز المئة؛ نرفض القصير الواضح أنه ليس رمزاً
+        // بدل تخزين قيم عابثة تُثقل كل إرسال لاحق.
+        if (token.length < 20 || token.length > 4096) {
+          throw new HttpError(400, 'رمز الدفع غير صالح')
+        }
+        const meId = chatUser?.id ?? `guest:${caller.uid}`
+        await env.XDB.prepare(
+          `INSERT INTO x_push_tokens (token, user_id, platform, updated_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(token) DO UPDATE SET
+             user_id = excluded.user_id,
+             platform = excluded.platform,
+             updated_at = excluded.updated_at`
+        ).bind(
+          token, meId,
+          (body.platform ?? 'android').slice(0, 16),
+          new Date().toISOString(),
+        ).run()
+        return json({ ok: true, push: pushEnabled(env) })
+      }
+
+      // إلغاء التسجيل عند تسجيل الخروج: بلا هذا يظل الجهاز يستقبل إشعارات
+      // حسابٍ لم يعد يستخدمه.
+      if (path === '/v1/push/unregister' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 40, 60)
+        const body = await request.json() as { token?: string }
+        const token = (body.token ?? '').trim()
+        if (token) {
+          await env.XDB.prepare('DELETE FROM x_push_tokens WHERE token = ?1')
+            .bind(token).run()
+        }
+        return json({ ok: true })
       }
 
       // ملف الدردشة: كنية، صورة شخصية، وكتم الإشعارات من جهة المستخدم.
@@ -2705,7 +3158,14 @@ export default {
             linkUrl: body.linkUrl?.trim() ?? '', imageUrl,
             active: true, order: Date.now(), createdAt: new Date().toISOString()
           })).run()
-          return sealed({ ok: true, id, imageUrl })
+          // الإعلان يهمّ كل مستخدمي التطبيق، فهو الدفع الوحيد العام.
+          // بلا انتظار: نشر الإعلان يجب أن يعود فوراً ولو حمّل الإرسال ثواني.
+          ctx.waitUntil(pushToAll(env, {
+            title: body.title.trim(),
+            body: body.subtitle?.trim() || 'إعلان جديد من MAPX',
+            target: { k: 'ad' },
+          }).catch(() => 0))
+          return sealed({ ok: true, id, imageUrl, pushed: pushEnabled(env) })
         }
 
         const annDelete = path.match(/^\/v1\/owner\/announcements\/([\w-]+)$/)
