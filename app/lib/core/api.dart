@@ -27,10 +27,16 @@ class OwnerCrypto {
     final dot = sealed.indexOf('.');
     if (dot <= 0) throw const FormatException('sealed payload');
     final nonce = _b64u(sealed.substring(0, dot));
-    final data = _b64u(sealed.substring(dot + 1));
+    final blob = _b64u(sealed.substring(dot + 1));
+    // WebCrypto يلحق وسم المصادقة (16 بايت) بنهاية النص المشفّر، بينما
+    // cryptography يتوقّعه في حقل mac منفصل. تمرير الكتلة كاملة كـ data
+    // بوسم فارغ كان يجعل كل ردّ يفشل بالتحقق، فلا تُفكّ أي استجابة في اللوحة.
+    if (blob.length <= 16) throw const FormatException('sealed payload');
+    final data = blob.sublist(0, blob.length - 16);
+    final mac = blob.sublist(blob.length - 16);
     final algo = cg.AesGcm.with256bits();
     final clear = await algo.decrypt(
-      cg.SecretBox(data, nonce: nonce, mac: cg.Mac.empty),
+      cg.SecretBox(data, nonce: nonce, mac: cg.Mac(mac)),
       secretKey: await _key(token),
     );
     return jsonDecode(utf8.decode(clear)) as Map<String, dynamic>;
