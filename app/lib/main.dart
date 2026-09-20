@@ -4,6 +4,7 @@ import 'core/api.dart';
 import 'core/config.dart';
 import 'core/app_config.dart';
 import 'core/notifications.dart';
+import 'core/push.dart';
 import 'core/store.dart';
 import 'ui/theme.dart';
 import 'ui/splash.dart';
@@ -13,6 +14,9 @@ void main() {
   // تهيئة الإشعارات قبل بناء الواجهة: الإعلان الذي يصل أثناء الإقلاع يجب
   // أن يجد قناة جاهزة، وإلا ضاع بلا أثر.
   Notifications.init();
+  // الدفع بعدها: رسالة تصل والتطبيق مغلق لا يوقظها شيء محلي، وتهيئة
+  // Firebase يجب أن تكون قبل أي طلب شبكة كي يستقبل المعالج الرمز.
+  Push.init();
   runApp(const XApp());
 }
 

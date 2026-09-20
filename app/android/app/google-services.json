@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "779881778731",
+    "project_id": "my-firstapp-226db",
+    "storage_bucket": "my-firstapp-226db.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:779881778731:android:d768295db07dc805e5646e",
+        "android_client_info": {
+          "package_name": "com.xapp.x_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB8bNlMHjEf2RiqNEp2ZpXfA6XaJWfVc18"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:779881778731:android:c1633a9c30102859e5646e",
+        "android_client_info": {
+          "package_name": "iphonappx.com"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB8bNlMHjEf2RiqNEp2ZpXfA6XaJWfVc18"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

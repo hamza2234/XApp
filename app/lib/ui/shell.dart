@@ -6,6 +6,7 @@ import '../core/api.dart';
 import '../core/config.dart';
 import '../core/app_config.dart';
 import '../core/notifications.dart';
+import '../core/push.dart';
 import '../core/store.dart';
 import 'theme.dart';
 import 'nav_bar.dart';
@@ -329,6 +330,9 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         widget.api.bootstrap(),
       ]);
       await _cfg.applyBootstrap(results[1]);
+      // تسجيل رمز الدفع بعد نجاح المصادقة: الرمز يخصّ الجهاز لكن الربط
+      // يخصّ المستخدم، فتسجيله قبل ظهور الجلسة يخزّنه بلا صاحب.
+      Push.registerWith(widget.api);
       final m = results[0];
       // الخادم الجديد يرسل wallet؛ والقديم quota/cards/compatQuota. نقرأ
       // الجديد أولاً ونرجع للقديم عند غيابه كي لا يظهر صفر خاطئ.

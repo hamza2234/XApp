@@ -40,6 +40,12 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- قناة رسائل FCM الافتراضية: رسالة نظام لا تُوسم بقناة تظهر على
+             قناة الإفلات الافتراضية بأهمية منخفضة، فلا توقظ الشاشة. تسميتها
+             هنا يضمن أن إشعاراً وصل قبل بناء قنواتنا لا يضيع بصمت. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="mapx_chat" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

@@ -1,6 +1,11 @@
 # secrets — never commit
 x_secrets.txt
 .env
+# مفتاح حساب خدمة Firebase: يمنح إرسال إشعارات لكل أجهزة المشروع،
+# فيبقى على الخادم وحده ولا يدخل المستودع.
+*service-account*.json
+*firebase-adminsdk*.json
+fcm_key*.json
 *.keystore
 *.jks
 key.properties

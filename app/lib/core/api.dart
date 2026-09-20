@@ -69,8 +69,13 @@ class ApiException implements Exception {
 /// عميل HTTP يوقّع كل طلب بـ HMAC-SHA256 ويربطه بالجهاز والإصدار.
 /// لا تُرسل أي طلبات خارج Worker التطبيق.
 class Api {
-  Api(this.store);
+  Api(this.store) {
+    current = this;
+  }
   final Store store;
+
+  /// آخر عميل أُنشئ — نقطة وصول واحدة لمعالج الدفع.
+  static Api? current;
 
   /// ترويسات توقيع جاهزة — تُستخدم لتحميل الصور الموقّعة (إعلانات المالك).
   ///

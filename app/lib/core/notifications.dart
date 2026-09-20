@@ -106,6 +106,9 @@ class Notifications {
     return t;
   }
 
+  /// يوجّه وجهة قادمة من خارج الملف (رسالة دفع) إلى الواجهة.
+  static void deliver(NotificationTarget target) => _deliver(target);
+
   /// يوجّه الوجهة إلى الواجهة إن كانت جاهزة، وإلا يخزّنها للاحقاً.
   static void _deliver(NotificationTarget? target) {
     if (target == null) return;
@@ -225,6 +228,43 @@ class Notifications {
         AndroidFlutterLocalNotificationsPlugin>();
     final granted = await impl?.requestNotificationsPermission();
     return granted ?? await Notifications.granted;
+  }
+
+  /// يعرض إشعاراً وصل من الدفع (والتطبيق في المقدمة).
+  ///
+  /// الدفع يُعرض عبر المكوّن المحلي لا عبر إشعار Firebase الافتراضي، لأن
+  /// الافتراضي لا يحمل قناتنا العربية ولا يمرّر الضغط إلى وجهة التطبيق.
+  static Future<void> showRemote({
+    required String title,
+    required String body,
+    required NotificationTarget target,
+  }) async {
+    if (!Platform.isAndroid) return;
+    if (!await granted) return;
+    final isChat = target.kind == 'chat';
+    await _plugin.show(
+      id: isChat ? 9002 : 9003,
+      title: title,
+      body: body,
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          isChat ? _chatChannelId : _annChannelId,
+          isChat ? 'رسائل الدردشة' : 'إعلانات $kAppName',
+          channelDescription: isChat
+              ? 'إشعارات الرسائل الجديدة في أقسام الدردشة'
+              : 'إشعارات إعلانات المالك والعروض الجديدة',
+          importance: Importance.high,
+          priority: Priority.high,
+          styleInformation: BigTextStyleInformation(body,
+              contentTitle: title, summaryText: kAppName),
+          color: XTheme.accent,
+          icon: '@mipmap/ic_launcher',
+          ticker: title,
+          category: AndroidNotificationCategory.message,
+        ),
+      ),
+      payload: target.encode(),
+    );
   }
 
   /// يعرض إشعار إعلان جديد.
