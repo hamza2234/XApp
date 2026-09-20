@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart' as cg;
@@ -125,9 +127,19 @@ class Api {
       'x-app-sig': sig,
       'x-app-version': '$kAppVersion',
       'User-Agent': 'X-App/$kAppVersionName',
-      if (store.token != null) 'Authorization': 'Bearer ${store.token}',
+      // جلسة المالك تُقدَّم أولاً: الخادم يميّزها بسرّها المستقل، وبدونها
+      // كان المالك يُعامَل كمشترك بلا استحقاق فيُحجب عنه بثّ دوراته المقفلة.
+      if (store.ownerToken != null && store.ownerToken!.isNotEmpty)
+        'Authorization': 'Bearer ${store.ownerToken}'
+      else if (store.token != null)
+        'Authorization': 'Bearer ${store.token}',
     };
   }
+
+  /// توقيع طلبات التعلّم. التوقيع الأساسي يعرّف المالك أصلاً (انظر [_sign])،
+  /// وهذا الغلاف موجود ليبقى نية طلبات الدورات صريحة في موضع النداء.
+  Map<String, String> _signLearn(String method, String pathWithQuery) =>
+      _sign(method, pathWithQuery);
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final base = Uri.parse(kApiBase);
@@ -207,6 +219,106 @@ class Api {
       quotaLeft: int.tryParse(res.headers['x-quota-remaining'] ?? '') ?? -1,
       contentType: contentType,
     );
+  }
+
+  /// ينزّل بثّ الفيديو ويفكّ تشفيره على شكل دفق إلى ملف.
+  ///
+  /// لماذا دفق مزدوج: فيديو بمئات الميغابايت كان يُجلب كاملاً (`bodyBytes`)
+  /// ثم يُفكّ كاملاً في الذاكرة — ذروتان متتاليتان بحجم الملف نفسه. هنا
+  /// يمرّ من الذاكرة ما يلزم للقطعة الحالية فقط، فيعمل الفيديو نفسه على
+  /// جهاز بذاكرة صغيرة.
+  ///
+  /// `AesCtr.decryptStream` يزحف بعدّاده مع كل قطعة، مطابقاً لتشفير الخادم
+  /// المقسّم، فالقطع المتسلسلة تُفكّ كملف واحد متصل.
+  ///
+  /// يعيد: عدد البايتات المكتوبة، ونوع المحتوى الأصلي.
+  /// يرمي [ApiException] عند فشل الشبكة أو رفض الخادم.
+  Future<({int bytes, String contentType})> downloadCourseVideoToFile(
+    String streamPath,
+    File target, {
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final uri = _uri(streamPath);
+    final client = http.Client();
+    File? tmp;
+    try {
+      final req = http.Request('GET', uri)
+        ..headers.addAll(_signLearn('GET', uri.path));
+      final res = await client
+          .send(req)
+          .timeout(const Duration(minutes: 5));
+
+      if (res.statusCode != 200) {
+        final body = await res.stream.bytesToString();
+        throw ApiException(res.statusCode,
+            _errMsgFromBody(body, res.statusCode));
+      }
+
+      final nonceHex = res.headers['x-enc-nonce'] ?? '';
+      final encrypted = res.headers['x-enc'] == 'aes-ctr';
+      final total = int.tryParse(res.headers['content-length'] ?? '') ?? 0;
+      final contentType = res.headers['x-orig-type'] ?? 'video/mp4';
+
+      // نكتب أولاً إلى ملف جانبي: لو انقطع الاتصال في المنتصف لم يبقَ ملف
+      // ناقص يُظنّ لاحقاً أنه فيديو كامل وشغّل نصف مقطع.
+      tmp = File('${target.path}.part');
+      final sink = tmp.openWrite();
+      var received = 0;
+      try {
+        final source = onProgress == null && !encrypted
+            ? res.stream
+            : res.stream.map((c) {
+                received += c.length;
+                onProgress?.call(received, total);
+                return c;
+              });
+
+        final out = encrypted
+            ? cg.AesCtr.with256bits(macAlgorithm: cg.MacAlgorithm.empty)
+                .decryptStream(
+                source,
+                secretKey: cg.SecretKey(FileKey.bytes),
+                nonce: _hexToBytes(nonceHex),
+                mac: cg.Mac.empty,
+              )
+            : source;
+
+        await for (final chunk in out) {
+          sink.add(chunk);
+        }
+      } finally {
+        await sink.flush();
+        await sink.close();
+      }
+
+      final written = await tmp.length();
+      if (written == 0) throw ApiException(500, 'الفيديو فارغ');
+
+      // النقل الذرّي بعد نجاح التنزيل كاملاً.
+      if (await target.exists()) await target.delete();
+      await tmp.rename(target.path);
+      return (bytes: written, contentType: contentType);
+    } finally {
+      client.close();
+      // ملف جانبي متبقٍ بعد فشل: يُنظَّف هنا بلا استثناء.
+      try {
+        if (tmp != null && await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+    }
+  }
+
+  static Uint8List _hexToBytes(String hex) => Uint8List.fromList(
+      List<int>.generate(hex.length ~/ 2,
+          (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16)));
+
+  /// رسالة الخطأ من جسم لم تُفكّ ترميزه بعد — تُستعمل مع الاستجابات المتدفقة.
+  String _errMsgFromBody(String body, int status) {
+    try {
+      final j = jsonDecode(body);
+      return j['error']?.toString() ?? 'خطأ $status';
+    } catch (_) {
+      return 'خطأ في الاتصال ($status)';
+    }
   }
 
   Map<String, dynamic> _decode(http.Response res) {
@@ -310,6 +422,26 @@ class Api {
     return _ownerDecode(res);
   }
 
+  /// يرسل بايتات خام كجسم للطلب — لأجزاء الفيديو، لا لـJSON.
+  ///
+  /// مسار `ownerSend` يرمّز الجسم JSON، وهذا يفسد فيديو. هنا الجسم بايتات
+  /// كما هي، والتوقيع يشمل المسار نفسه أما أسلوب ما بعد فك الردّ فسليم.
+  Future<Map<String, dynamic>> ownerSendRaw(
+      String method, String path, List<int> bytes,
+      {String contentType = 'application/octet-stream'}) async {
+    final uri = _uri(path);
+    final headers = {
+      ..._ownerSign(method, uri.path),
+      'Content-Type': contentType,
+    };
+    final res = await (switch (method) {
+      'PUT' => http.put(uri, headers: headers, body: bytes),
+      'POST' => http.post(uri, headers: headers, body: bytes),
+      _ => throw ArgumentError(method),
+    }).timeout(const Duration(minutes: 5));
+    return _ownerDecode(res);
+  }
+
   String _errMsg(http.Response res) {
     try {
       final j = jsonDecode(utf8.decode(res.bodyBytes));
@@ -327,6 +459,27 @@ class Api {
 
   Future<Map<String, dynamic>> bootstrap() =>
       get('/v1/bootstrap', timeout: _bootTimeout);
+
+  // ===== أكاديمية الدورات =====
+
+  /// قائمة الدورات كما يراها هذا الجهاز.
+  ///
+  /// الخادم هو من يقرّر ما يُفتح: كل فيديو يحمل `playable`، والمقفل يأتي بلا
+  /// رابط بث إطلاقاً، فلا تحتاج الواجهة إلى أي منطق أمني من جهتها.
+  Future<({List<Course> courses, String telegramUrl})> courses() async {
+    final j = await get('/v1/learn/courses');
+    return (
+      courses: ((j['courses'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Course.fromJson(e.cast<String, dynamic>()))
+          .toList(),
+      telegramUrl: j['telegramUrl']?.toString() ?? '',
+    );
+  }
+
+  /// تفعيل مفتاح دورة على هذا الجهاز. يعيد عنوان الدورة للتأكيد.
+  Future<Map<String, dynamic>> redeemCourseKey(String code) =>
+      post('/v1/learn/redeem', {'code': code});
 
   Future<void> registerInstall() => post('/v1/install', {
         'installId': store.deviceId,
@@ -349,6 +502,12 @@ class Api {
       });
 
   Future<Map<String, dynamic>> me() => get('/v1/me');
+
+  /// المطالبة بهدية الحصة اليومية.
+  ///
+  /// المبلغ يحدده الخادم من إعدادات المالك ولا يُرسل من هنا، والمنح مرة
+  /// واحدة في اليوم لكل محفظة — فالخادم يرد 409 إن سبق الاستلام.
+  Future<Map<String, dynamic>> claimGift() => post('/v1/gift/claim', {});
 
   Future<List<dynamic>> compatBrands() async =>
       (await get('/v1/data/brands'))['brands'] as List;
@@ -636,4 +795,167 @@ class Api {
           .whereType<Map>()
           .map((e) => ChatAction.fromJson(e.cast<String, dynamic>()))
           .toList();
+
+  // ===== لوحة المالك: إدارة الدورات =====
+
+  /// كل بيانات الأكاديمية للمالك: الدورات، المفاتيح، والمشتركون.
+  Future<Map<String, dynamic>> ownerCourses() =>
+      ownerGet('/v1/owner/learn/courses');
+
+  Future<Map<String, dynamic>> ownerSaveCourse({
+    String id = '',
+    required String title,
+    String subtitle = '',
+    String description = '',
+    bool locked = true,
+    int sort = 0,
+    bool published = true,
+  }) =>
+      ownerSend('POST', '/v1/owner/learn/course', {
+        'id': id,
+        'title': title,
+        'subtitle': subtitle,
+        'description': description,
+        'locked': locked,
+        'sort': sort,
+        'published': published,
+      });
+
+  Future<void> ownerDeleteCourse(String id) =>
+      ownerSend('DELETE', '/v1/owner/learn/course/$id', null);
+
+  Future<Map<String, dynamic>> ownerSaveVideo({
+    String id = '',
+    required String courseId,
+    required String title,
+    required String objectKey,
+    String description = '',
+    String mime = 'video/mp4',
+    int durationS = 0,
+    int sizeBytes = 0,
+    String mode = 'locked',
+    int sort = 0,
+    bool published = true,
+  }) =>
+      ownerSend('POST', '/v1/owner/learn/video', {
+        'id': id,
+        'courseId': courseId,
+        'title': title,
+        'objectKey': objectKey,
+        'description': description,
+        'mime': mime,
+        'durationS': durationS,
+        'sizeBytes': sizeBytes,
+        'mode': mode,
+        'sort': sort,
+        'published': published,
+      });
+
+  Future<void> ownerDeleteVideo(String id) =>
+      ownerSend('DELETE', '/v1/owner/learn/video/$id', null);
+
+  /// يولّد كوداً لدورة. الكود الصريح يعود في هذا الرد وحده ولا يُخزَّن،
+  /// فيجب عرضه للمالك فوراً لينسخه ويرسله للمشترك.
+  Future<Map<String, dynamic>> ownerCreateCourseKey({
+    required String courseId,
+    String label = '',
+    int maxUses = 1,
+    int days = 0,
+  }) =>
+      ownerSend('POST', '/v1/owner/learn/key', {
+        'courseId': courseId,
+        'label': label,
+        'maxUses': maxUses,
+        'days': days,
+      });
+
+  Future<void> ownerRevokeCourseKey(String id) =>
+      ownerSend('DELETE', '/v1/owner/learn/key/$id', null);
+
+  /// يسحب تمكين مشترك — ينقطع وصوله فوراً بلا أي إجراء على جهازه.
+  Future<void> ownerRevokeCourseGrant(String deviceId, String courseId) =>
+      ownerSend('POST', '/v1/owner/learn/revoke', {
+        'deviceId': deviceId,
+        'courseId': courseId,
+      });
+
+  Future<Map<String, dynamic>> ownerUploadCourseCover(
+          String courseId, String dataB64, String mime) =>
+      ownerSend('POST', '/v1/owner/learn/cover',
+          {'courseId': courseId, 'dataB64': dataB64, 'mime': mime});
+
+  /// يرفع ملف فيديو إلى دلو الدورات على أجزاء.
+  ///
+  /// لماذا الأجزاء: Cloudflare يرد 413 على أي طلب يتجاوز 100MB على حافة
+  /// الشبكة قبل أن يصل إلى الـWorker، فلا يفيد رفع الملف كاملاً في طلب واحد.
+  /// كل جزء هنا 8MB، وطلب واحد لا يتجاوزها أبداً.
+  ///
+  /// الأجزاء تُرفع تباعاً لا معاً: شبكة الجوال لا تحتمل صعود خمسة عشر طلباً
+  /// متزامناً، والترتيب يجعل شريط التقدم صادقاً بدل أن يقفز.
+  ///
+  /// و`onProgress` تُنادى بعد كل جزء ليُظهر المالك أين وصل الرفع فعلاً.
+  Future<Map<String, dynamic>> ownerUploadCourseVideo({
+    required String courseId,
+    required String title,
+    required String filePath,
+    String description = '',
+    String mode = 'locked',
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final name = filePath.split('/').last;
+    final file = File(filePath);
+    final length = await file.length();
+    if (length == 0) throw ApiException(400, 'الملف فارغ');
+
+    // 8MB للجزء: صغير بما يكفي ليبقى تحت حدّ الحافة بهامش مريح حتى مع
+    // ترويسات الطلب، وكبير بما يكفي ألا يصير فيديو ساعة آلاف الطلبات.
+    const chunk = 8 * 1024 * 1024;
+
+    final init = await ownerSend('POST', '/v1/owner/learn/upload/init', {
+      'courseId': courseId,
+      'title': title,
+      'description': description,
+      'mode': mode,
+      'name': name,
+      'mime': _videoMime(name),
+      'size': length,
+    });
+    final uploadId = init['uploadId'] as String;
+
+    final parts = <Map<String, dynamic>>[];
+    var sent = 0;
+    var partNo = 1;
+    try {
+      while (sent < length) {
+        final end = (sent + chunk < length) ? sent + chunk : length;
+        final bytes = await file.openRead(sent, end).fold<List<int>>(
+          <int>[], (acc, b) => acc..addAll(b));
+        final res = await ownerSendRaw(
+            'PUT', '/v1/owner/learn/upload/$uploadId/part/$partNo', bytes,
+            contentType: 'application/octet-stream');
+        parts.add({'partNumber': partNo, 'etag': res['etag']});
+        sent = end;
+        onProgress?.call(sent, length);
+        partNo++;
+      }
+      return await ownerSend('POST', '/v1/owner/learn/upload/complete',
+          {'uploadId': uploadId, 'parts': parts});
+    } catch (e) {
+      // لا نترك أجزاءً معلّقة في R2 تستهلك مساحة بلا كائن يُشار إليه.
+      try {
+        await ownerSend('POST', '/v1/owner/learn/upload/abort', {'uploadId': uploadId});
+      } catch (_) {}
+      rethrow;
+    }
+  }
+
+  /// نوع المحتوى من الامتداد — الخادم يقرأه فيخزّنه مع الملف.
+  static String _videoMime(String name) {
+    final n = name.toLowerCase();
+    if (n.endsWith('.webm')) return 'video/webm';
+    if (n.endsWith('.mov')) return 'video/quicktime';
+    if (n.endsWith('.mkv')) return 'video/x-matroska';
+    if (n.endsWith('.m4v')) return 'video/x-m4v';
+    return 'video/mp4';
+  }
 }

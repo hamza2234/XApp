@@ -33,7 +33,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 8,
+      length: 9,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('لوحة تحكم المالك'),
@@ -49,6 +49,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
               Tab(text: 'محافظ الزوار', icon: Icon(Icons.account_balance_wallet_outlined, size: 18)),
               Tab(text: 'الإعلانات', icon: Icon(Icons.campaign_outlined, size: 18)),
               Tab(text: 'الدردشة', icon: Icon(Icons.forum_outlined, size: 18)),
+              Tab(text: 'الدورات', icon: Icon(Icons.play_lesson_outlined, size: 18)),
               Tab(text: 'الحظر', icon: Icon(Icons.gpp_bad_outlined, size: 18)),
               Tab(text: 'الأمان', icon: Icon(Icons.security, size: 18)),
             ],
@@ -61,6 +62,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
           _WalletsTab(api: widget.api),
           _AnnouncementsTab(api: widget.api),
           _ChatTab(api: widget.api),
+          _CoursesTab(api: widget.api),
           _BansTab(api: widget.api),
           _SecurityTab(api: widget.api),
         ]),
@@ -256,6 +258,7 @@ class _SettingsTabState extends State<_SettingsTab> {
   final _updMsg = TextEditingController();
   final _updUrl = TextEditingController();
   final _updImg = TextEditingController();
+  final _hiddenMsg = TextEditingController();
 
   @override
   void initState() {
@@ -274,6 +277,7 @@ class _SettingsTabState extends State<_SettingsTab> {
           _updMsg.text = _s!.updateMessage;
           _updUrl.text = _s!.updateUrl;
           _updImg.text = _s!.updateImageUrl;
+          _hiddenMsg.text = _s!.videosHiddenMessage;
         });
       }
     } catch (_) {}
@@ -290,6 +294,7 @@ class _SettingsTabState extends State<_SettingsTab> {
       _s!.updateMessage = _updMsg.text.trim();
       _s!.updateUrl = _updUrl.text.trim();
       _s!.updateImageUrl = _updImg.text.trim();
+      _s!.videosHiddenMessage = _hiddenMsg.text.trim();
       final r = await widget.api.saveSettings(_s!.toJson());
       final saved = XSettings.fromJson(r['settings']);
       // تُطبَّق فوراً على التطبيق كله بلا انتظار دورة تحديث.
@@ -304,6 +309,9 @@ class _SettingsTabState extends State<_SettingsTab> {
                 })
             .toList(),
         dailyFree: saved.dailyFreeQuota,
+        dailyGift: saved.dailyGiftAmount,
+        videosHidden: saved.videosHidden,
+        videosHiddenMessage: saved.videosHiddenMessage,
       );
       setState(() {
         _s = saved;
@@ -369,6 +377,46 @@ class _SettingsTabState extends State<_SettingsTab> {
               if (s.dailyFreeQuota == 0)
                 Text('صفر يعني بلا منحة مجانية — العملات وحدها تعمل',
                     style: TextStyle(color: XTheme.danger, fontSize: 11.5)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        GlassCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('الفيديوهات',
+                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+              const SizedBox(height: 4),
+              Text(
+                  'إيقاف فوري لعرض كل الفيديوهات على كل الأجهزة. الإيقاف يعمل '
+                  'على الخادم، فلا يتجاوزه جهاز فتح الفيديو قبل تفعيله ولا نسخة '
+                  'قديمة من التطبيق.',
+                  style: TextStyle(color: XTheme.textDim, fontSize: 12)),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: s.videosHidden,
+                onChanged: (v) => setState(() => s.videosHidden = v),
+                title: Text(s.videosHidden ? 'العرض موقوف' : 'العرض يعمل',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w800, fontSize: 13.5)),
+              ),
+              if (s.videosHidden) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _hiddenMsg,
+                  maxLength: 300,
+                  decoration: const InputDecoration(
+                    labelText: 'الرسالة التي يراها المستخدم',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _saving ? null : _save,
+                  icon: const Icon(Icons.save, size: 17),
+                  label: const Text('حفظ الرسالة وتطبيق الإيقاف'),
+                ),
+              ],
             ],
           ),
         ),
@@ -2946,3 +2994,977 @@ class _OwnerPanelSecurityState extends State<_OwnerPanelSecurity> {
   }
 }
 
+// ============ الدورات ============
+
+/// إدارة الأكاديمية: دورات، فيديوهات، مفاتيح، ومشتركون.
+///
+/// كل تغيير هنا يذهب للخادم ثم يُعاد الجلب منه. لا نحدّث الحالة محلياً
+/// تفاؤلاً: مصدر الحقيقة واحد، وانعكاس التغيير في التطبيق يعتمد على أن
+/// الخادم هو من يعرف الحقيقة لا على ما نعرضه نحن.
+class _CoursesTab extends StatefulWidget {
+  const _CoursesTab({required this.api});
+  final Api api;
+
+  @override
+  State<_CoursesTab> createState() => _CoursesTabState();
+}
+
+class _CoursesTabState extends State<_CoursesTab>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabs = TabController(length: 3, vsync: this)
+    ..addListener(() => setState(() {}));
+
+  List<dynamic> _courses = const [];
+  List<dynamic> _keys = const [];
+  List<dynamic> _subs = const [];
+  bool _loading = true;
+  String? _msg;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await widget.api.ownerCourses();
+      if (!mounted) return;
+      setState(() {
+        _courses = (r['courses'] as List?) ?? const [];
+        _keys = (r['keys'] as List?) ?? const [];
+        _subs = (r['subscribers'] as List?) ?? const [];
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _msg = e is ApiException ? e.message : 'تعذر تحميل بيانات الدورات';
+      });
+    }
+  }
+
+  void _toast(String m) {
+    if (!mounted) return;
+    setState(() => _msg = m);
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(m),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: XTheme.surface2,
+      ));
+  }
+
+  /// إنشاء دورة أو تعديلها.
+  Future<void> _editCourse([Map<String, dynamic>? c]) async {
+    final title = TextEditingController(text: '${c?['title'] ?? ''}');
+    final subtitle = TextEditingController(text: '${c?['subtitle'] ?? ''}');
+    final desc = TextEditingController(text: '${c?['description'] ?? ''}');
+    final locked = ValueNotifier<bool>(c?['locked'] != false);
+    final published = ValueNotifier<bool>(c?['published'] != false);
+    final busy = ValueNotifier<bool>(false);
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(XTheme.rLg)),
+        title: Text(c == null ? 'دورة جديدة' : 'تعديل الدورة',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: title,
+              decoration: const InputDecoration(
+                  labelText: 'اسم الدورة', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: subtitle,
+              decoration: const InputDecoration(
+                  labelText: 'سطر توضيحي (اختياري)',
+                  border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: desc,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                  labelText: 'وصف الدورة',
+                  border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 6),
+            // قفل الدورة: الفرق بين دورة مجانية وأخرى تحتاج مفتاحاً.
+            ValueListenableBuilder<bool>(
+              valueListenable: locked,
+              builder: (_, v, __) => SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('تحتاج مفتاحاً للفتح',
+                    style: TextStyle(fontSize: 13.5)),
+                subtitle: Text(
+                  v
+                      ? 'المشترك يُدخل مفتاحاً فتفتح كل فيديوهات الدورة'
+                      : 'كل الفيديوهات متاحة للجميع بلا مفتاح',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
+                ),
+                value: v,
+                onChanged: (b) => locked.value = b,
+              ),
+            ),
+            ValueListenableBuilder<bool>(
+              valueListenable: published,
+              builder: (_, v, __) => SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('ظاهرة في التطبيق',
+                    style: TextStyle(fontSize: 13.5)),
+                subtitle: Text('المنشورة فقط تظهر للمستخدمين',
+                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+                value: v,
+                onChanged: (b) => published.value = b,
+              ),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+          ),
+          ValueListenableBuilder<bool>(
+            valueListenable: busy,
+            builder: (_, b, __) => FilledButton(
+              onPressed: b ? null : () async {
+                if (title.text.trim().isEmpty) {
+                  _toast('اسم الدورة مطلوب');
+                  return;
+                }
+                busy.value = true;
+                try {
+                  await widget.api.ownerSaveCourse(
+                    id: '${c?['id'] ?? ''}',
+                    title: title.text.trim(),
+                    subtitle: subtitle.text.trim(),
+                    description: desc.text.trim(),
+                    locked: locked.value,
+                    published: published.value,
+                    sort: ((c?['sort'] as num?)?.toInt()) ?? 0,
+                  );
+                  if (!ctx.mounted) return;
+                  Navigator.pop(ctx, true);
+                } catch (e) {
+                  busy.value = false;
+                  _toast(e is ApiException ? e.message : 'فشل الحفظ');
+                }
+              },
+              child: b
+                  ? const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('حفظ'),
+            ),
+          ),
+        ],
+      ),
+    );
+    title.dispose();
+    subtitle.dispose();
+    desc.dispose();
+    locked.dispose();
+    published.dispose();
+    busy.dispose();
+    if (ok == true) {
+      _toast('تم الحفظ');
+      await _load();
+    }
+  }
+
+  Future<void> _deleteCourse(String id, String title) async {
+    final ok = await _confirm('حذف الدورة؟',
+        'ستُحذف «$title» مع كل فيديوهاتها ومفاتيحها. لا يمكن التراجع.');
+    if (ok != true) return;
+    try {
+      await widget.api.ownerDeleteCourse(id);
+      _toast('حُذفت الدورة');
+      await _load();
+    } catch (e) {
+      _toast(e is ApiException ? e.message : 'فشل الحذف');
+    }
+  }
+
+  /// إضافة فيديو: يختار المالك ملفاً من الجهاز فيُرفع مباشرة إلى دلو الدورات.
+  ///
+  /// الرفع multipart مساراً بمسار، فلا يمرّ الملف كاملاً في ذاكرة التطبيق.
+  /// والحقول الوصفية تُرسل مع الطلب نفسه، فلا توجد حالة وسيطة تُفقد لو
+  /// انقطع الاتصال.
+  /// تعديل فيديو قائم: التصريح والنشر والعنوان. لا يمسّ الملف ولا رابطه.
+  Future<void> _editVideo({
+    required String courseId,
+    required Object video,
+  }) async {
+    final v = video as Map;
+    final title = TextEditingController(text: '${v['title'] ?? ''}');
+    final desc = TextEditingController(text: '${v['description'] ?? ''}');
+    final free = ValueNotifier<bool>('${v['mode']}' == 'free');
+    final published = ValueNotifier<bool>(v['published'] != false);
+    final busy = ValueNotifier<bool>(false);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تعديل الفيديو'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: title,
+                decoration: const InputDecoration(labelText: 'عنوان الفيديو'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: desc,
+                maxLines: 3,
+                decoration: const InputDecoration(labelText: 'وصف مختصر'),
+              ),
+              const SizedBox(height: 6),
+              ValueListenableBuilder<bool>(
+                valueListenable: free,
+                builder: (_, on, __) => SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('مجاني — متاح للجميع',
+                      style: TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                    'المجاني يُشاهَد حتى لو كانت الدورة مقفلة',
+                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
+                  ),
+                  value: on,
+                  onChanged: (b) => free.value = b,
+                ),
+              ),
+              ValueListenableBuilder<bool>(
+                valueListenable: published,
+                builder: (_, on, __) => SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('منشور', style: TextStyle(fontSize: 13.5)),
+                  subtitle: Text(
+                    'المخفي لا يظهر لأي طالب',
+                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
+                  ),
+                  value: on,
+                  onChanged: (b) => published.value = b,
+                ),
+              ),
+            ]),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+          ),
+          ValueListenableBuilder<bool>(
+            valueListenable: busy,
+            builder: (_, b, __) => FilledButton(
+              onPressed: b ? null : () async {
+                if (title.text.trim().isEmpty) {
+                  _toast('عنوان الفيديو مطلوب');
+                  return;
+                }
+                busy.value = true;
+                try {
+                  // نبني الطلب من قيم الفيديو الحالية ونغيّر ما عدّله المالك
+                  // فقط: إرسال حقول فارغة كان يمحو المدة والحجم والرابط.
+                  await widget.api.ownerSaveVideo(
+                    id: '${v['id']}',
+                    courseId: courseId,
+                    title: title.text.trim(),
+                    objectKey: '${v['objectKey'] ?? v['object_key'] ?? ''}',
+                    description: desc.text.trim(),
+                    mime: '${v['mime'] ?? 'video/mp4'}',
+                    durationS: (v['durationS'] as num?)?.toInt() ??
+                        (v['duration_s'] as num?)?.toInt() ?? 0,
+                    sizeBytes: (v['sizeBytes'] as num?)?.toInt() ??
+                        (v['size_bytes'] as num?)?.toInt() ?? 0,
+                    mode: free.value ? 'free' : 'locked',
+                    sort: (v['sort'] as num?)?.toInt() ?? 0,
+                    published: published.value,
+                  );
+                  if (!ctx.mounted) return;
+                  Navigator.pop(ctx, true);
+                } catch (e) {
+                  busy.value = false;
+                  _toast(e is ApiException ? e.message : 'فشل الحفظ');
+                }
+              },
+              child: b
+                  ? const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('حفظ'),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await _load();
+  }
+
+  Future<void> _addVideo(String courseId) async {
+    final title = TextEditingController();
+    final desc = TextEditingController();
+    final free = ValueNotifier<bool>(false);
+    final busy = ValueNotifier<bool>(false);
+    final progress = ValueNotifier<String>('');
+    String? picked;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(XTheme.rLg)),
+        title: const Text('إضافة فيديو',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: title,
+              decoration: const InputDecoration(
+                  labelText: 'عنوان الفيديو', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: desc,
+              decoration: const InputDecoration(
+                  labelText: 'وصف (اختياري)', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            // اختيار الملف. نعرض اسمه بعد الاختيار كي يتأكد المالك من الصواب.
+            ValueListenableBuilder<String>(
+              valueListenable: progress,
+              builder: (_, info, __) => Column(children: [
+                OutlinedButton.icon(
+                  onPressed: busy.value ? null : () async {
+                    final x = await ImagePicker().pickVideo(
+                        source: ImageSource.gallery);
+                    if (x == null) return;
+                    picked = x.path;
+                    final mb = (await x.length()) / (1024 * 1024);
+                    progress.value = '${x.name} — ${mb.toStringAsFixed(1)} MB';
+                  },
+                  icon: const Icon(Icons.video_file_outlined, size: 18),
+                  label: Text(picked == null ? 'اختر ملف الفيديو' : 'تغيير الملف'),
+                ),
+                if (info.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(info,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 11.5, color: XTheme.textDim)),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 6),
+            ValueListenableBuilder<bool>(
+              valueListenable: free,
+              builder: (_, v, __) => SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('مجاني — متاح للجميع',
+                    style: TextStyle(fontSize: 13.5)),
+                subtitle: Text(
+                  'المجاني يُشاهَد حتى لو كانت الدورة مقفلة',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
+                ),
+                value: v,
+                onChanged: (b) => free.value = b,
+              ),
+            ),
+            // أثناء الرفع: لا مفاتيح ولا إغلاق حتى ينتهي، فالإلغاء في المنتصف
+            // يترك ملفاً نصف مرفوع على الخادم بلا فائدة.
+            ValueListenableBuilder<bool>(
+              valueListenable: busy,
+              builder: (_, b, __) => !b
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: Column(children: [
+                        const LinearProgressIndicator(color: XTheme.accent),
+                        const SizedBox(height: 8),
+                        Text('جاري الرفع… لا تغلق النافذة',
+                            style: TextStyle(
+                                fontSize: 11.5, color: XTheme.textDim)),
+                      ]),
+                    ),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: busy.value ? null : () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+          ),
+          ValueListenableBuilder<bool>(
+            valueListenable: busy,
+            builder: (_, b, __) => FilledButton(
+              onPressed: b ? null : () async {
+                if (title.text.trim().isEmpty) {
+                  _toast('عنوان الفيديو مطلوب');
+                  return;
+                }
+                if (picked == null) {
+                  _toast('اختر ملف الفيديو أولاً');
+                  return;
+                }
+                busy.value = true;
+                try {
+                  await widget.api.ownerUploadCourseVideo(
+                    courseId: courseId,
+                    title: title.text.trim(),
+                    filePath: picked!,
+                    description: desc.text.trim(),
+                    mode: free.value ? 'free' : 'locked',
+                    onProgress: (sent, total) {
+                      // النسبة من الرفع الفعلي لا من تخمين: الأجزاء تُرسل
+                      // تباعاً، فما يظهر هو ما وصل الخادم فعلاً.
+                      final pct = total == 0 ? 0 : (sent * 100 / total).round();
+                      final mb = sent / (1024 * 1024);
+                      progress.value = 'يُرفع… $pct٪ ($mb من ${(total / 1048576).toStringAsFixed(1)} MB)';
+                    },
+                  );
+                  if (!ctx.mounted) return;
+                  Navigator.pop(ctx, true);
+                } catch (e) {
+                  busy.value = false;
+                  _toast(e is ApiException ? e.message : 'فشل رفع الفيديو');
+                }
+              },
+              child: b
+                  ? const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('رفع وإضافة'),
+            ),
+          ),
+        ],
+      ),
+    );
+    title.dispose();
+    desc.dispose();
+    free.dispose();
+    busy.dispose();
+    progress.dispose();
+    if (ok == true) {
+      _toast('أُضيف الفيديو');
+      await _load();
+    }
+  }
+
+  /// توليد مفتاح دورة — الكود يظهر مرة واحدة، فنعرضه في حوار منفصل.
+  Future<void> _genKey(String courseId, String courseTitle) async {
+    final label = TextEditingController();
+    final uses = ValueNotifier<int>(1);
+    final days = ValueNotifier<int>(0);
+    final busy = ValueNotifier<bool>(false);
+    final result = ValueNotifier<String>('');
+
+    final done = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(XTheme.rLg)),
+        title: Text('مفتاح لـ«$courseTitle»',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ValueListenableBuilder<String>(
+              valueListenable: result,
+              builder: (_, code, __) => code.isEmpty
+                  ? Text(
+                      'المفتاح يُعرض مرة واحدة فقط ولا يُخزَّن في أي مكان. '
+                      'انسخه وأرسله للمشترك قبل إغلاق النافذة.',
+                      style: TextStyle(
+                          fontSize: 12.2, color: XTheme.textDim, height: 1.6))
+                  : Column(children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: XTheme.ok.withOpacity(.10),
+                          borderRadius: BorderRadius.circular(XTheme.rMd),
+                          border: Border.all(
+                              color: XTheme.ok.withOpacity(.40)),
+                        ),
+                        child: SelectableText(
+                          code,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.2),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: () async {
+                            await Clipboard.setData(ClipboardData(text: code));
+                            _toast('نُسخ المفتاح');
+                          },
+                          icon: const Icon(Icons.copy, size: 17),
+                          label: const Text('نسخ المفتاح'),
+                        ),
+                      ),
+                    ]),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: label,
+              decoration: const InputDecoration(
+                  labelText: 'ملاحظة (اسم المشترك مثلاً)',
+                  border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            ValueListenableBuilder<int>(
+              valueListenable: uses,
+              builder: (_, v, __) => DropdownButtonFormField<int>(
+                initialValue: v,
+                decoration: const InputDecoration(
+                    labelText: 'عدد الأجهزة المسموح بها',
+                    border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: 1, child: Text('جهاز واحد')),
+                  DropdownMenuItem(value: 5, child: Text('5 أجهزة')),
+                  DropdownMenuItem(value: 25, child: Text('25 جهازاً')),
+                  DropdownMenuItem(value: 100, child: Text('100 جهاز')),
+                ],
+                onChanged: (x) => uses.value = x ?? 1,
+              ),
+            ),
+            const SizedBox(height: 10),
+            ValueListenableBuilder<int>(
+              valueListenable: days,
+              builder: (_, v, __) => DropdownButtonFormField<int>(
+                initialValue: v,
+                decoration: const InputDecoration(
+                    labelText: 'صلاحية المفتاح',
+                    border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: 0, child: Text('دائم لا ينتهي')),
+                  DropdownMenuItem(value: 30, child: Text('شهر واحد')),
+                  DropdownMenuItem(value: 90, child: Text('3 أشهر')),
+                  DropdownMenuItem(value: 365, child: Text('سنة')),
+                ],
+                onChanged: (x) => days.value = x ?? 0,
+              ),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('إغلاق'),
+          ),
+          ValueListenableBuilder<String>(
+            valueListenable: result,
+            builder: (_, code, __) => code.isNotEmpty
+                ? const SizedBox.shrink()
+                : ValueListenableBuilder<bool>(
+                    valueListenable: busy,
+                    builder: (_, b, __) => FilledButton(
+                      onPressed: b ? null : () async {
+                        busy.value = true;
+                        try {
+                          final r = await widget.api.ownerCreateCourseKey(
+                            courseId: courseId,
+                            label: label.text.trim(),
+                            maxUses: uses.value,
+                            days: days.value,
+                          );
+                          result.value = '${r['code'] ?? ''}';
+                          // نحدّث القوائم فوراً كي يرى المالك المفتاح الجديد
+                          // في تبويب المفاتيح بلا إغلاق النافذة.
+                          await _load();
+                        } catch (e) {
+                          _toast(e is ApiException ? e.message : 'فشل التوليد');
+                        } finally {
+                          busy.value = false;
+                        }
+                      },
+                      child: b
+                          ? const SizedBox(
+                              width: 16, height: 16,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2))
+                          : const Text('توليد'),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+    label.dispose();
+    uses.dispose();
+    days.dispose();
+    busy.dispose();
+    result.dispose();
+    if (done == true) await _load();
+  }
+
+  Future<void> _revokeKey(String id) async {
+    try {
+      await widget.api.ownerRevokeCourseKey(id);
+      _toast('أُلغي المفتاح');
+      await _load();
+    } catch (e) {
+      _toast(e is ApiException ? e.message : 'فشل الإلغاء');
+    }
+  }
+
+  /// سحب تمكين مشترك — الأثر فوري: الطلب التالي من جهازه يُرفض.
+  Future<void> _revokeGrant(String deviceId, String courseId,
+      String title) async {
+    final ok = await _confirm('سحب الوصول؟',
+        'سيفقد هذا الجهاز الوصول إلى «$title» فوراً، حتى لو كان الفيديو '
+        'محمّلاً عنده. يمكنك منحه مفتاحاً جديداً لاحقاً.');
+    if (ok != true) return;
+    try {
+      await widget.api.ownerRevokeCourseGrant(deviceId, courseId);
+      _toast('سُحب الوصول');
+      await _load();
+    } catch (e) {
+      _toast(e is ApiException ? e.message : 'فشل السحب');
+    }
+  }
+
+  Future<bool?> _confirm(String title, String body) => showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(XTheme.rLg)),
+          title: Text(title,
+              style:
+                  const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w900)),
+          content: Text(body,
+              style: TextStyle(
+                  fontSize: 13, color: XTheme.textDim, height: 1.6)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('تأكيد',
+                  style: TextStyle(
+                      color: XTheme.danger, fontWeight: FontWeight.w800)),
+            ),
+          ],
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return Center(child: CircularProgressIndicator(color: XTheme.accent));
+    }
+    return Column(children: [
+      TabBar(
+        controller: _tabs,
+        labelColor: XTheme.accent,
+        unselectedLabelColor: XTheme.textDim,
+        indicatorColor: XTheme.accent,
+        labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5),
+        tabs: const [
+          Tab(text: 'الدورات'),
+          Tab(text: 'المفاتيح'),
+          Tab(text: 'المشتركون'),
+        ],
+      ),
+      if (_msg != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Text(_msg!,
+              style: TextStyle(fontSize: 12.5, color: XTheme.textDim)),
+        ),
+      Expanded(
+        child: TabBarView(
+          controller: _tabs,
+          children: [_coursesView(), _keysView(), _subsView()],
+        ),
+      ),
+    ]);
+  }
+
+  Widget _coursesView() {
+    return Stack(children: [
+      if (_courses.isEmpty)
+        Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.play_lesson_outlined,
+                size: 46, color: XTheme.textDim),
+            const SizedBox(height: 12),
+            const Text('لا دورات بعد',
+                style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            Text('أنشئ دورة ثم أضف فيديوهاتها وولّد مفاتيح',
+                style: TextStyle(fontSize: 12, color: XTheme.textDim)),
+          ]),
+        )
+      else
+        RefreshIndicator(
+          onRefresh: _load,
+          color: XTheme.accent,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+            children: [
+              for (final c in _courses) _courseTile(Map<String, dynamic>.from(c as Map)),
+            ],
+          ),
+        ),
+      Positioned(
+        bottom: 16,
+        left: 16,
+        right: 16,
+        child: FilledButton.icon(
+          onPressed: () => _editCourse(),
+          icon: const Icon(Icons.add, size: 19),
+          label: const Text('دورة جديدة',
+              style: TextStyle(fontWeight: FontWeight.w800)),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _courseTile(Map<String, dynamic> c) {
+    final id = '${c['id']}';
+    final title = '${c['title']}';
+    final locked = c['locked'] == true;
+    final published = c['published'] == true;
+    final videos = (c['videos'] as List?) ?? const [];
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      elevation: 0,
+      color: XTheme.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(XTheme.rLg),
+        side: BorderSide(color: XTheme.textDim.withOpacity(.15)),
+      ),
+      child: ExpansionTile(
+        shape: const Border(),
+        collapsedShape: const Border(),
+        title: Text(title,
+            style:
+                const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w900)),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Wrap(spacing: 6, runSpacing: 4, children: [
+            _tag('${videos.length} فيديو', XTheme.textDim),
+            _tag(locked ? 'يحتاج مفتاحاً' : 'مجانية',
+                locked ? XTheme.gold : XTheme.ok),
+            _tag('${c['subscriberCount'] ?? 0} مشترك', XTheme.cyan),
+            _tag('${c['activeKeyCount'] ?? 0} مفتاح نشط', XTheme.accent),
+            if (!published) _tag('مخفية', XTheme.danger),
+          ]),
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        children: [
+          for (final v in videos)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                '${(v as Map)['mode']}' == 'free'
+                    ? Icons.play_circle_outline
+                    : Icons.lock_outline,
+                size: 20,
+                color: '${v['mode']}' == 'free' ? XTheme.ok : XTheme.gold,
+              ),
+              title: Text('${v['title']}',
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w700)),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                // تعديل القفل بلا إعادة رفع: الرفع كان الوسيلة الوحيدة
+                // لتغيير حالة الفيديو، فيضيع الرابط وتُستهلك الحصة.
+                IconButton(
+                  tooltip: 'تعديل الفيديو',
+                  icon: const Icon(Icons.edit_outlined,
+                      size: 19, color: XTheme.accent),
+                  onPressed: () => _editVideo(courseId: id, video: v),
+                ),
+                IconButton(
+                  tooltip: 'حذف الفيديو',
+                  icon: const Icon(Icons.delete_outline,
+                      size: 19, color: XTheme.danger),
+                  onPressed: () async {
+                    final ok = await _confirm('حذف الفيديو؟',
+                        'سيُحذف «${v['title']}» من الدورة.');
+                    if (ok != true) return;
+                    try {
+                      await widget.api.ownerDeleteVideo('${v['id']}');
+                      await _load();
+                    } catch (e) {
+                      _toast(e is ApiException ? e.message : 'فشل الحذف');
+                    }
+                  },
+                ),
+              ]),
+            ),
+          const Divider(height: 16),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: () => _addVideo(id),
+              icon: const Icon(Icons.video_call_outlined, size: 17),
+              label: const Text('فيديو'),
+            ),
+            FilledButton.icon(
+              onPressed: () => _genKey(id, title),
+              icon: const Icon(Icons.key, size: 17),
+              label: const Text('توليد مفتاح'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _editCourse(c),
+              icon: const Icon(Icons.edit_outlined, size: 17),
+              label: const Text('تعديل'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _deleteCourse(id, title),
+              icon: const Icon(Icons.delete_outline,
+                  size: 17, color: XTheme.danger),
+              label: const Text('حذف',
+                  style: TextStyle(color: XTheme.danger)),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: XTheme.danger.withOpacity(.4)),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _keysView() {
+    if (_keys.isEmpty) {
+      return Center(
+        child: Text('لا مفاتيح بعد — ولّد مفتاحاً من تبويب الدورات',
+            style: TextStyle(fontSize: 12.5, color: XTheme.textDim)),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: XTheme.accent,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+        itemCount: _keys.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (_, i) {
+          final k = Map<String, dynamic>.from(_keys[i] as Map);
+          final revoked = k['revoked'] == true;
+          final used = (k['usedCount'] as num?)?.toInt() ?? 0;
+          final max = (k['maxUses'] as num?)?.toInt() ?? 1;
+          return Card(
+            elevation: 0,
+            color: XTheme.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(XTheme.rMd),
+              side: BorderSide(
+                  color: revoked
+                      ? XTheme.danger.withOpacity(.35)
+                      : XTheme.textDim.withOpacity(.15)),
+            ),
+            child: ListTile(
+              title: Text('${k['courseTitle']}',
+                  style: const TextStyle(
+                      fontSize: 13.5, fontWeight: FontWeight.w800)),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Wrap(spacing: 6, runSpacing: 4, children: [
+                  _tag('$used / $max استخدام',
+                      used >= max ? XTheme.danger : XTheme.ok),
+                  if ('${k['label']}'.isNotEmpty)
+                    _tag('${k['label']}', XTheme.textDim),
+                  if (revoked) _tag('ملغى', XTheme.danger),
+                ]),
+              ),
+              trailing: revoked
+                  ? const Icon(Icons.block, color: XTheme.danger, size: 20)
+                  : IconButton(
+                      tooltip: 'إلغاء المفتاح',
+                      icon: const Icon(Icons.block, size: 20),
+                      onPressed: () => _revokeKey('${k['id']}'),
+                    ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _subsView() {
+    if (_subs.isEmpty) {
+      return Center(
+        child: Text('لا مشتركين بعد',
+            style: TextStyle(fontSize: 12.5, color: XTheme.textDim)),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      color: XTheme.accent,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+        itemCount: _subs.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (_, i) {
+          final s = Map<String, dynamic>.from(_subs[i] as Map);
+          return Card(
+            elevation: 0,
+            color: XTheme.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(XTheme.rMd),
+              side: BorderSide(color: XTheme.textDim.withOpacity(.15)),
+            ),
+            child: ListTile(
+              leading: const Icon(Icons.person_outline,
+                  color: XTheme.cyan, size: 22),
+              title: Text('${s['courseTitle']}',
+                  style: const TextStyle(
+                      fontSize: 13.5, fontWeight: FontWeight.w800)),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('الجهاز: ${s['shortId'] ?? ''}',
+                    style: TextStyle(
+                        fontSize: 11.5, color: XTheme.textDim)),
+              ),
+              trailing: TextButton.icon(
+                onPressed: () => _revokeGrant(
+                    '${s['deviceId']}', '${s['courseId']}',
+                    '${s['courseTitle']}'),
+                icon: const Icon(Icons.remove_circle_outline, size: 16),
+                label: const Text('سحب'),
+                style: TextButton.styleFrom(foregroundColor: XTheme.danger),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _tag(String t, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withOpacity(.12),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(t,
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w800, color: color)),
+      );
+}

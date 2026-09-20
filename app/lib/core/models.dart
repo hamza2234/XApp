@@ -120,6 +120,9 @@ class XSettings {
     this.schematicsLocked = false,
     this.compatLocked = false,
     this.compatSearchCost = 1,
+    this.dailyGiftAmount = 0,
+    this.videosHidden = false,
+    this.videosHiddenMessage = '',
     this.appLocked = false,
     this.lockMessage = '',
     this.updateMessage = '',
@@ -151,6 +154,13 @@ class XSettings {
 
   /// ثمن دخول الشركة في التوافقات بالعملات.
   int compatSearchCost;
+
+  /// عملات الهديّة اليومية. صفر يعني أن زر الهديّة لا يظهر.
+  int dailyGiftAmount;
+
+  /// مفتاح المالك: إيقاف عرض الفيديوهات فوراً للجميع.
+  bool videosHidden;
+  String videosHiddenMessage;
   bool appLocked;
   String lockMessage;
   String updateMessage;
@@ -190,6 +200,9 @@ class XSettings {
         schematicsLocked: j['schematicsLocked'] == true,
         compatLocked: j['compatLocked'] == true,
         compatSearchCost: (j['compatSearchCost'] as num?)?.toInt() ?? 1,
+        dailyGiftAmount: (j['dailyGiftAmount'] as num?)?.toInt() ?? 0,
+        videosHidden: j['videosHidden'] == true,
+        videosHiddenMessage: j['videosHiddenMessage']?.toString() ?? '',
         appLocked: j['appLocked'] == true,
         lockMessage: j['lockMessage']?.toString() ?? '',
         updateMessage: j['updateMessage']?.toString() ?? '',
@@ -229,6 +242,9 @@ class XSettings {
         'schematicsLocked': schematicsLocked,
         'compatLocked': compatLocked,
         'compatSearchCost': compatSearchCost,
+        'dailyGiftAmount': dailyGiftAmount,
+        'videosHidden': videosHidden,
+        'videosHiddenMessage': videosHiddenMessage,
         'appLocked': appLocked,
         'lockMessage': lockMessage,
         'updateMessage': updateMessage,
@@ -623,5 +639,115 @@ class ChatAction {
         until: (j['until'] as num?)?.toInt() ?? 0,
         active: j['active'] == true,
         username: j['username']?.toString() ?? '',
+      );
+}
+
+/// فيديو داخل دورة.
+///
+/// الفيديو المقفل يصل بلا مدة ولا حجم ولا رابط بث — الخادم لا يرسلها أصلاً.
+/// لذلك `streamUrl` فارغ للمقفل، وإطلاق البث يستلزم فتح الدورة بمفتاح.
+class CourseVideo {
+  const CourseVideo({
+    required this.id,
+    required this.title,
+    this.description = '',
+    this.mode = 'locked',
+    this.sort = 0,
+    this.durationS = 0,
+    this.sizeBytes = 0,
+    this.playable = false,
+    this.streamUrl = '',
+  });
+
+  final String id;
+  final String title;
+  final String description;
+
+  /// free = متاح للجميع، locked = يحتاج فتح الدورة.
+  final String mode;
+  final int sort;
+  final int durationS;
+  final int sizeBytes;
+
+  /// هل يملك الخادم إذن البث لهذا المستخدم؟ هو مصدر الحقيقة لا الواجهة.
+  final bool playable;
+  final String streamUrl;
+
+  /// فيديو مجاني يُعرض بشارة «مجاني» بدل القفل.
+  bool get isFree => mode == 'free';
+
+  String get durationLabel {
+    if (durationS <= 0) return '';
+    final m = durationS ~/ 60;
+    final s = durationS % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  String get sizeLabel {
+    if (sizeBytes <= 0) return '';
+    final mb = sizeBytes / (1024 * 1024);
+    return mb >= 1024 ? '${(mb / 1024).toStringAsFixed(1)} GB'
+                      : '${mb.toStringAsFixed(0)} MB';
+  }
+
+  factory CourseVideo.fromJson(Map<String, dynamic> j) => CourseVideo(
+        id: j['id']?.toString() ?? '',
+        title: j['title']?.toString() ?? '',
+        description: j['description']?.toString() ?? '',
+        mode: j['mode']?.toString() ?? 'locked',
+        sort: (j['sort'] as num?)?.toInt() ?? 0,
+        durationS: (j['durationS'] as num?)?.toInt() ?? 0,
+        sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
+        playable: j['playable'] == true,
+        streamUrl: j['streamUrl']?.toString() ?? '',
+      );
+}
+
+/// دورة = قائمة تشغيل من الفيديوهات، مع قفل اختياري يُفتح بمفتاح المالك.
+class Course {
+  const Course({
+    required this.id,
+    required this.title,
+    this.subtitle = '',
+    this.description = '',
+    this.coverUrl = '',
+    this.locked = false,
+    this.unlocked = false,
+    this.videos = const [],
+  });
+
+  final String id;
+  final String title;
+  final String subtitle;
+  final String description;
+  final String coverUrl;
+
+  /// الدورة تتطلّب مفتاحاً.
+  final bool locked;
+
+  /// هذا الجهاز فتحها بالفعل (أو هي مجانية أصلاً).
+  final bool unlocked;
+
+  final List<CourseVideo> videos;
+
+  int get videoCount => videos.length;
+  int get freeCount => videos.where((v) => v.isFree).length;
+
+  /// الفيديوهات المتاحة الآن — كلها إن كانت مفتوحة، والمجانية فقط إن كانت مقفلة.
+  List<CourseVideo> get playableVideos =>
+      videos.where((v) => v.playable).toList();
+
+  factory Course.fromJson(Map<String, dynamic> j) => Course(
+        id: j['id']?.toString() ?? '',
+        title: j['title']?.toString() ?? '',
+        subtitle: j['subtitle']?.toString() ?? '',
+        description: j['description']?.toString() ?? '',
+        coverUrl: j['coverUrl']?.toString() ?? '',
+        locked: j['locked'] == true,
+        unlocked: j['unlocked'] == true,
+        videos: ((j['videos'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) => CourseVideo.fromJson(e.cast<String, dynamic>()))
+            .toList(),
       );
 }

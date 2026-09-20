@@ -6,6 +6,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ui/theme.dart';
+import 'config.dart';
 
 /// وجهة الإشعار — ما يُفتح عند ضغط المستخدم عليه.
 ///
@@ -128,7 +129,7 @@ class Notifications {
 
   static const _annChannel = AndroidNotificationChannel(
     _annChannelId,
-    'إعلانات MAPX',
+    'إعلانات $kAppName',
     description: 'إشعارات إعلانات المالك والعروض الجديدة',
     importance: Importance.high,
     playSound: true,
@@ -237,7 +238,7 @@ class Notifications {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
         _annChannelId,
-        'إعلانات MAPX',
+        'إعلانات $kAppName',
         channelDescription: 'إشعارات إعلانات المالك والعروض الجديدة',
         importance: Importance.high,
         priority: Priority.high,
@@ -245,7 +246,7 @@ class Notifications {
         styleInformation: BigTextStyleInformation(
           body,
           contentTitle: title,
-          summaryText: 'MAPX',
+          summaryText: kAppName,
         ),
         color: XTheme.accent,
         icon: '@mipmap/ic_launcher',
@@ -300,7 +301,7 @@ class Notifications {
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           _annChannelId,
-          'إعلانات MAPX',
+          'إعلانات $kAppName',
           channelDescription: 'إشعارات إعلانات المالك والعروض الجديدة',
           importance: Importance.high,
           priority: Priority.high,
@@ -308,8 +309,8 @@ class Notifications {
             fresh
                 .map((a) => '• ${a['title'] ?? ''}\n${a['subtitle'] ?? ''}')
                 .join('\n\n'),
-            contentTitle: 'إعلانات MAPX',
-            summaryText: 'MAPX',
+            contentTitle: 'إعلانات $kAppName',
+            summaryText: kAppName,
           ),
           color: XTheme.accent,
           icon: '@mipmap/ic_launcher',
@@ -360,7 +361,7 @@ class Notifications {
           styleInformation: BigTextStyleInformation(
             body,
             contentTitle: title,
-            summaryText: 'MAPX',
+            summaryText: kAppName,
           ),
           color: XTheme.accent,
           icon: '@mipmap/ic_launcher',

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/api.dart';
+import '../core/config.dart';
 import '../core/app_config.dart';
 import '../core/store.dart';
 import 'theme.dart';
@@ -102,8 +103,8 @@ class _AuthScreenState extends State<AuthScreen> {
                     gradient: XTheme.gradient,
                     borderRadius: BorderRadius.circular(XTheme.rXl),
                     boxShadow: XTheme.glow(XTheme.accent, strength: 1.2)),
-                child: const Center(
-                    child: Text('MAPX',
+                child: Center(
+                    child: Text(kAppName,
                         style: TextStyle(
                             fontSize: 21,
                             fontWeight: FontWeight.w900,

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  الاستثناء يخصّ 127.0.0.1 وحده: خادم البثّ المحلي يخدم ملف الفيديو للمشغّل
+  ويبدأ العرض قبل اكتمال التنزيل. لا يُسمح بأي اتصال غير مشفّر إلى الإنترنت،
+  فالاستثناء لا يفتح ثغرة بل يسمح للجهاز بمحادثة نفسه فقط.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

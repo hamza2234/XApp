@@ -8,8 +8,8 @@ import 'dart:convert';
 const String kApiBase = 'https://x-app-api.www-hmzhh123-com.workers.dev';
 
 /// إصدار التطبيق — يُرسَل في كل طلب وتتحكم به لوحة المالك.
-const int kAppVersion = 3;
-const String kAppVersionName = '1.9.3';
+const int kAppVersion = 5;
+const String kAppVersionName = '1.9.5';
 const String kAppName = 'MAPX';
 
 /// سر توقيع الطلبات — مشوّش (XOR + base64 + تقسيم) ليصعّب استخراجه

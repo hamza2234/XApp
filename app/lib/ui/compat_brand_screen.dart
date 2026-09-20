@@ -46,11 +46,15 @@ class CompatTypeMeta {
 /// الاستعلام.
 class CompatBrandScreen extends StatefulWidget {
   const CompatBrandScreen(
-      {super.key, required this.api, required this.brand, this.store});
+      {super.key, required this.api, required this.brand, this.store,
+       this.onCharged});
 
   final Api api;
   final CompatBrand brand;
   final Store? store;
+
+  /// يُنادى عند كل خصم فعلي (فتح أو بحث) ليعيد الشريط العلوي للرصيد الجديد.
+  final VoidCallback? onCharged;
 
   @override
   State<CompatBrandScreen> createState() => _CompatBrandScreenState();
@@ -102,6 +106,8 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _balance = r.balance;
         _source = r.source;
       });
+      // الخصم وقع فعلاً: نُبلّغ الشريط فوراً بدل انتظار إعادة التشغيل.
+      if (r.charged) widget.onCharged?.call();
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -174,6 +180,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _source = r.source;
         _records = r.records.map((e) => CompatRecord.fromJson(e)).toList();
       });
+      if (r.charged) widget.onCharged?.call();
     } on ApiException catch (e) {
       if (!mounted || seq != _seq) return;
       setState(() {

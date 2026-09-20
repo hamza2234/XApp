@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>X</string>
+	<string>MAPX</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -18,8 +18,36 @@
 	<string>x_app</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>يحتاج التطبيق لاختيار صورة الإعلان من مكتبة الصور (للمالك فقط)</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>يحتاج التطبيق لحفظ صورة الإعلان في مكتبة الصور (للمالك فقط)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>يحتاج التطبيق لالتقاط صورة للإعلان (للمالك فقط)</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>يحتاج التطبيق لتسجيل الرسائل الصوتية في الدردشة</string>
+	<!--
+	  استثناء ATS للعناوين المحلية يخصّ خادم البثّ على 127.0.0.1 الذي يشغّل
+	  الفيديو قبل اكتمال تنزيله. بدونه يُحجب الاتصال على iOS، فلا يعمل
+	  الفيديو مطلقاً على الآيفون رغم عمله على أندرويد. لا يُسمح بأي تحميل
+	  غير مشفّر من الإنترنت.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>127.0.0.1</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>CFBundleLocalizations</key>
 	<array>
 		<string>ar</string>

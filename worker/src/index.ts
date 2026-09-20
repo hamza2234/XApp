@@ -137,11 +137,21 @@ interface Env {
   QUOTA: KVNamespace
   SCHEMATICS: R2Bucket
   XMEDIA: R2Bucket
+  XLEARN: R2Bucket
   X_JWT_SECRET: string
   X_SIG_SECRET: string
   X_OWNER_KEY: string
   X_OWNER_JWT_SECRET?: string
   X_FILE_KEY: string
+  /**
+   * مفتاح تشفير فيديوهات الدورات — لم يُعد مستعملاً.
+   *
+   * كان الفيديو يُشفّر بمفتاح مستقل، لكن تطبيقاً مثبّتاً لا يملك إلا مفتاحاً
+   * واحداً مضمّناً (X_FILE_KEY)، فتعذّر فكّ الفيديو في العميل. العزل الحقيقي
+   * يأتي من دلو XLEARN المستقل؛ أُبقي الحقل اختيارياً كي لا يفشل نشر قائم
+   * يشير إليه.
+   */
+  X_LEARN_KEY?: string
   /** حساب خدمة Firebase (JSON كامل) — إن غاب، الدفع معطّل بهدوء. */
   FCM_SERVICE_ACCOUNT?: string
   /** معرّف مشروع Firebase — يُقرأ من الحساب إن لم يُضبط هنا. */
@@ -210,6 +220,9 @@ interface XSettings {
   schematicsLocked: boolean       // قفل المخططات كلياً عن الزوار
   compatLocked: boolean           // قفل التوافقات عن الزوار
   compatSearchCost: number        // ثمن دخول الشركة في التوافقات بالعملات (0 = مجاني)
+  dailyGiftAmount: number         // عملات الهديّة اليومية التي يمنحها زر الهديّة (0 = معطّل)
+  videosHidden: boolean           // إيقاف عرض الفيديوهات فوراً للجميع (مفتاح المالك)
+  videosHiddenMessage: string     // ما يُعرض للمستخدم حين يكون العرض موقوفاً
   guestCompatQuota: number        // مهجور: كان حصة مستقلة للتوافقات، صار نسخة من dailyFreeQuota
   appLocked: boolean              // قفل التطبيق كلياً (صيانة)
   lockMessage: string
@@ -242,6 +255,9 @@ const DEFAULT_SETTINGS: XSettings = {
   schematicsLocked: false,
   compatLocked: false,
   compatSearchCost: 1,
+  dailyGiftAmount: 5,
+  videosHidden: false,
+  videosHiddenMessage: 'الفيديوهات متوقفة مؤقتاً — سنعاود قريباً',
   guestCompatQuota: 5,
   appLocked: false,
   lockMessage: '',
@@ -320,6 +336,8 @@ function normalizeSettings(s: XSettings, raw: Partial<XSettings>): XSettings {
     if (legacy > 0) s.dailyFreeQuota = Math.min(1000, legacy)
   }
   s.dailyFreeQuota = Math.max(0, Math.min(1000, Math.floor(Number(s.dailyFreeQuota) || 0)))
+  s.dailyGiftAmount = Math.max(0, Math.min(1000, Math.floor(Number(s.dailyGiftAmount) || 0)))
+  s.videosHidden = !!s.videosHidden
   // الحقلان المهجوران يبقيان معروضين في bootstrap بنفس القيمة كي لا تظن
   // نسخة قديمة من التطبيق أن المالك ألغى المنحة.
   s.guestFileQuota = s.dailyFreeQuota
@@ -489,7 +507,7 @@ async function hasOwnerSession(env: Env, request: Request): Promise<boolean> {
  */
 async function rateLimit(env: Env, request: Request, bucket: string, limit: number, window: number): Promise<void> {
   const dev = deviceOf(request)
-  const key = dev ? `rl:${bucket}:d:${dev}` : `rl:${bucket}:${ip(request)}`
+  const key = dev ? `rl:${bucket}:d:${dev}` : `rl:${bucket}:ip:${ip(request)}`
   const used = Number(await kvGet(env, key)) || 0
   if (used + 1 > limit) {
     // لا يُحتسب تجاوز الحدّ في رصيد الإساءة: مستخدم شرعي على عنوان مشترك
@@ -502,6 +520,19 @@ async function rateLimit(env: Env, request: Request, bucket: string, limit: numb
   } catch {
     // تعذّر العدّ لا يمنع الطلب — الحدّ الحقيقي يُفرض عند الخصم من الرصيد.
   }
+  // السقف الثاني على العنوان، أوسع بعشر مرات. التوقيع يُحسب على معرّف
+  // يرسله العميل، فمن استخرج السرّ يبدّل المعرّف ويبدأ العدّ من صفر؛
+  // السقف الواسع يوقف التدوير المتسارع دون أن يعاقب عنواناً مشتركاً.
+  if (!dev) return
+  const ipKey = `rl:${bucket}:ip:${ip(request)}`
+  const ipUsed = Number(await kvGet(env, ipKey)) || 0
+  if (ipUsed + 1 > limit * 10) {
+    await logSecurity(env, request, 'rate_limited_ip', `bucket=${bucket} limit=${limit * 10}/${window}s`)
+    throw new HttpError(429, 'طلبات كثيرة جداً — تم الحظر مؤقتاً')
+  }
+  try {
+    await env.QUOTA.put(ipKey, String(ipUsed + 1), { expirationTtl: window })
+  } catch { /* كما أعلاه */ }
 }
 
 /** توقيع التطبيق: X-App-Sig = HMAC(X_SIG_SECRET, deviceId|ts|method|path) */
@@ -988,6 +1019,10 @@ const VIRTUAL_SUB_BRANDS: { name: string; file: string; key: string }[] = [
   { name: 'oppo', file: '02realme.json', key: 'oppo' },
   { name: 'honor', file: '03huawei.json', key: 'honor' },
   { name: 'iqoo', file: '14vivo.json', key: 'iqoo' },
+  // tecno مُدرَج في ملف إنفنكس (سجلات تحمل «tecno camon ..» ضمن
+  // compatibleModels) ولا ملف مستقل له. نشتقّه قراءةً فقط: تصفية الكلمة
+  // تُظهر سجلات تكنو وحدها من الملف المشترك، دون تعديل صفّ واحد في المصدر.
+  { name: 'tecno', file: '05infinix.json', key: 'tecno' },
 ]
 
 // ============================== Schematics catalog (READ-ONLY) ==============================
@@ -1109,6 +1144,219 @@ async function listLocalFiles(env: Env, folderId: string): Promise<CatalogEntry[
       cursor = page.truncated ? page.cursor : undefined
     } while (cursor)
     return entries
+  })
+}
+// ============================== أكاديمية الدورات ==============================
+//
+// الأمان هنا مبني على ثلاث طبقات مستقلة، ونجاح أي منها وحده لا يكفي:
+//   1. توقيع الطلب (x-app-sig) — يمنع أي سكربت خارجي من لمس المسارات.
+//   2. الاستحقاق — يُحسب من x_course_grants بمعرّف الجهاز، لا من عميل.
+//   3. التشفير — الفيديو لا يُخدَم صريحاً أبداً، بل AES-CTR كمثل بقية الملفات.
+// وكل مسار يقرأ الاستحقاق من الخادم لا من الطلب، فالتلاعب بالعميل لا يفتح شيئاً.
+//
+// ملاحظة: بث الفيديو يستعمل نفس مفتاح الملفات (X_FILE_KEY) وتشفير
+// fileCryptoKey/fileNonce. تطبيق مثبّت لا يملك إلا مفتاحاً واحداً مضمّناً،
+// فلو شُفّر الفيديو بمفتاح آخر لتعذّر فكّه في التطبيق. العزل الفعلي بين
+// فيديوهات الدورات وبقية الملفات يأتي من دلو R2 منفصل (XLEARN)، لا من المفتاح.
+
+/** يجزّئ كود المفتاح — القاعدة تحفظ البصمة لا الكود. */
+async function keyHash(code: string): Promise<string> {
+  const norm = code.trim().toUpperCase().replace(/[\s-]/g, '')
+  const digest = await crypto.subtle.digest(
+    'SHA-256', new TextEncoder().encode(`xapp-course-key-v1|${norm}`))
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** يولّد كوداً مقروءاً: مجموعات من 4 محارف بلا أحرف ملتبسة (0/O، 1/I/L). */
+function makeKeyCode(): string {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+  const bytes = new Uint8Array(20)
+  crypto.getRandomValues(bytes)
+  let out = ''
+  for (let i = 0; i < 20; i++) {
+    out += alphabet[bytes[i] % alphabet.length]
+    if (i % 4 === 3 && i !== 19) out += '-'
+  }
+  return out
+}
+
+/**
+ * استحقاق الجهاز لدورة: مفتوحة (locked=0) للجميع، أو موجودة في سجل المنح.
+ *
+ * الربط بالجهاز لا بالحساب عن قصد: إنشاء حساب جديد على الجهاز نفسه لا
+ * يمنح دورةً ثانية، وإعادة تثبيت التطبيق على جهاز آخر لا تنقل المفتاح.
+ */
+async function courseUnlocked(env: Env, deviceId: string, courseId: string): Promise<boolean> {
+  const course = await env.XDB
+    .prepare('SELECT locked FROM x_courses WHERE id = ?1 AND published = 1')
+    .bind(courseId).first<{ locked: number }>()
+  if (!course) return false
+  // دورة غير مقفلة أصلاً: لا كود عليها، فكل فيديو غير موسوم «مجاني» مباح.
+  if (!course.locked) return true
+  if (!deviceId) return false
+  const grant = await env.XDB
+    .prepare('SELECT 1 x FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2')
+    .bind(deviceId, courseId).first<{ x: number }>()
+  return !!grant
+}
+
+/**
+ * جهاز المالك: أي جهاز فُتحت عليه لوحة المالك بنجاح.
+ *
+ * هذا هو ما يصنع استحقاق المالك الحقيقي، لا وجود رمز جلسة في الطلب. لو
+ * اعتمدنا على `role === 'owner'` وحده لكان المالك يرى دوراته المقفلة مفتوحة
+ * على أي جهاز يسجّل فيه بحسابه العادي — وهو بالضبط ما جعل القفل يبدو معطلاً.
+ *
+ * الوسم صريح في قاعدة البيانات ولا يُشتق من الدور: منحه يحتاج مفتاح المالك.
+ */
+async function ownerDevice(env: Env, deviceId: string): Promise<boolean> {
+  if (!deviceId) return false
+  const row = await env.XDB
+    .prepare('SELECT 1 x FROM x_devices WHERE device_id = ?1 AND owner_marked = 1')
+    .bind(deviceId).first<{ x: number }>()
+  return !!row
+}
+
+/** يوسم الجهاز الحالي كجهاز مالك. يُنادى بعد دخول اللوحة بنجاح. */
+async function markOwnerDevice(env: Env, deviceId: string): Promise<void> {
+  if (!deviceId) return
+  const now = new Date().toISOString()
+  try {
+    await env.XDB.prepare(
+      `INSERT INTO x_devices (device_id, owner_marked, first_seen, last_seen)
+       VALUES (?1, 1, ?2, ?2)
+       ON CONFLICT(device_id) DO UPDATE SET owner_marked = 1, last_seen = ?2`
+    ).bind(deviceId, now).run()
+  } catch { /* الوسم ليس شرطاً لدخول اللوحة */ }
+}
+
+/**
+ * أجهزة المالك المسجّلة.
+ *
+ * المالك يدخل من أي هاتف يريد — هذا شرط أساسي لا نتنازل عنه. الأمان يجيء من
+ * الحدّ: كل هاتف جديد يُسجَّل، والعدد مسقوف. فمن سرق كلمة المرور لا يفتح
+ * اللوحة من أي جهاز في العالم، بل يصطدم بسقف يلاحظه المالك في السجل.
+ * الحدّ لا يحمي كلمة المرور وحدها بل يجعل الاختراق مرئياً لا صامتاً.
+ */
+const MAX_OWNER_DEVICES = 3
+
+async function ownerDevices(env: Env): Promise<string[]> {
+  try {
+    const rows = await env.XDB
+      .prepare('SELECT device_id FROM x_devices WHERE owner_bound = 1 ORDER BY last_seen DESC')
+      .all<{ device_id: string }>()
+    return (rows.results ?? []).map(r => r.device_id)
+  } catch {
+    return []
+  }
+}
+
+async function registerOwnerDevice(env: Env, deviceId: string): Promise<void> {
+  if (!deviceId) return
+  const now = new Date().toISOString()
+  await env.XDB.prepare(
+    `INSERT INTO x_devices (device_id, owner_marked, owner_bound, first_seen, last_seen)
+     VALUES (?1, 1, 1, ?2, ?2)
+     ON CONFLICT(device_id) DO UPDATE SET owner_marked = 1, owner_bound = 1, last_seen = ?2`
+  ).bind(deviceId, now).run()
+}
+
+/** يفرّغ خانة: يسحب ربط الجهاز ووسمه معاً. */
+async function releaseOwnerDevice(env: Env, deviceId: string): Promise<void> {
+  if (!deviceId) return
+  await env.XDB.prepare(
+    'UPDATE x_devices SET owner_marked = 0, owner_bound = 0 WHERE device_id = ?1'
+  ).bind(deviceId).run()
+}
+
+/** يزيل وسم المالك عن جهاز (عند الخروج من اللوحة). */
+async function unmarkOwnerDevice(env: Env, deviceId: string): Promise<void> {
+  if (!deviceId) return
+  try {
+    await env.XDB.prepare(
+      'UPDATE x_devices SET owner_marked = 0 WHERE device_id = ?1'
+    ).bind(deviceId).run()
+  } catch { /* تجاهل */ }
+}
+
+/**
+ * شكل الفيديو كما يراه العميل.
+ *
+ * الفيديو المقفل يُرسل بلا أي بيانات وصفية: لا مفتاح تخزين ولا مدّة ولا
+ * حجم ولا رابط بث — حتى عدد الثواني يمكن أن يُعاد بناؤه لاحقاً. يُرسل فقط
+ * ما تحتاجه الواجهة لرسم قفل. هذا ما يجعل الشاشة آمنة ولو سُرّبت الاستجابة.
+ */
+function videoView(v: any, unlocked: boolean, hidden = false) {
+  // مفتاح الإيقاف: عند تفعيله لا يُبنى أي رابط بثّ لأي فيديو، ولا يبقى
+  // `playable` صحيحاً. الحجب هنا لا في الواجهة كي لا يُبثّ الملف أصلاً —
+  // نسخة قديمة من التطبيق لا تعرف المفتاح تتعطّل معه بلا تحديث.
+  const canPlay = unlocked && !hidden
+  const base = {
+    id: v.id,
+    title: v.title,
+    description: unlocked ? (v.description ?? '') : '',
+    mode: v.mode,
+    sort: v.sort,
+    durationS: unlocked ? (v.duration_s ?? 0) : 0,
+    sizeBytes: unlocked ? (v.size_bytes ?? 0) : 0,
+    playable: canPlay,
+    // المصغّرة تُرسل للمقفل أيضاً: بدونها تصير كل بطاقة رمادية، والمستخدم
+    // لا يميّز درساً من آخر فيقرر على العمى. رؤية الصورة لا تكشف المقطع.
+    thumbUrl: v.thumb_key ? `/v1/learn/thumb/${v.id}` : '',
+  }
+  // الرابط لا يُبنى إلا لفيلم مباح — لا وجود له في ردّ المقفل إطلاقاً.
+  return canPlay ? { ...base, streamUrl: `/v1/learn/stream/${v.id}` } : base
+}
+
+/** يبني قائمة الدورات مع فلترة ما هو معروض للعميل حسب استحقاقه.
+ *
+ * `isOwner` استثناء جوهري: المالك ينشئ الدورات ولا يدخل لها كوداً، فلو
+ * خضع لقاعدة الاستحقاق لظهرت دوراته المقفلة أمامه بلا رابط بثّ — أي أن
+ * معاينته لعمله كانت ستعلق على «جار التحميل» للأبد. المالك يرى ما يملك.
+ */
+async function coursesFor(env: Env, deviceId: string, isOwner = false,
+                          videosHidden = false) {
+  const courses = await env.XDB.prepare(
+    `SELECT id, title, subtitle, description, cover_key, locked, sort
+     FROM x_courses WHERE published = 1 ORDER BY sort, created_at DESC`
+  ).all<any>()
+  const videos = await env.XDB.prepare(
+    `SELECT id, course_id, title, description, mode, sort, duration_s, size_bytes, thumb_key
+     FROM x_course_videos WHERE published = 1 ORDER BY sort, created_at`
+  ).all<any>()
+
+  const granted = new Set<string>()
+  if (deviceId) {
+    const rows = await env.XDB
+      .prepare('SELECT course_id FROM x_course_grants WHERE device_id = ?1')
+      .bind(deviceId).all<{ course_id: string }>()
+    for (const r of rows.results ?? []) granted.add(r.course_id)
+  }
+
+  const byCourse = new Map<string, any[]>()
+  for (const v of videos.results ?? []) {
+    const list = byCourse.get(v.course_id) ?? []
+    list.push(v)
+    byCourse.set(v.course_id, list)
+  }
+
+  return (courses.results ?? []).map(c => {
+    const unlocked = !c.locked || granted.has(c.id) || isOwner
+    const list = byCourse.get(c.id) ?? []
+    // في دورة مقفلة: الفيديو المجاني (mode=free) يبقى مفتوحاً — هذا هو
+    // «عرض مجاني» الذي يشتري به المالك ثقة المستخدم. والباقي مقفل.
+    return {
+      id: c.id,
+      title: c.title,
+      subtitle: c.subtitle ?? '',
+      description: unlocked ? (c.description ?? '') : '',
+      coverUrl: c.cover_key ? `/v1/learn/cover/${c.id}` : '',
+      locked: !!c.locked,
+      unlocked,
+      videoCount: list.length,
+      freeCount: list.filter(v => v.mode === 'free').length,
+      videos: list.map(v => videoView(v, v.mode === 'free' || unlocked, videosHidden)),
+    }
   })
 }
 
@@ -1345,6 +1593,10 @@ function chatWriteAllowed(
 ): { ok: boolean; reason: string } {
   if (caller.role === 'owner') return { ok: true, reason: '' }
   if (settings.chatReadOnly) return { ok: false, reason: 'الدردشة في وضع القراءة فقط' }
+  // «all» تعني الجميع بمن فيهم الزوار. هذا الفحص يجب أن يسبق شرط وجود
+  // الحساب: كان الشرط يتوقف قبله، فيُمنع الزائر ولو اختار المالك «الجميع»
+  // صراحةً — وهو ما يجعل السماح في اللوحة بلا أثر.
+  if (settings.chatWriteScope === 'all') return { ok: true, reason: '' }
   if (!user) return { ok: false, reason: 'أنشئ حساباً للمشاركة في الدردشة' }
   if (!user.active) return { ok: false, reason: 'الحساب بانتظار تفعيل المالك' }
   if (settings.chatWriteScope === 'subscribers' && !isSubscriber(user)) {
@@ -1791,6 +2043,9 @@ export default {
             guestFileQuota: settings.guestFileQuota,
             guestCompatQuota: settings.guestCompatQuota,
             compatSearchCost: settings.compatSearchCost,
+            dailyGiftAmount: settings.dailyGiftAmount,
+            videosHidden: settings.videosHidden,
+            videosHiddenMessage: settings.videosHiddenMessage,
             minVersion: settings.minVersion,
             telegramLink: settings.telegramLink,
             schematicsLocked: settings.schematicsLocked,
@@ -1798,7 +2053,13 @@ export default {
             packages: settings.packages,
             privacyPolicy: settings.privacyPolicy,
             // الدردشة تُعلن وجودها مبكراً حتى يعرف التطبيق أي تبويب يعرض.
-            chatEnabled: settings.chatEnabled
+            chatEnabled: settings.chatEnabled,
+            // إعدادات الدردشة تصل للتطبيق لا للوحة فقط: بدونها كان التطبيق
+            // يمنع الزائر من الكتابة محلياً ولو سمح المالك له صراحةً.
+            chatReadOnly: settings.chatReadOnly,
+            chatWriteScope: settings.chatWriteScope,
+            chatMediaScope: settings.chatMediaScope,
+            guestChatEnabled: settings.chatWriteScope === 'all'
           },
           update: {
             message: settings.updateMessage,
@@ -1897,6 +2158,18 @@ export default {
       // typ=owner، فلا يمكن تحويل جلسة مستخدم عادي إلى جلسة مالك.
       if (path === '/v1/owner/login' && request.method === 'POST') {
         await ownerLoginGuard(env)
+        const dev = deviceOf(request)
+        if (!dev) throw new HttpError(403, 'تعذّر التعرّف على الجهاز')
+        // فحص السقف قبل كلمة المرور: الجهاز الزائد يُرفض بلا كشف أي شيء عن
+        // صحة البيانات، فلا يتحول الطلب إلى مِجَسّ لكلمة المرور.
+        const known = await ownerDevices(env)
+        const isNew = !known.includes(dev)
+        if (isNew && known.length >= MAX_OWNER_DEVICES) {
+          await logSecurity(env, request, 'owner_device_limit',
+            `dev=${dev.slice(0, 10)} agents=${known.length}`)
+          throw new HttpError(403,
+            `بلغت حدّ الأجهزة المسموح بها (${MAX_OWNER_DEVICES}) — أفرج عن جهاز من اللوحة ثم أعد المحاولة`)
+        }
         const body = await request.json() as { username?: string; password?: string }
         const user = await xUserByName(env.XDB, body.username?.trim() ?? '')
         if (!user || user.role !== 'owner' ||
@@ -1908,6 +2181,15 @@ export default {
         await clearOwnerLoginFails(env)
         await logSecurity(env, request, 'owner_login_ok', `uid=${user.id}`)
         const token = await signOwnerJwt(env, { sub: user.id, role: 'owner' }, 12 * 3600)
+        // الهاتف الجديد يُسجَّل صريحاً في السجل: دخول من جهاز لم يُرَ قبل
+        // ليس حدثاً صامتاً، ولو كانت كلمة المرور صحيحة.
+        if (isNew) {
+          await registerOwnerDevice(env, dev)
+          await logSecurity(env, request, 'owner_device_new', `dev=${dev.slice(0, 10)}`)
+        }
+        // وسم الجهاز صريحاً: هو ما يمنح المالك استحقاق دوراته، لا وجود رمز
+        // اللوحة في الطلب. الجلسة قد تنتهي أو تُسحب، والوسم يبقى.
+        await markOwnerDevice(env, dev)
         return json({
           ok: true,
           token,
@@ -2377,14 +2659,20 @@ export default {
         const write = chatWriteAllowed(settings, caller, chatUser)
         if (!write.ok) throw new HttpError(403, write.reason)
 
+        // هوية الكاتب: حساب مسجّل، أو هوية الزائر المرتبطة بالجهاز.
+        // الزائر هوية دائمة على جهازه (guest_<device>)، ولكنه بلا صف في
+        // x_users. استخدام chatUser!.id كان يجعل كتابة الزائر تنهار بخطأ
+        // خادم، فصار له معرّف مشتق من الجلسة كما في مسارات القراءة.
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+
         // لا كتابة بلا هوية: من يدخل باسم «عضو» يملأ الدردشة بأسماء متطابقة
         // يتعذّر تمييز أصحابها، ولا يمكن ردّ رسالة على أحدهم. الكنية أو الصورة
         // شرط قبل أول رسالة — والمطالبة بها عند الإرسال لا عند القراءة، حتى
         // يبقى التصفّح مفتوحاً لمن لم يقرّر بعد.
-        if (chatUser && caller.role !== 'owner') {
+        if (caller.role !== 'owner') {
           const prof = await env.XDB.prepare(
             'SELECT nickname, avatar_key FROM x_chat_profiles WHERE user_id = ?1'
-          ).bind(chatUser.id)
+          ).bind(authorId)
             .first<{ nickname: string; avatar_key: string }>()
           const hasNick = (prof?.nickname ?? '').trim().length >= 2
           const hasAvatar = (prof?.avatar_key ?? '').length > 0
@@ -2405,7 +2693,7 @@ export default {
         const room = settings.chatRooms.find(r => r.id === roomId)
         if (!room) throw new HttpError(404, 'القسم غير موجود')
 
-        if (chatUser && caller.role !== 'owner') {
+        if (chatUser != null && caller.role !== 'owner') {
           const rest = await chatRestriction(env, chatUser.id, roomId)
           if (rest.kicked) {
             throw new HttpError(403, rest.reason
@@ -2490,22 +2778,22 @@ export default {
                (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
           ).bind(
-            id, roomId, chatUser!.id, kind, text, mediaKey, mediaMime, mediaSize, at, waveform, mediaSeconds
+            id, roomId, authorId, kind, text, mediaKey, mediaMime, mediaSize, at, waveform, mediaSeconds
           ).run()
-          const profiles = await chatProfiles(env.XDB, [chatUser!.id])
-          const authorName = profiles.get(chatUser!.id)?.nickname || 'عضو'
+          const profiles = await chatProfiles(env.XDB, [authorId])
+          const authorName = profiles.get(authorId)?.nickname || 'عضو'
           const preview = chatPreview(kind, text, mediaSeconds)
           ctx.waitUntil(pushRoomMessage(
-            env, roomId, chatUser!.id, authorName, preview,
+            env, roomId, authorId, authorName, preview,
           ).catch(() => 0))
           return json({
             ok: true,
             message: chatMessageJson({
-              id, room_id: roomId, user_id: chatUser!.id, kind,
+              id, room_id: roomId, user_id: authorId, kind,
               body: text, media_key: mediaKey, media_mime: mediaMime,
               media_size: mediaSize, created_at: at, waveform,
               media_seconds: mediaSeconds,
-            }, profiles.get(chatUser!.id), chatUser!.id),
+            }, profiles.get(authorId), authorId),
           })
         }
 
@@ -2516,18 +2804,18 @@ export default {
           `INSERT INTO x_chat_messages
              (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at)
            VALUES (?1, ?2, ?3, ?4, ?5, '', '', 0, ?6)`
-        ).bind(id, roomId, chatUser!.id, kind, text, at).run()
-        const profiles = await chatProfiles(env.XDB, [chatUser!.id])
-        const authorName = profiles.get(chatUser!.id)?.nickname || 'عضو'
+        ).bind(id, roomId, authorId, kind, text, at).run()
+        const profiles = await chatProfiles(env.XDB, [authorId])
+        const authorName = profiles.get(authorId)?.nickname || 'عضو'
         ctx.waitUntil(pushRoomMessage(
-          env, roomId, chatUser!.id, authorName, chatPreview(kind, text, 0),
+          env, roomId, authorId, authorName, chatPreview(kind, text, 0),
         ).catch(() => 0))
         return json({
           ok: true,
           message: chatMessageJson({
-            id, room_id: roomId, user_id: chatUser!.id, kind,
+            id, room_id: roomId, user_id: authorId, kind,
             body: text, media_key: '', media_mime: '', media_size: 0, created_at: at,
-          }, profiles.get(chatUser!.id), chatUser!.id),
+          }, profiles.get(authorId), authorId),
         })
       }
 
@@ -2580,7 +2868,13 @@ export default {
       // الكنية تُنقّى من محارف الاتجاه حتى لا ينتحل أحد اسم غيره بتشكيل بصري.
       if (path === '/v1/chat/profile' && request.method === 'PUT') {
         await rateLimit(env, request, 'chatwrite', 40, 60)
-        if (!chatUser) throw new HttpError(403, 'أنشئ حساباً أولاً')
+        // الزائر يحتاج ملفاً تعريفياً أيضاً: شرط «كنية أو صورة» قبل الكتابة
+        // يسري عليه، فحجبه هنا يجعله عاجزاً عن تجاوز الشرط أصلاً.
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+        // المالك لا يحتاج ملفاً تعريفياً، وغياب جلسة صالحة يمنع البقية.
+        if (caller.role !== 'owner' && !caller.uid) {
+          throw new HttpError(403, 'جلسة غير صالحة')
+        }
         const body = await request.json<{
           nickname?: string; imageB64?: string; clearAvatar?: boolean; notify?: boolean
         }>().catch(() => ({} as {
@@ -2601,7 +2895,7 @@ export default {
           if (bytes.length > 1.5 * 1024 * 1024) throw new HttpError(413, 'الصورة كبيرة (أقصى 1.5MB)')
           const sig = sniffMedia(bytes)
           if (!sig || sig.kind !== 'image') throw new HttpError(400, 'الملف ليس صورة صالحة')
-          avatarKey = `chat/avatars/${chatUser.id}.${sig.ext}`
+          avatarKey = `chat/avatars/${authorId}.${sig.ext}`
           await env.XMEDIA.put(avatarKey, bytes, { httpMetadata: { contentType: sig.mime } })
         } else if (body.clearAvatar) {
           avatarKey = ''
@@ -2609,7 +2903,7 @@ export default {
 
         const cur = await env.XDB.prepare(
           'SELECT nickname, avatar_key, notify FROM x_chat_profiles WHERE user_id = ?1'
-        ).bind(chatUser.id).first<{ nickname: string; avatar_key: string; notify: number }>()
+        ).bind(authorId).first<{ nickname: string; avatar_key: string; notify: number }>()
 
         const nextNick = body.nickname === undefined ? (cur?.nickname ?? '') : nickname
         const nextAvatar = avatarKey === null ? (cur?.avatar_key ?? '') : avatarKey
@@ -2625,7 +2919,7 @@ export default {
              notify = excluded.notify,
              updated_at = excluded.updated_at`
         ).bind(
-          chatUser.id, nextNick, nextAvatar, nextNotify, new Date().toISOString()
+          authorId, nextNick, nextAvatar, nextNotify, new Date().toISOString()
         ).run()
 
         return json({
@@ -2658,6 +2952,315 @@ export default {
         return new Response(obj.body, { headers })
       }
 
+// ---------- أكاديمية الدورات ----------
+
+      // مصغّرة الفيديو: صورة واجهة اختيارية لكل درس.
+      //
+      // كانت تُستعمل في التطبيق بلا أي حقل مصدر، فلا يوجد ما يُعرض. تُخدم هنا
+      // بلا شرط استحقاق — المصغّرة لا تكشف المقطع، ووجودها على الدرس المقفل
+      // (مع قفل واضح) هو ما يسمح للمستخدم بأن يقرّر ما يفتحه.
+      const thumbMatch = path.match(/^\/v1\/learn\/thumb\/([\w-]{1,64})$/)
+      if (thumbMatch && request.method === 'GET') {
+        await rateLimit(env, request, 'learn_cover', 300, 600)
+        const video = await env.XDB
+          .prepare('SELECT thumb_key FROM x_course_videos WHERE id = ?1 AND published = 1')
+          .bind(thumbMatch[1]).first<{ thumb_key: string }>()
+        if (!video?.thumb_key) throw new HttpError(404, 'لا توجد مصغّرة')
+        const obj = await env.XLEARN.get(video.thumb_key)
+        if (!obj?.body) throw new HttpError(404, 'المصغّرة مفقودة')
+        const headers = new Headers()
+        obj.writeHttpMetadata(headers)
+        headers.set('cache-control', 'public, max-age=86400')
+        return new Response(obj.body, { headers })
+      }
+
+      // ---------- هديّة الحصة اليومية ----------
+      //
+      // زر واحد يمنح عملات محسومة من الخادم. القيمة تأتي من إعدادات المالك
+      // لا من العميل، والمفتاح اليومي يجعل المنح مرة واحدة في اليوم لكل
+      // محفظة. لا يمكن للعميل اختيار المبلغ ولا تكرار الطلب.
+      if (path === '/v1/gift/claim' && request.method === 'POST') {
+        await rateLimit(env, request, 'gift_claim', 20, 3600)
+        const fp = await walletOf(env, request)
+        const amount = Math.max(0, Math.min(1000,
+          Math.floor(Number(settings.dailyGiftAmount) || 0)))
+        if (amount <= 0) {
+          return json({ ok: false, error: 'الهديّة معطّلة حالياً', status: 403 }, 403)
+        }
+        // الحجز ذرّي: INSERT..ON CONFLICT مشروط بيوم واحد لكل محفظة، فطلبان
+        // متزامنان لا يمنحان الهديّة مرتين.
+        const claim = await env.XDB.prepare(
+          `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'gift', ?3)
+           ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + ?3 WHERE 0
+           RETURNING used`
+        ).bind(fp, today(), amount).first<{ used: number }>()
+        if (!claim) {
+          return json({ ok: false, error: 'حصلت على هديّة اليوم بالفعل', status: 409 }, 409)
+        }
+        // الإيداع في المحفظة الحقيقية: مشترك في رصيده، وزائر في محفظته.
+        let balance: number
+        if (caller.role === 'user') {
+          const row = await env.XDB.prepare(
+            'UPDATE x_users SET quota_balance = quota_balance + ?2 WHERE id = ?1 RETURNING quota_balance'
+          ).bind(caller.uid, amount).first<{ quota_balance: number }>()
+          balance = row?.quota_balance ?? 0
+        } else if (caller.role === 'guest') {
+          const row = await env.XDB.prepare(
+            `INSERT INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, 0, ?3, ?3)
+             ON CONFLICT(device_id) DO UPDATE SET balance = balance + ?2, updated_at = ?3
+             RETURNING balance`
+          ).bind(fp, amount, new Date().toISOString())
+            .first<{ balance: number }>()
+          balance = row?.balance ?? 0
+        } else {
+          balance = -1
+        }
+        await logSecurity(env, request, 'gift_claim', `amount=${amount} role=${caller.role}`)
+        return json({
+          ok: true, amount, balance,
+          message: `حصلت على ${amount} عملة هديّة اليوم`,
+        })
+      }
+
+      // ---------- الإفراج عن جهاز مالك ----------
+      // بلا هذا المسار يُقفل المالك خارج لوحته إن بلغ السقف وفقد هاتفاً.
+      if (path === '/v1/owner/devices/release' && request.method === 'POST') {
+        const auth = await authenticate(env, request)
+        if (auth.caller.role !== 'owner') throw new HttpError(403, 'forbidden')
+        const body = await request.json<any>().catch(() => ({}))
+        const target = String(body.deviceId ?? '').trim()
+        if (!/^[\w-]{8,64}$/.test(target)) throw new HttpError(400, 'deviceId مطلوب')
+        await releaseOwnerDevice(env, target)
+        await logSecurity(env, request, 'owner_device_release', `target=${target.slice(0, 10)}`)
+        return json({ ok: true })
+      }
+
+      // ---------- سحب وسم جهاز المالك ----------
+      // عند الخروج من اللوحة يُلغى الوسم، فتصير الدورات المقفلة مقفلة على
+      // هذا الجهاز أيضاً. لا يُسمح بسحب وسم جهاز آخر: الوسم لا ينتقل.
+      if (path === '/v1/owner/device/release' && request.method === 'POST') {
+        const auth = await authenticate(env, request)
+        if (auth.caller.role !== 'owner') throw new HttpError(403, 'forbidden')
+        await unmarkOwnerDevice(env, deviceOf(request))
+        await logSecurity(env, request, 'owner_device_release')
+        return json({ ok: true })
+      }
+
+      if (path === '/v1/learn/courses' && request.method === 'GET') {
+        await rateLimit(env, request, 'learn_list', 240, 600)
+        const list = await coursesFor(env, deviceOf(request),
+          await ownerDevice(env, deviceOf(request)), settings.videosHidden)
+        return json(
+          { courses: list, telegramUrl: settings.telegramLink },
+          200,
+          { 'cache-control': 'no-store' }
+        )
+      }
+
+      // تفعيل مفتاح. الخادم هو من يقرر: يستقبل الكود، يجزّئه، يطابقه،
+      // ويربط التمكين بالجهاز. الكود لا يُخزَّن صريحاً في أي رد أو سجل.
+      if (path === '/v1/learn/redeem' && request.method === 'POST') {
+        await rateLimit(env, request, 'learn_redeem', 10, 600)
+        const dev = deviceOf(request)
+        if (!dev) throw new HttpError(400, 'معرّف الجهاز مفقود')
+        const body = await request.json().catch(() => ({})) as { code?: string }
+        const code = String(body.code ?? '').trim()
+        // 20 محرفاً + شرطات. رفض الشكل أولاً يمنع إغراق القاعدة بمحاولات.
+        if (!/^[A-Za-z0-9-]{16,32}$/.test(code)) {
+          throw new HttpError(400, 'كود غير صالح')
+        }
+        const hash = await keyHash(code)
+        const key = await env.XDB
+          .prepare('SELECT * FROM x_course_keys WHERE code_hash = ?1')
+          .bind(hash).first<any>()
+        if (!key || key.revoked) {
+          await logSecurity(env, request, 'learn_bad_key', `dev=${dev}`)
+          throw new HttpError(404, 'كود غير صحيح أو ملغى')
+        }
+        if (key.expires_at > 0 && Date.now() > key.expires_at) {
+          throw new HttpError(410, 'انتهت صلاحية الكود')
+        }
+        const already = await env.XDB
+          .prepare('SELECT 1 x FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2')
+          .bind(dev, key.course_id).first<{ x: number }>()
+        if (!already) {
+          // المفتاح لدورة واحدة: الربط بمفتاح واحد يمنع استخدام الكود نفسه
+          // على عدة دورات، وmax_uses يحدّ عدد الأجهزة (1 افتراضياً).
+          if (key.used_count >= key.max_uses) {
+            await logSecurity(env, request, 'learn_key_exhausted', `key=${key.id}`)
+            throw new HttpError(409, 'الكود مستخدم على جهاز آخر')
+          }
+          await env.XDB.batch([
+            env.XDB.prepare(
+              'UPDATE x_course_keys SET used_count = used_count + 1, device_id = ?1, used_at = ?2 WHERE id = ?3'
+            ).bind(dev, new Date().toISOString(), key.id),
+            env.XDB.prepare(
+              `INSERT INTO x_course_grants (device_id, course_id, key_id, user_id, at)
+               VALUES (?1, ?2, ?3, ?4, ?5)
+               ON CONFLICT(device_id, course_id) DO NOTHING`
+            ).bind(dev, key.course_id, key.id, caller.uid, Date.now()),
+          ])
+        }
+        const course = await env.XDB
+          .prepare('SELECT title FROM x_courses WHERE id = ?1')
+          .bind(key.course_id).first<{ title: string }>()
+        return json({
+          ok: true,
+          courseId: key.course_id,
+          courseTitle: course?.title ?? '',
+          message: 'تم فتح الدورة على هذا الجهاز'
+        })
+      }
+
+      // بث الفيديو. لا يُخدَم ملف صريح أبداً: يُقرأ من R2، يُشفّر AES-CTR
+      // بمفتاح الدورات، ويُرسل مع nonce. من يعترض البث يحصل على بايتات
+      // عديمة الفائدة بلا مفتاح التطبيق.
+      const streamMatch = path.match(/^\/v1\/learn\/stream\/([\w-]{1,64})$/)
+      if (streamMatch && request.method === 'GET') {
+        await rateLimit(env, request, 'learn_stream', 120, 600)
+        const video = await env.XDB
+          .prepare(`SELECT id, course_id, object_key, mime, mode
+                    FROM x_course_videos WHERE id = ?1 AND published = 1`)
+          .bind(streamMatch[1]).first<any>()
+        if (!video) throw new HttpError(404, 'الفيديو غير موجود')
+
+        // الاستحقاق يُقرأ من الخادم: الفيديو المجاني متاح للجميع، والمقفل
+        // يحتاج دورة مفعّلة على هذا الجهاز. لا يهم ما يدّعيه العميل.
+        // لا مباح إلا ما وُسم مجاناً، أو دورة استحقّها هذا الجهاز، أو
+        // جهاز المالك نفسه. الدور وحده لا يفتح شيئاً: من سجّل بحساب المالك
+        // على جهاز آخر لا يرث استحقاقه.
+        const allowed = video.mode === 'free' ||
+          await courseUnlocked(env, deviceOf(request), video.course_id) ||
+          await ownerDevice(env, deviceOf(request))
+        if (!allowed) {
+          await logSecurity(env, request, 'learn_locked_stream', `video=${video.id} dev=${deviceOf(request)}`)
+          throw new HttpError(403, 'هذا الفيديو مقفل — افتح الدورة بمفتاح')
+        }
+
+        // مفتاح الإيقاف يُفحص هنا أيضاً لا في القائمة وحدها: من حفظ رابط البثّ
+        // قبل الإيقاف لا بد أن يتوقف عنده أيضاً، وإلا صار المفتاح تجميلياً.
+        if (settings.videosHidden) {
+          throw new HttpError(403, settings.videosHiddenMessage || 'الفيديوهات متوقفة مؤقتاً')
+        }
+
+        const obj = await env.XLEARN.get(video.object_key)
+        if (!obj?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
+        const nonce = await fileNonce(env, video.object_key, obj.httpEtag ?? '')
+        const mime = video.mime || 'video/mp4'
+
+        /**
+         * التشفير على دفعات، لا الملف كاملاً في الذاكرة.
+         *
+         * الفيديو قد يبلغ مئات الميغابايت، وجلبه كاملاً قد يُنهي عامل الـWorker
+         * بحدّ الذاكرة. AES-CTR دفقية: كل قطعة تُشفّر بعدّاد يزحف بعدد الكتل
+         * السابقة، فالقطع المتسلسلة تُفكّ في التطبيق كملف واحد متصل.
+         */
+        const CHUNK = 1024 * 1024          // مضاعف لـ16 بايت: لا كتلة مشقوقة
+        const key = await fileCryptoKey(env)
+
+        async function chunkAt(offset: number, len: number): Promise<Uint8Array> {
+          // AES-CTR يتقدّم بالكتل: العدّاد لا يعرف «نصف كتلة». طلب Range من
+          // إزاحة غير مضاعفة لـ16 كان سيفكّ أول كتلة بمفتاح خاطئ فيخرج رأس
+          // الفيديو مشوّهاً. الحل: ننزل إلى بداية الكتلة ثم نحذف الزائد.
+          const aligned = offset - (offset % 16)
+          const lead = offset - aligned
+          const range = await env.XLEARN.get(video.object_key, {
+            range: { offset: aligned, length: lead + len }
+          })
+          if (!range?.body) return new Uint8Array(0)
+          // عدّاد القطعة = nonce + (offset / 16) — نفس عدّاد التطبيق لو قرأ
+          // الملف متصلاً، لذا تُفكّ القطع في العميل بلا أي تعديل.
+          const ctr = new Uint8Array(nonce)
+          ctr.fill(0, 8)
+          let carry = BigInt(aligned / 16)
+          for (let i = 15; i >= 8; i--) {
+            ctr[i] = Number(carry & 0xffn)
+            carry >>= 8n
+          }
+          const enc = await crypto.subtle.encrypt(
+            { name: 'AES-CTR', counter: ctr, length: 64 },
+            key, await range.arrayBuffer())
+          const out = new Uint8Array(enc)
+          return lead > 0 ? out.subarray(lead) : out
+        }
+
+        // دعم Range: المشغّل يطلب البداية القليلة ليعرض فوراً ثم يواصل الباقي
+        // في الخلفية. AES-CTR يسمح بالبدء من أي إزاحة لأن عدّاد كل قطعة
+        // مُشتقّ من الإزاحة المطلقة، فالتشغيل لا ينتظر تنزيل الملف كاملاً.
+        const size = obj.size ?? 0
+        let start = 0
+        let end = size > 0 ? size - 1 : 0
+        let partial = false
+        const rangeHeader = request.headers.get('range')?.trim()
+        if (rangeHeader && size > 0) {
+          const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader)
+          if (m && (m[1] || m[2])) {
+            if (m[1]) {
+              start = Number(m[1])
+              if (m[2]) end = Number(m[2])
+            } else {
+              // صيغة اللاحقة `bytes=-N`: آخر N بايت.
+              start = Math.max(0, size - Number(m[2]))
+            }
+            end = Math.min(end, size - 1)
+            partial = !(start === 0 && end === size - 1)
+          }
+        }
+        if (size > 0 && (start > end || start >= size)) {
+          return new Response(null, {
+            status: 416,
+            headers: { 'content-range': `bytes */${size}` }
+          })
+        }
+        const span = size > 0 ? end - start + 1 : 0
+
+        let offset = start
+        const body = span > CHUNK
+          ? new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                if (offset > end) { controller.close(); return }
+                const len = Math.min(CHUNK, end - offset + 1)
+                const bytes = await chunkAt(offset, len)
+                if (!bytes.length) { controller.close(); return }
+                offset += len
+                controller.enqueue(bytes)
+              }
+            })
+          : await chunkAt(start, span)
+
+        const headers = new Headers({
+          'content-type': 'application/octet-stream',
+          'x-enc': 'aes-ctr',
+          'x-enc-nonce': [...nonce].map(b => b.toString(16).padStart(2, '0')).join(''),
+          'x-orig-type': mime,
+          // المشغّل يطلب قطعاً متتابعة، وهذا ما يجعله يستأنف من موضعه بلا
+          // إعادة تنزيل ما شاهده. `no-store` كي لا يُخزَّن النصّ المخصّص.
+          'accept-ranges': 'bytes',
+          'cache-control': 'private, no-store'
+        })
+        if (size > 0) {
+          headers.set('content-length', String(span))
+          if (partial) headers.set('content-range', `bytes ${start}-${end}/${size}`)
+        }
+        return new Response(body, { status: partial ? 206 : 200, headers })
+      }
+
+      // غلاف الدورة. صورة عرض عامة بطبيعتها، لكنها تمرّ من هنا كي لا
+      // يُكشف مفتاح R2 الخام لأي عميل.
+      const coverMatch = path.match(/^\/v1\/learn\/cover\/([\w-]{1,64})$/)
+      if (coverMatch && request.method === 'GET') {
+        const c = await env.XDB
+          .prepare('SELECT cover_key FROM x_courses WHERE id = ?1 AND published = 1')
+          .bind(coverMatch[1]).first<{ cover_key: string }>()
+        if (!c?.cover_key) throw new HttpError(404, 'لا غلاف')
+        const obj = await env.XLEARN.get(c.cover_key)
+        if (!obj?.body) throw new HttpError(404, 'not found')
+        const headers = new Headers()
+        obj.writeHttpMetadata(headers)
+        headers.set('cache-control', 'public, max-age=86400')
+        return new Response(obj.body, { headers })
+      }
 
       // ---------- لوحة المالك ----------
 
@@ -2737,6 +3340,10 @@ export default {
             schematicsLocked: body.schematicsLocked ?? settings.schematicsLocked,
             compatLocked: body.compatLocked ?? settings.compatLocked,
             compatSearchCost: Math.max(0, Math.min(1000, Math.floor(Number(body.compatSearchCost ?? settings.compatSearchCost) || 0))),
+            dailyGiftAmount: Math.max(0, Math.min(1000, Math.floor(Number(body.dailyGiftAmount ?? settings.dailyGiftAmount) || 0))),
+            videosHidden: body.videosHidden ?? settings.videosHidden,
+            videosHiddenMessage: typeof body.videosHiddenMessage === 'string'
+              ? body.videosHiddenMessage.slice(0, 300) : settings.videosHiddenMessage,
             guestCompatQuota: 0,
             appLocked: body.appLocked ?? settings.appLocked,
             lockMessage: typeof body.lockMessage === 'string' ? body.lockMessage.slice(0, 300) : settings.lockMessage,
@@ -3327,6 +3934,459 @@ export default {
               active: r.until === 0 || r.until > now,
             })),
           })
+        }
+
+        // ---------- إدارة الدورات (للمالك) ----------
+        //
+        // كل ردود هذا القسم تمرّ من sealed() كبقية اللوحة، فلا تُقرأ بلا
+        // جلسة المالك. الكود الصريح يُعاد مرة واحدة عند التوليد — وبعدها
+        // لا يوجد صريحاً في أي مكان، ولو ضاع فالمالك يولّد غيره.
+
+        if (path === '/v1/owner/learn/courses' && request.method === 'GET') {
+          const courses = await env.XDB.prepare(
+            `SELECT id, title, subtitle, description, cover_key, locked, sort, published, created_at
+             FROM x_courses ORDER BY sort, created_at DESC`
+          ).all<any>()
+          const videos = await env.XDB.prepare(
+            `SELECT id, course_id, title, description, mode, sort, duration_s, size_bytes, published
+             FROM x_course_videos ORDER BY sort, created_at`
+          ).all<any>()
+          const keys = await env.XDB.prepare(
+            `SELECT id, course_id, label, max_uses, used_count, device_id, expires_at, revoked, created_at
+             FROM x_course_keys ORDER BY created_at DESC LIMIT 500`
+          ).all<any>()
+          const grants = await env.XDB.prepare(
+            `SELECT device_id, course_id, key_id, user_id, at
+             FROM x_course_grants ORDER BY at DESC LIMIT 500`
+          ).all<any>()
+
+          const byCourse = new Map<string, any[]>()
+          for (const v of videos.results ?? []) {
+            const l = byCourse.get(v.course_id) ?? []
+            l.push(v)
+            byCourse.set(v.course_id, l)
+          }
+          const keysByCourse = new Map<string, number>()
+          const activeByCourse = new Map<string, number>()
+          for (const k of keys.results ?? []) {
+            keysByCourse.set(k.course_id, (keysByCourse.get(k.course_id) ?? 0) + 1)
+            if (!k.revoked) {
+              activeByCourse.set(k.course_id, (activeByCourse.get(k.course_id) ?? 0) + 1)
+            }
+          }
+          const subsByCourse = new Map<string, number>()
+          for (const g of grants.results ?? []) {
+            subsByCourse.set(g.course_id, (subsByCourse.get(g.course_id) ?? 0) + 1)
+          }
+          const titleOf = new Map<string, string>()
+          for (const c of courses.results ?? []) titleOf.set(c.id, c.title)
+
+          return sealed({
+            courses: (courses.results ?? []).map(c => ({
+              id: c.id, title: c.title, subtitle: c.subtitle,
+              description: c.description, coverKey: c.cover_key,
+              locked: !!c.locked, sort: c.sort, published: !!c.published,
+              createdAt: c.created_at,
+              videoCount: (byCourse.get(c.id) ?? []).length,
+              keyCount: keysByCourse.get(c.id) ?? 0,
+              activeKeyCount: activeByCourse.get(c.id) ?? 0,
+              subscriberCount: subsByCourse.get(c.id) ?? 0,
+              videos: (byCourse.get(c.id) ?? []).map(v => ({
+                id: v.id, title: v.title, description: v.description,
+                mode: v.mode, sort: v.sort, durationS: v.duration_s,
+                sizeBytes: v.size_bytes, published: !!v.published,
+              })),
+            })),
+            keys: (keys.results ?? []).map(k => ({
+              id: k.id, courseId: k.course_id, courseTitle: titleOf.get(k.course_id) ?? '',
+              label: k.label, maxUses: k.max_uses, usedCount: k.used_count,
+              deviceId: k.device_id ? `${k.device_id.slice(0, 8)}…` : '',
+              expiresAt: k.expires_at, revoked: !!k.revoked, createdAt: k.created_at,
+            })),
+            subscribers: (grants.results ?? []).map(g => ({
+              deviceId: g.device_id, shortId: `${g.device_id.slice(0, 8)}…`,
+              courseId: g.course_id, courseTitle: titleOf.get(g.course_id) ?? '',
+              keyId: g.key_id, userId: g.user_id, at: g.at,
+            })),
+          })
+        }
+
+        // إنشاء/تعديل دورة
+        if (path === '/v1/owner/learn/course' && request.method === 'POST') {
+          const b = await request.json<any>().catch(() => ({}))
+          const id = String(b.id ?? '').trim() || `c_${Date.now().toString(36)}`
+          if (!/^[\w-]{1,64}$/.test(id)) throw new HttpError(400, 'معرّف غير صالح')
+          const now = new Date().toISOString()
+          const existing = await env.XDB
+            .prepare('SELECT id FROM x_courses WHERE id = ?1').bind(id).first()
+          const vals = {
+            title: String(b.title ?? '').slice(0, 200) || 'دورة بلا عنوان',
+            subtitle: String(b.subtitle ?? '').slice(0, 200),
+            description: String(b.description ?? '').slice(0, 4000),
+            cover: String(b.coverKey ?? '').slice(0, 200),
+            locked: b.locked === false ? 0 : 1,
+            sort: Number.isFinite(Number(b.sort)) ? Math.floor(Number(b.sort)) : 0,
+            published: b.published === false ? 0 : 1,
+          }
+          if (existing) {
+            await env.XDB.prepare(
+              `UPDATE x_courses SET title=?1, subtitle=?2, description=?3, cover_key=?4,
+               locked=?5, sort=?6, published=?7, updated_at=?8 WHERE id=?9`
+            ).bind(vals.title, vals.subtitle, vals.description, vals.cover,
+                   vals.locked, vals.sort, vals.published, now, id).run()
+          } else {
+            await env.XDB.prepare(
+              `INSERT INTO x_courses (id, title, subtitle, description, cover_key, locked, sort, published, created_at, updated_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)`
+            ).bind(id, vals.title, vals.subtitle, vals.description, vals.cover,
+                   vals.locked, vals.sort, vals.published, now).run()
+          }
+          await logSecurity(env, request, 'owner_learn_course', `id=${id}`)
+          return sealed({ ok: true, id })
+        }
+
+        // حذف دورة مع فيديوهاتها ومفاتيحها ومنحها
+        const courseDel = path.match(/^\/v1\/owner\/learn\/course\/([\w-]{1,64})$/)
+        if (courseDel && request.method === 'DELETE') {
+          const id = courseDel[1]
+          await env.XDB.batch([
+            env.XDB.prepare('DELETE FROM x_course_videos WHERE course_id = ?1').bind(id),
+            env.XDB.prepare('DELETE FROM x_course_keys WHERE course_id = ?1').bind(id),
+            env.XDB.prepare('DELETE FROM x_course_grants WHERE course_id = ?1').bind(id),
+            env.XDB.prepare('DELETE FROM x_courses WHERE id = ?1').bind(id),
+          ])
+          await logSecurity(env, request, 'owner_learn_course_delete', `id=${id}`)
+          return sealed({ ok: true })
+        }
+
+        // إضافة/تعديل فيديو. body.objectKey هو المفتاح داخل دلو XLEARN.
+        if (path === '/v1/owner/learn/video' && request.method === 'POST') {
+          const b = await request.json<any>().catch(() => ({}))
+          const courseId = String(b.courseId ?? '')
+          const objKey = String(b.objectKey ?? '').trim()
+          if (!/^[\w-]{1,64}$/.test(courseId)) throw new HttpError(400, 'courseId مطلوب')
+          if (!objKey || objKey.includes('..')) throw new HttpError(400, 'objectKey مطلوب')
+          const course = await env.XDB
+            .prepare('SELECT id FROM x_courses WHERE id = ?1').bind(courseId).first()
+          if (!course) throw new HttpError(404, 'الدورة غير موجودة')
+          const id = String(b.id ?? '').trim() || `v_${Date.now().toString(36)}`
+          const now = new Date().toISOString()
+          const mode = b.mode === 'free' ? 'free' : 'locked'
+          const vals = {
+            title: String(b.title ?? '').slice(0, 200) || 'فيديو',
+            description: String(b.description ?? '').slice(0, 2000),
+            mime: String(b.mime ?? 'video/mp4').slice(0, 60),
+            duration: Math.max(0, Math.floor(Number(b.durationS) || 0)),
+            size: Math.max(0, Math.floor(Number(b.sizeBytes) || 0)),
+            sort: Number.isFinite(Number(b.sort)) ? Math.floor(Number(b.sort)) : 0,
+            published: b.published === false ? 0 : 1,
+          }
+          const exists = await env.XDB
+            .prepare('SELECT id FROM x_course_videos WHERE id = ?1').bind(id).first()
+          if (exists) {
+            await env.XDB.prepare(
+              `UPDATE x_course_videos SET course_id=?1, title=?2, description=?3, object_key=?4,
+               mime=?5, duration_s=?6, size_bytes=?7, mode=?8, sort=?9, published=?10 WHERE id=?11`
+            ).bind(courseId, vals.title, vals.description, objKey, vals.mime,
+                   vals.duration, vals.size, mode, vals.sort, vals.published, id).run()
+          } else {
+            await env.XDB.prepare(
+              `INSERT INTO x_course_videos (id, course_id, title, description, object_key, mime,
+               duration_s, size_bytes, mode, sort, published, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)`
+            ).bind(id, courseId, vals.title, vals.description, objKey, vals.mime,
+                   vals.duration, vals.size, mode, vals.sort, vals.published, now).run()
+          }
+          await logSecurity(env, request, 'owner_learn_video', `id=${id} course=${courseId}`)
+          return sealed({ ok: true, id })
+        }
+
+        const videoDel = path.match(/^\/v1\/owner\/learn\/video\/([\w-]{1,64})$/)
+        if (videoDel && request.method === 'DELETE') {
+          await env.XDB.prepare('DELETE FROM x_course_videos WHERE id = ?1')
+            .bind(videoDel[1]).run()
+          await logSecurity(env, request, 'owner_learn_video_delete', `id=${videoDel[1]}`)
+          return sealed({ ok: true })
+        }
+// ── الرفع المُجزَّأ للفيديوهات الكبيرة ──
+        //
+        // لماذا: Cloudflare يرد 413 على أي طلب يتجاوز 100MB على حافة الشبكة
+        // قبل أن ينفّذ الـWorker سطراً واحداً. لذلك المقطع يتقسّم إلى أجزاء
+        // كل جزء طلب مستقل صغير. R2 يجمعها في كائن واحد عند الإكمال.
+        // وهذا يعطي أيضاً استكمالاً بعد انقطاع الشبكة: الأجزاء المرفوعة تبقى.
+
+        // بدء جلسة رفع. يعيد uploadId ومفتاح الكائن.
+        if (path === '/v1/owner/learn/upload/init' && request.method === 'POST') {
+          await rateLimit(env, request, 'owner_upload', 60, 3600)
+          const b = await request.json<any>().catch(() => ({}))
+          const courseId = String(b.courseId ?? '')
+          if (!/^[\w-]{1,64}$/.test(courseId)) throw new HttpError(400, 'courseId مطلوب')
+          const course = await env.XDB
+            .prepare('SELECT id FROM x_courses WHERE id = ?1').bind(courseId).first()
+          if (!course) throw new HttpError(404, 'الدورة غير موجودة')
+
+          const extMatch = String(b.name ?? '').toLowerCase().match(/\.(mp4|m4v|mov|webm|mkv)$/)
+          const ext = extMatch ? extMatch[1] : 'mp4'
+          const mime = (String(b.mime ?? 'video/mp4')).slice(0, 60)
+          const objectKey = `courses/${courseId}/${Date.now().toString(36)}.${ext}`
+
+          // إنشاء رفع R2 متعدّد الأجزاء: نحتفظ بـuploadId لإرسال الأجزاء لاحقاً.
+          const mp = await env.XLEARN.createMultipartUpload(objectKey, {
+            httpMetadata: { contentType: mime },
+          })
+          const id = `u_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+          await env.XDB.prepare(
+            `INSERT INTO x_course_uploads (id, course_id, object_key, r2_upload_id, title,
+             description, mode, mime, size_bytes, parts_done, owner_id, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11)`
+          ).bind(id, courseId, objectKey, mp.uploadId,
+                 String(b.title ?? '').slice(0, 200) || 'فيديو',
+                 String(b.description ?? '').slice(0, 2000),
+                 b.mode === 'free' ? 'free' : 'locked', mime,
+                 Math.max(0, Math.floor(Number(b.size) || 0)),
+                 caller.uid, new Date().toISOString()).run()
+          return sealed({ ok: true, uploadId: id, objectKey })
+        }
+
+        // رفع جزء واحد. رقم الجزء يبدأ من 1 كما في R2.
+        const upPart = path.match(/^\/v1\/owner\/learn\/upload\/(u_[\w]+)\/part\/(\d{1,5})$/)
+        if (upPart && request.method === 'PUT') {
+          await rateLimit(env, request, 'owner_upload_part', 400, 3600)
+          const upload = await env.XDB
+            .prepare('SELECT * FROM x_course_uploads WHERE id = ?1').bind(upPart[1])
+            .first<any>()
+          if (!upload) throw new HttpError(404, 'جلسة الرفع غير موجودة')
+          // جلسة المالك وحده: لا يكمل رفعاً بدأه غيره.
+          if (upload.owner_id && upload.owner_id !== caller.uid) {
+            throw new HttpError(403, 'جلسة رفع تخصّ مالكاً آخر')
+          }
+          const partNo = Number(upPart[2])
+          if (partNo < 1 || partNo > 10000) throw new HttpError(400, 'رقم الجزء غير صالح')
+          if (!request.body) throw new HttpError(400, 'لا يوجد جزء')
+
+          const mp = env.XLEARN.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+          // R2 يرد رمزاً (etag) لكل جزء، ولا بد من إعادته للعميل كي يرسله
+          // مرتّباً عند الإكمال — الجمع يفشل بلا هذه الرموز.
+          const uploaded = await mp.uploadPart(partNo, request.body)
+          await env.XDB.prepare(
+            'UPDATE x_course_uploads SET parts_done = MAX(parts_done, ?1) WHERE id = ?2'
+          ).bind(partNo, upPart[1]).run()
+          return sealed({ ok: true, part: partNo, etag: uploaded.etag })
+        }
+
+        // إكمال الجلسة: R2 يجمع الأجزاء ثم نسجّل الفيديو في جدول الدورات.
+        if (path === '/v1/owner/learn/upload/complete' && request.method === 'POST') {
+          await rateLimit(env, request, 'owner_upload', 60, 3600)
+          const b = await request.json<any>().catch(() => ({}))
+          const upId = String(b.uploadId ?? '')
+          const upload = await env.XDB
+            .prepare('SELECT * FROM x_course_uploads WHERE id = ?1').bind(upId).first<any>()
+          if (!upload) throw new HttpError(404, 'جلسة الرفع غير موجودة')
+          if (upload.owner_id && upload.owner_id !== caller.uid) {
+            throw new HttpError(403, 'جلسة رفع تخصّ مالكاً آخر')
+          }
+          // الأجزاء يجب أن تُرسل مرتّبة، وإلا فشل الجمع برسالة غامضة من R2.
+          const parts = Array.isArray(b.parts)
+            ? b.parts.map((p: any) => ({ partNumber: Number(p.partNumber), etag: String(p.etag) }))
+                .filter((p: any) => p.partNumber >= 1 && p.etag)
+                .sort((a: any, c: any) => a.partNumber - c.partNumber)
+            : []
+          if (!parts.length) throw new HttpError(400, 'لا توجد أجزاء للإكمال')
+
+          const mp = env.XLEARN.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+          const obj = await mp.complete(parts)
+          const size = (obj as any)?.size ?? upload.size_bytes
+
+          const id = `v_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
+          const sortRow = await env.XDB
+            .prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS next FROM x_course_videos WHERE course_id = ?1')
+            .bind(upload.course_id).first<{ next: number }>()
+          await env.XDB.prepare(
+            `INSERT INTO x_course_videos (id, course_id, title, description, object_key, mime,
+             duration_s, size_bytes, mode, sort, published, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,0,?7,?8,?9,1,?10)`
+          ).bind(id, upload.course_id, upload.title, upload.description, upload.object_key,
+                 upload.mime, size, upload.mode, sortRow?.next ?? 1,
+                 new Date().toISOString()).run()
+          await env.XDB.prepare('DELETE FROM x_course_uploads WHERE id = ?1').bind(upId).run()
+          await logSecurity(env, request, 'owner_learn_upload',
+            `id=${id} course=${upload.course_id} bytes=${size} parts=${parts.length} chunked`)
+          return sealed({ ok: true, id, objectKey: upload.object_key, size })
+        }
+
+        // إلغاء جلسة: يُبرَم الرفع في R2 كي لا تبقى أجزاء معلّقة بلا كائن.
+        if (path === '/v1/owner/learn/upload/abort' && request.method === 'POST') {
+          await rateLimit(env, request, 'owner_upload', 60, 3600)
+          const b = await request.json<any>().catch(() => ({}))
+          const upId = String(b.uploadId ?? '')
+          const upload = await env.XDB
+            .prepare('SELECT * FROM x_course_uploads WHERE id = ?1').bind(upId).first<any>()
+          if (!upload) return sealed({ ok: true, skipped: true })
+          if (upload.owner_id && upload.owner_id !== caller.uid) {
+            throw new HttpError(403, 'جلسة رفع تخصّ مالكاً آخر')
+          }
+          try {
+            const mp = env.XLEARN.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+            await mp.abort()
+          } catch { /* الرفع قد يكون أُكمل أو أُبطل سابقاً — لا نُفشل الطلب */ }
+          await env.XDB.prepare('DELETE FROM x_course_uploads WHERE id = ?1').bind(upId).run()
+          return sealed({ ok: true })
+        }
+
+        // رفع ملف فيديو مباشرة إلى دلو الدورات.
+        //
+        // الجسم يُدفق إلى R2 بلا تحويل base64: فيديو 200MB كان يصير 270MB
+        // نصاً ويُقرأ كاملاً في الذاكرة، وهذا يُنهي العامل. هنا لا يمرّ من
+        // الذاكرة إلا ما يحتاجه الدفق.
+        //
+        // العنوان: /v1/owner/learn/upload?courseId=..&title=..&mode=..&name=..
+        // والجسم هو بايتات الملف كما هي.
+        if (path === '/v1/owner/learn/upload' && request.method === 'POST') {
+          // حدّ رفع مستقل: جلسة مالك مسروقة لا يجب أن تملأ الدلو بلا سقف.
+          await rateLimit(env, request, 'owner_upload', 30, 3600)
+          const courseId = url.searchParams.get('courseId') ?? ''
+          if (!/^[\w-]{1,64}$/.test(courseId)) throw new HttpError(400, 'courseId مطلوب')
+          const course = await env.XDB
+            .prepare('SELECT id FROM x_courses WHERE id = ?1').bind(courseId).first()
+          if (!course) throw new HttpError(404, 'الدورة غير موجودة')
+
+          const title = (url.searchParams.get('title') ?? '').slice(0, 200) || 'فيديو'
+          const desc = (url.searchParams.get('description') ?? '').slice(0, 2000)
+          const mode = url.searchParams.get('mode') === 'free' ? 'free' : 'locked'
+          const mime = (request.headers.get('content-type') || 'video/mp4').slice(0, 60)
+          // الجسم الخام فقط: multipart يحمل حدوداً بين الأجزاء تُحفظ داخل
+          // الملف فيفسد التشغيل. الرفض هنا يمنع تلفاً صامتاً في الدلو.
+          if (mime.includes('multipart/')) {
+            throw new HttpError(400, 'أرسل الملف كجسم خام لا multipart')
+          }
+
+          // امتداد الملف من الاسم الأصلي، ونتحقق من كونه امتداداً معروفاً:
+          // لا نثق باسم يرسله العميل كما هو.
+          const rawName = url.searchParams.get('name') ?? ''
+          const extMatch = rawName.toLowerCase().match(/\.(mp4|m4v|mov|webm|mkv)$/)
+          const ext = extMatch ? extMatch[1] : 'mp4'
+
+          const declared = Number(request.headers.get('content-length') || 0)
+          // 95MB لا 350MB: Cloudflare يرد 413 على أي طلب يتجاوز 100MB على
+          // حافة الشبكة قبل وصوله إلى الـWorker، فحدّ أعلى من ذلك وهم لا
+          // يُبلَغ. الملفات الأكبر تمرّ عبر مسارات الرفع المُجزَّأ أعلاه.
+          const MAX_UPLOAD = 95 * 1024 * 1024
+          if (declared > MAX_UPLOAD) {
+            throw new HttpError(413, 'الملف أكبر من 95MB — استخدم الرفع المُجزَّأ')
+          }
+          if (!request.body) throw new HttpError(400, 'لا يوجد ملف')
+
+          const objectKey = `courses/${courseId}/${Date.now().toString(36)}.${ext}`
+          await env.XLEARN.put(objectKey, request.body, {
+            httpMetadata: { contentType: mime },
+          })
+
+          const head = await env.XLEARN.head(objectKey)
+          const size = head?.size ?? declared
+
+          const id = `v_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
+          const sortRow = await env.XDB
+            .prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS next FROM x_course_videos WHERE course_id = ?1')
+            .bind(courseId).first<{ next: number }>()
+          await env.XDB.prepare(
+            `INSERT INTO x_course_videos (id, course_id, title, description, object_key, mime,
+             duration_s, size_bytes, mode, sort, published, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,0,?7,?8,?9,1,?10)`
+          ).bind(id, courseId, title, desc, objectKey, mime, size, mode,
+                 sortRow?.next ?? 1, new Date().toISOString()).run()
+          await logSecurity(env, request, 'owner_learn_upload',
+            `id=${id} course=${courseId} bytes=${size}`)
+          return sealed({ ok: true, id, objectKey, size })
+        }
+
+        // توليد كود لدورة واحدة. يُعاد صريحاً مرة واحدة هنا فقط.
+        if (path === '/v1/owner/learn/key' && request.method === 'POST') {
+          const b = await request.json<any>().catch(() => ({}))
+          const courseId = String(b.courseId ?? '')
+          const course = await env.XDB
+            .prepare('SELECT id, title FROM x_courses WHERE id = ?1')
+            .bind(courseId).first<{ id: string; title: string }>()
+          if (!course) throw new HttpError(404, 'الدورة غير موجودة')
+          const maxUses = Math.max(1, Math.min(1000, Math.floor(Number(b.maxUses) || 1)))
+          const days = Math.max(0, Math.min(3650, Math.floor(Number(b.days) || 0)))
+          const expires = days > 0 ? Date.now() + days * DAY : 0
+          const code = makeKeyCode()
+          const id = `k_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+          await env.XDB.prepare(
+            `INSERT INTO x_course_keys (id, course_id, code_hash, label, max_uses, used_count,
+             device_id, expires_at, revoked, created_at, used_at)
+             VALUES (?1,?2,?3,?4,?5,0,'',?6,0,?7,'')`
+          ).bind(id, courseId, await keyHash(code), String(b.label ?? '').slice(0, 100),
+                 maxUses, expires, new Date().toISOString()).run()
+          await logSecurity(env, request, 'owner_learn_key', `course=${courseId} key=${id}`)
+          // الكود الصريح في هذا الرد وحده — غير محفوظ في أي جدول.
+          return sealed({ ok: true, id, code, courseId, courseTitle: course.title, maxUses, expiresAt: expires })
+        }
+
+        // إلغاء كود (revoke) — يمنع استخدامه من الآن، ويمنح المشتركين
+        // الحاليين خيار السحب إن أراد المالك (انظر grants).
+        const keyRevoke = path.match(/^\/v1\/owner\/learn\/key\/([\w-]{1,64})$/)
+        if (keyRevoke && request.method === 'DELETE') {
+          await env.XDB.prepare('UPDATE x_course_keys SET revoked = 1 WHERE id = ?1')
+            .bind(keyRevoke[1]).run()
+          await logSecurity(env, request, 'owner_learn_key_revoke', `key=${keyRevoke[1]}`)
+          return sealed({ ok: true })
+        }
+
+        // سحب التمكين من مشترك: يحذف المنحة فيموت وصوله فوراً بلا حاجة
+        // لتغيير أي شيء في جهازه، ولو كان الفيديو محمّلاً عنده.
+        if (path === '/v1/owner/learn/revoke' && request.method === 'POST') {
+          const b = await request.json<any>().catch(() => ({}))
+          const deviceId = String(b.deviceId ?? '')
+          const courseId = String(b.courseId ?? '')
+          if (!deviceId || !courseId) throw new HttpError(400, 'deviceId و courseId مطلوبان')
+          await env.XDB.prepare(
+            'DELETE FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2'
+          ).bind(deviceId, courseId).run()
+          await logSecurity(env, request, 'owner_learn_revoke',
+            `dev=${deviceId} course=${courseId}`)
+          return sealed({ ok: true })
+        }
+
+        // رفع غلاف الدورة — نفس نمط رفع وسائط الإعلانات.
+        if (path === '/v1/owner/learn/cover' && request.method === 'POST') {
+          const body = await request.json<any>().catch(() => ({}))
+          const courseId = String(body.courseId ?? '')
+          if (!/^[\w-]{1,64}$/.test(courseId)) throw new HttpError(400, 'courseId مطلوب')
+          const dataB64 = String(body.dataB64 ?? '')
+          if (dataB64.length > 8_000_000) throw new HttpError(413, 'الصورة كبيرة')
+          const bytes = b64d(dataB64)
+          if (!bytes.length) throw new HttpError(400, 'لا بيانات')
+          const mime = String(body.mime ?? 'image/jpeg').slice(0, 60)
+          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'
+          const key = `learn/covers/${courseId}.${ext}`
+          await env.XLEARN.put(key, bytes, { httpMetadata: { contentType: mime } })
+          await env.XDB.prepare(
+            'UPDATE x_courses SET cover_key = ?1, updated_at = ?2 WHERE id = ?3'
+          ).bind(key, new Date().toISOString(), courseId).run()
+          await logSecurity(env, request, 'owner_learn_cover', `course=${courseId}`)
+          return sealed({ ok: true, coverKey: key })
+        }
+
+        // مصغّرة الفيديو. تُرفع مستقلة عن الفيديو كي يستطيع المالك استبدالها
+        // دون إعادة رفع المقطع، وتُربط بمعرّف الفيديو لا بالدورة.
+        if (path === '/v1/owner/learn/thumb' && request.method === 'POST') {
+          const body = await request.json<any>().catch(() => ({}))
+          const videoId = String(body.videoId ?? '')
+          if (!/^[\w-]{1,64}$/.test(videoId)) throw new HttpError(400, 'videoId مطلوب')
+          const dataB64 = String(body.dataB64 ?? '')
+          if (dataB64.length > 8_000_000) throw new HttpError(413, 'الصورة كبيرة')
+          const bytes = b64d(dataB64)
+          if (!bytes.length) throw new HttpError(400, 'لا بيانات')
+          const mime = String(body.mime ?? 'image/jpeg').slice(0, 60)
+          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg'
+          const key = `learn/thumbs/${videoId}.${ext}`
+          await env.XLEARN.put(key, bytes, { httpMetadata: { contentType: mime } })
+          await env.XDB.prepare(
+            'UPDATE x_course_videos SET thumb_key = ?1 WHERE id = ?2'
+          ).bind(key, videoId).run()
+          await logSecurity(env, request, 'owner_learn_thumb', `video=${videoId}`)
+          return sealed({ ok: true, thumbKey: key })
         }
       }
 

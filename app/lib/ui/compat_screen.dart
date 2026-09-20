@@ -11,9 +11,14 @@ import 'external_link.dart';
 
 /// شاشة التوافقات — لوحة إعلانات أعلى + شبكة الشركات (توافقات نصية فقط)
 class CompatScreen extends StatefulWidget {
-  const CompatScreen({super.key, required this.api, this.store});
+  const CompatScreen({super.key, required this.api, this.store, this.onCharged});
   final Api api;
   final Store? store;
+
+  /// يُنادى بعد أي خصم داخل شاشات التوافقات. بلا هذا يبقى الشريط العلوي
+  /// يعرض رصيداً قديماً حتى إعادة تشغيل التطبيق — لأن الخصم يقع في شاشة
+  /// فرعية لا تعرف الشريط، بخلاف المخططات التي مرّرت `refreshQuota`.
+  final VoidCallback? onCharged;
 
   @override
   State<CompatScreen> createState() => _CompatScreenState();
@@ -29,7 +34,7 @@ class _CompatScreenState extends State<CompatScreen>
 
   /// ترتيب مخصص: إنفنكس أولاً ثم الكبار ثم الفرعيات ثم الباقي أبجدياً
   static const _priority = [
-    'infinix', 'honor', 'huawei', 'samsung',
+    'infinix', 'tecno', 'honor', 'huawei', 'samsung',
     'oppo', 'poco', 'redmi', 'realme', 'vivo',
   ];
 
@@ -325,7 +330,8 @@ class _CompatScreenState extends State<CompatScreen>
       padding: const EdgeInsets.all(10),
       onTap: () => Navigator.of(context).push(MaterialPageRoute(
           builder: (_) =>
-              CompatBrandScreen(api: widget.api, brand: b, store: widget.store))),
+              CompatBrandScreen(api: widget.api, brand: b, store: widget.store,
+                  onCharged: widget.onCharged))),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [

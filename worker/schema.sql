@@ -135,3 +135,104 @@ CREATE TABLE IF NOT EXISTS x_push_tokens (
 );
 -- الإرسال يبدأ دائماً من المستخدم: «أرسل لكل من ليس أنا».
 CREATE INDEX IF NOT EXISTS x_push_tokens_user ON x_push_tokens (user_id);
+-- ══════════════════════════════════════════════════════════════
+-- أكاديمية الدورات (فيديوهات تعليمية) — معزولة تماماً داخل x-app-db
+-- ══════════════════════════════════════════════════════════════
+-- كل جدول هنا ملك تطبيق X وحده. لا قراءة ولا كتابة من أي تطبيق آخر،
+-- ولا أي مسار يلمس موارد phonex. الفيديوهات المخزّنة هنا مستقلّة بذاتها.
+
+-- دورة = قائمة تشغيل. locked يعني أن القائمة مقفلة كاملة حتى يُفتح لها مفتاح.
+CREATE TABLE IF NOT EXISTS x_courses (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL,
+  subtitle    TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  cover_key   TEXT NOT NULL DEFAULT '',
+  locked      INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  published   INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_courses_sort ON x_courses (published, sort, created_at);
+
+-- فيديو داخل دورة. object_key مفتاح R2 الخام ولا يُرسل للعميل قبل التحقق
+-- من الاستحقاق — وإلا صار الرابط نفسه مفتاحاً للسرقة.
+CREATE TABLE IF NOT EXISTS x_course_videos (
+  id          TEXT PRIMARY KEY,
+  course_id   TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  object_key  TEXT NOT NULL,
+  mime        TEXT NOT NULL DEFAULT 'video/mp4',
+  duration_s  INTEGER NOT NULL DEFAULT 0,
+  size_bytes  INTEGER NOT NULL DEFAULT 0,
+  mode        TEXT NOT NULL DEFAULT 'locked',
+  sort        INTEGER NOT NULL DEFAULT 0,
+  published   INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_course_videos_order ON x_course_videos (course_id, published, sort);
+
+-- مفاتيح الفتح. المفتاح يُخزَّن مُجزَّأً (SHA-256) لا صريحاً: من يقرأ
+-- القاعدة لا يجد ما يُدخل، ولا يستطيع سرقة مفاتيح المستخدمين.
+-- course_id يجعل المفتاح سارياً لدورة واحدة — مفتاح دورة لا يفتح غيرها.
+CREATE TABLE IF NOT EXISTS x_course_keys (
+  id           TEXT PRIMARY KEY,
+  course_id    TEXT NOT NULL,
+  code_hash    TEXT NOT NULL UNIQUE,
+  label        TEXT NOT NULL DEFAULT '',
+  max_uses     INTEGER NOT NULL DEFAULT 1,
+  used_count   INTEGER NOT NULL DEFAULT 0,
+  device_id    TEXT NOT NULL DEFAULT '',
+  expires_at   INTEGER NOT NULL DEFAULT 0,
+  revoked      INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL,
+  used_at      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS x_course_keys_course ON x_course_keys (course_id, revoked);
+
+-- سجل الاستحقاق: أي جهاز يملك أي دورة. الربط بالجهاز لا بالحساب، فيصمد
+-- حتى لو أنشأ المستخدم حساباً جديداً على الجهاز نفسه، ويمنع إعادة استخدام
+-- المفتاح على جهاز ثانٍ.
+CREATE TABLE IF NOT EXISTS x_course_grants (
+  device_id  TEXT NOT NULL,
+  course_id  TEXT NOT NULL,
+  key_id     TEXT NOT NULL DEFAULT '',
+  user_id    TEXT NOT NULL DEFAULT '',
+  at         INTEGER NOT NULL,
+  PRIMARY KEY (device_id, course_id)
+);
+CREATE INDEX IF NOT EXISTS x_course_grants_course ON x_course_grants (course_id);
+
+-- جلسات الرفع المُجزَّأ للفيديوهات الكبيرة.
+--
+-- سبب وجودها: Cloudflare يرفض أي طلب جسمه يتجاوز 100 ميغابايت على حافة
+-- الشبكة قبل أن يصل إلى الـWorker أصلاً، فيرد 413 بلا أن ينفّذ سطراً واحداً
+-- من كودنا. لذلك كل مقطع يتجاوز الحدّ يُرفع على أجزاء، وكل جزء طلب مستقل
+-- تحت الحدّ. هذا الجدول يحفظ ربط الأجزاء بـuploadId في R2 كي يبقى الرفع
+-- قابلاً للاستكمال، وحتى لا يستطيع مالك ثانٍ إكمال جلسة غيره.
+CREATE TABLE IF NOT EXISTS x_course_uploads (
+  id          TEXT PRIMARY KEY,
+  course_id   TEXT NOT NULL,
+  object_key  TEXT NOT NULL,
+  r2_upload_id TEXT NOT NULL,
+  title       TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  mode        TEXT NOT NULL DEFAULT 'locked',
+  mime        TEXT NOT NULL DEFAULT 'video/mp4',
+  size_bytes  INTEGER NOT NULL DEFAULT 0,
+  parts_done  INTEGER NOT NULL DEFAULT 0,
+  owner_id    TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_course_uploads_owner ON x_course_uploads (owner_id, created_at);
+
+CREATE TABLE IF NOT EXISTS x_devices (
+  device_id    TEXT PRIMARY KEY,
+  owner_marked INTEGER NOT NULL DEFAULT 0,
+  owner_bound  INTEGER NOT NULL DEFAULT 0,
+  first_seen   TEXT NOT NULL,
+  last_seen    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_devices_owner ON x_devices (owner_marked);

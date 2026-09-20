@@ -12,6 +12,7 @@ import 'nav_bar.dart';
 import 'brand_logo.dart';
 import 'chat_screen.dart';
 import 'compat_screen.dart';
+import 'courses_screen.dart';
 import 'schem_screen.dart';
 import 'owner_gate.dart';
 import 'splash.dart';
@@ -36,9 +37,23 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// بين المخططات والدردشة، فيبدو الرجوع كأنه نقلة عشوائية.
   int _lastNonChatTab = 0;
 
-  /// الدردشة تعمل بملء الشاشة دائماً: الشريطان مخفيّان ما دام تبويب
-  /// الدردشة مفتوحاً. هذا مطلب صريح — لا زر تكبير يضغطه المستخدم.
-  bool get _chatOpen => _tab == 2;
+  /// تبويبات الشريط الظاهرة الآن، بترتيبها.
+  ///
+  /// الدورات تُحذف من الشريط كلياً حين يوقف المالك عرض الفيديوهات: المطلوب
+  /// إخفاء شاشات العرض لا إيقاف التشغيل فقط، فلا يبقى تبويب يفتح على فراغ.
+  List<int> get _navTabs => _cfg.videosHidden
+      ? const [0, 1, 3]
+      : const [0, 1, 2, 3];
+
+  /// موضع التبويب الحالي داخل الشريط الظاهر، مع الرجوع للأول إن غاب تبويبه.
+  int get _navIndex {
+    final at = _navTabs.indexOf(_tab);
+    return at < 0 ? 0 : at;
+  }
+
+  /// خروج من الدردشة — والعودة إلى آخر تبويب غير الدردشة.
+  bool get _chatOpen => _tab == _chatTab;
+  int get _chatTab => 3;
 
   /// الخروج من الدردشة يعيد الشريطين ويعود للتبويب السابق.
   void _exitChat() {
@@ -48,9 +63,42 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   int _freeLeft = 0;
   int _freeLimit = 0;
   int _coins = 0;
+
+  /// هديّة اليوم: تُقرأ من الإعدادات (المبلغ) ومن حالة الشريط (هل استُلمت).
+  bool _giftEnabled = false;
+  bool _giftClaimed = false;
   int _cardExpiry = 0;
-  // الإعدادات المشتركة: رابط تيليجرام والباقات من مصدر واحد.
+  // الإعدادات المشتركة: رابط تيليجرام والباقات ومبلغ الهديّة من مصدر واحد.
   AppConfig get _cfg => AppConfig.instance;
+
+  /// مطالبة بهدية اليوم من الخادم.
+  ///
+  /// المبلغ لا يُرسل من هنا: الخادم يقرّره ويحرسه بحدّ يومي، ثم نُحدّث الشريط
+  /// من `/v1/me` — فما يظهر في العدّاد هو نفس ما يقرّه الخادم لا تقدير محلي.
+  Future<void> _claimGift() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final r = await widget.api.claimGift();
+      final amount = (r['amount'] as num?)?.toInt() ?? 0;
+      if (!mounted) return;
+      setState(() => _giftClaimed = true);
+      messenger.showSnackBar(SnackBar(
+        content: Text(r['message']?.toString() ?? 'حصلت على $amount عملة'),
+        behavior: SnackBarBehavior.floating));
+      _refresh();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      // 409 = استُلمت اليوم بالفعل، فنُثبّت الحالة بلا إزعاج.
+      if (e.status == 409) setState(() => _giftClaimed = true);
+      messenger.showSnackBar(SnackBar(
+        content: Text(e.message), behavior: SnackBarBehavior.floating));
+    } catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(
+        content: Text('تعذّر استلام الهديّة — تحقّق من الاتصال'),
+        behavior: SnackBarBehavior.floating));
+    }
+  }
 
   /// فحص دوري للإعلانات الجديدة. لا دفع حقيقي (FCM) في هذا المشروع،
   /// فالاستقصاء هو الوسيلة المتاحة لإبلاغ الأجهزة الأخرى.
@@ -68,6 +116,11 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// نبضة إشعارات الدردشة — منفصلة عن نبضة الإعلانات لأن دورها أطول:
   /// الإعلان حدث نادر، والرسالة قد تصل كل ثانية في قسم نشِط.
   Timer? _chatTimer;
+
+  /// نبضة الإعدادات: تغييرات لوحة المالك (رابط التواصل، الباقات، الإعلان،
+  /// إغلاق التطبيق) يجب أن تصل للتطبيق المفتوح، لا عند إعادة تشغيله فقط.
+  /// دورة أطول من نبضة الدردشة لأن الإعدادات تتغير نادراً.
+  Timer? _settingsTimer;
 
   /// آخر ختم زمني رأيناه لكل قسم — أساس تمييز الجديد عن القديم.
   final Map<String, int> _chatLastSeen = {};
@@ -96,6 +149,10 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         const Duration(minutes: 5), (_) => _pollAnnouncements());
     _chatTimer = Timer.periodic(
         const Duration(seconds: 20), (_) => _pollChatMessages());
+    // الإعدادات والحصة معاً: تغيير المالك للحصص أو رابط التواصل يظهر
+    // خلال دقيقة بلا إغلاق التطبيق.
+    _settingsTimer = Timer.periodic(
+        const Duration(seconds: 60), (_) => _pollSettings());
   }
 
   /// يوجّه ضغط الإشعار إلى الشاشة الصحيحة.
@@ -106,7 +163,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         setState(() {
           _openRoomId = t.roomId;
           _lastNonChatTab = _tab;
-          _tab = 2;
+          _tab = _chatTab;
         });
       case 'ad':
         // الإعلانات تُعرض في تبويب التوافقات أعلى الشاشة.
@@ -233,13 +290,28 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   void dispose() {
     _annTimer?.cancel();
     _chatTimer?.cancel();
+    _settingsTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _cfg.removeListener(_onConfigChanged);
     super.dispose();
   }
 
   void _onConfigChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // الإيقاف قد يقع والمستخدم داخل الدورات؛ بقاؤه على تبويب أُزيل من
+    // الشريط يتركه على شاشة لا مخرج لها.
+    if (_cfg.videosHidden && _tab == 2) _tab = 0;
+    setState(() {});
+  }
+
+  /// دورة الإعدادات: تجلب الحصة والإعدادات بلا إظهار أخطاء.
+  ///
+  /// _refresh تُظهر فشلاً للمستخدم حين تُستدعى من إجراء مباشر؛ الاستقصاء
+  /// الدوري يجب أن يفشل بصمت كي لا يرى المستخدم تنبيهاً كل دقيقة عند
+  /// انقطاع الشبكة.
+  void _pollSettings() {
+    if (!mounted) return;
+    _refresh();
   }
 
   /// رسالة جاهزة على رابط تيليجرام — يتعامل مع رابط فيه استعلام مسبقاً.
@@ -268,6 +340,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
           _freeLimit = (w['freeLimit'] as num?)?.toInt() ?? 0;
           _coins = (w['coins'] as num?)?.toInt() ?? 0;
           _cardExpiry = (w['expiresAt'] as num?)?.toInt() ?? 0;
+          _giftEnabled = _cfg.hasGift;
         });
         return;
       }
@@ -280,6 +353,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         _freeLeft = limit < 0 ? 0 : (limit - used).clamp(0, limit);
         _coins = (c?['balance'] as num?)?.toInt() ?? 0;
         _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
+        _giftEnabled = _cfg.hasGift;
       });
     } catch (_) {}
   }
@@ -337,6 +411,24 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 ),
               ),
             ),
+          // زر الهديّة: بجانب عدّاد العملات مباشرة، لأنه يزيده.
+          // مخفي عن المالك (رصيده مفتوح أصلاً) ويظهر لغيره — زائر أو مشترك.
+          if (!isOwner && _giftEnabled)
+            IconButton(
+              tooltip: 'هديّة اليوم',
+              icon: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                    color: XTheme.gold.withOpacity(.16),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Icon(
+                  _giftClaimed ? Icons.redeem : Icons.card_giftcard,
+                  color: _giftClaimed ? XTheme.textDim : XTheme.gold,
+                  size: 18,
+                ),
+              ),
+              onPressed: _claimGift,
+            ),
           // زر + لشراء باقة — متاح للجميع (الزائر يُوجَّه لطلب حساب أولاً)
           IconButton(
             tooltip: 'شراء بطاقات',
@@ -361,8 +453,12 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         child: IndexedStack(
           index: _tab,
           children: [
-            CompatScreen(api: widget.api, store: widget.store),
+            CompatScreen(api: widget.api, store: widget.store, onCharged: refreshQuota),
             SchemScreen(api: widget.api, onFileOpened: refreshQuota),
+            if (_cfg.videosHidden)
+              const SizedBox.shrink()
+            else
+              CoursesScreen(api: widget.api),
             ChatScreen(
               api: widget.api,
               store: widget.store,
@@ -384,23 +480,31 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
       bottomNavigationBar: _chatOpen
           ? null
           : AnimatedNavBar(
-              index: _tab,
+              index: _navIndex,
               onSelect: (i) {
+                // الضغط يعطي موضعاً داخل الشريط لا رقم التبويب: مع غياب
+                // تبويب تنزاح الأرقام، والتحويل هنا يمنع فتح الشاشة الخطأ.
+                final t = _navTabs[i];
                 setState(() {
-                  if (i != 2) _lastNonChatTab = i;
-                  _tab = i;
+                  if (t != _chatTab) _lastNonChatTab = t;
+                  _tab = t;
                 });
               },
-              items: const [
-          NavItem(
+              items: [
+          const NavItem(
               icon: Icons.hub_outlined,
               activeIcon: Icons.hub,
               label: 'التوافقات'),
-          NavItem(
+          const NavItem(
               icon: Icons.schema_outlined,
               activeIcon: Icons.schema,
               label: 'المخططات'),
-          NavItem(
+          if (!_cfg.videosHidden)
+            const NavItem(
+                icon: Icons.play_lesson_outlined,
+                activeIcon: Icons.play_lesson,
+                label: 'الدورات'),
+          const NavItem(
               icon: Icons.forum_outlined,
               activeIcon: Icons.forum,
               label: 'الدردشة'),

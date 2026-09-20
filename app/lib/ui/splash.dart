@@ -184,8 +184,8 @@ class _SplashScreenState extends State<SplashScreen>
                         spreadRadius: 2)
                   ],
                 ),
-                child: const Center(
-                  child: Text('MAPX',
+                child: Center(
+                  child: Text(kAppName,
                       style: TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.w900,

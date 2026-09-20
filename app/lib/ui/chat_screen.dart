@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../core/api.dart';
+import '../core/app_config.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
@@ -84,6 +85,9 @@ class _ChatScreenState extends State<ChatScreen>
 
   Timer? _poll;
   bool _polling = false;
+
+  /// آخر قيود بلّغنا بها المستخدم — نمنع تكرار التنبيه نفسه كل دورة تحديث.
+  String _lastRestriction = '';
 
   /// محرّك قائمة الرسائل.
   ///
@@ -283,13 +287,58 @@ class _ChatScreenState extends State<ChatScreen>
         // فلا نجبره على النزول. `_reportSeen` يبقى: ختم المشاهدة للخادم.
         _reportSeen();
       }
-      // تحديث صور المشاهدين للرسائل القديمة قد يحتاج إعادة جلب أخيرة،
-      // لكن ذلك يكفي عند الطلب اليدوي (سحب للتحديث) لا كل دورة.
+      // حالة الدردشة تُحدَّث في الدورة نفسها، لا عند إعادة التشغيل: غلق
+      // الدردشة أو تغيير أقسامها أو كتم المستخدم كلها تُطبَّق في اللوحة،
+      // وبدون ذلك يبقى المستخدم على حالة قديمة حتى يخرج من التطبيق.
+      await _refreshState();
     } catch (_) {
       // فشل دورة واحدة لا يُظهر خطأ: الشبكة تتقطع لحظياً كثيراً.
     } finally {
       _polling = false;
     }
+  }
+
+  /// يجلب حالة الدردشة ويطبّق تغييراتها فوراً على الواجهة.
+  ///
+  /// يُستدعى من كل دورة تحديث ومن العودة إلى الشاشة، فيرى المستخدم إغلاق
+  /// الدردشة أو الكتم لحظياً بدل انتظار إعادة فتح التطبيق.
+  Future<void> _refreshState() async {
+    final s = await widget.api.chatState();
+    if (!mounted) return;
+    final changed = !identical(s, _state);
+    setState(() {
+      _state = s;
+      // قسم أُزيل من اللوحة: ننتقل لأول قسم متاح بدل البقاء على قسم ميت.
+      if (_room != null && !s.rooms.any((r) => r.id == _room!.id)) {
+        _room = s.rooms.isEmpty ? null : s.rooms.first;
+      }
+    });
+    if (changed) _noticeRestriction(s);
+  }
+
+  /// يُبلّغ المستخدم بالكتم أو الطرد فور وقوعه — برسالة تشرح السبب.
+  ///
+  /// التنبيه يظهر مرة واحدة عند تغيّر الحالة فقط، فلا يتحوّل إلى إزعاج
+  /// متكرر كل دورة تحديث.
+  void _noticeRestriction(ChatState s) {
+    final key = '${s.muted}|${s.kicked}|${s.restrictionReason}';
+    if (key == _lastRestriction) return;
+    _lastRestriction = key;
+    if (!s.muted && !s.kicked) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    final reason = s.restrictionReason.trim();
+    final text = s.kicked
+        ? (reason.isEmpty ? 'تم إخراجك من الدردشة' : 'تم إخراجك من الدردشة: $reason')
+        : (reason.isEmpty ? 'تم كتمك — تواصل مع المالك' : 'تم كتمك: $reason');
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(text),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: XTheme.danger,
+        duration: const Duration(seconds: 6),
+      ));
   }
 
   /// يُخبر الخادم أن المستخدم بلغ آخر رسالة — أساس «من رأى الرسالة».
@@ -401,9 +450,11 @@ class _ChatScreenState extends State<ChatScreen>
   /// يضمن أن للمستخدم كنية أو صورة قبل الكتابة؛ يعيد false إن بقي بلا هوية.
   ///
   /// الزائر لا يُسأل: الهوية شرط على الحسابات المسجّلة وحدها، والحساب
-  /// المجهول يُخبر صراحةً أنه بحاجة إلى حساب.
+  /// المجهول يُخبر صراحةً أنه بحاجة إلى حساب — إلا أن يكون المالك قد
+  /// سمح للزوار بالكتابة، فتكون الحاجة إلى الحساب قراراً لا افتراضاً.
   Future<bool> _ensureIdentity() async {
     if (!widget.store.hasSession || widget.store.isGuest) {
+      if (AppConfig.instance.guestsCanChat) return true;
       _toast('أنشئ حساباً للمشاركة في الدردشة');
       return false;
     }
@@ -1112,7 +1163,10 @@ class _ChatScreenState extends State<ChatScreen>
             : _state.writeBlockedReason,
       );
 
-  /// حذف رسالتي بالضغط المطوّل.
+  /// الضغط المطوّل: حذف رسالتي، أو حذف أي رسالة إن كنت المالك.
+  ///
+  /// الخادم هو من يفرض القاعدة فعلاً (`caller.role !== 'owner'`)، وهذه
+  /// الواجهة تعرض ما يسمح به فقط — زر يرفضه الخادم أسوأ من غياب الزر.
   ///
   /// الصور والفيديو تُفتح من داخل الفقاعة نفسها (`_imageContent`)، فلا
   /// نكرّر الفتح هنا وإلا انفتح العارض مرّتين للضغطة الواحدة.
@@ -1120,9 +1174,69 @@ class _ChatScreenState extends State<ChatScreen>
       {required int index, required LongPressStartDetails details}) {
     final m = ChatBridge.unwrap(message);
     if (m == null) return;
-    // الحذف لرسائلي وحدها: زر لا يفعل شيئاً أسوأ من غياب زر.
     final mine = message.authorId == ChatBridge.myUserId;
-    if (mine && !m.pending && m.id.isNotEmpty) _confirmDelete(m);
+    if (m.pending || m.id.isEmpty) return;
+    if (mine) {
+      _confirmDelete(m);
+      return;
+    }
+    if (widget.store.isOwner) _confirmModerationDelete(m);
+  }
+
+  /// حذف رسالة غيري بصفة المالك.
+  ///
+  /// تأكيد صريح مقصود: هذا إجراء لا رجعة فيه على محتوى شخص آخر، وقد
+  /// يقع بالخطأ لأن الضغط المطوّل يبدأ بلمسة عابرة.
+  Future<void> _confirmModerationDelete(ChatMessage m) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(XTheme.rLg)),
+        title: const Text('حذف رسالة العضو؟',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('الصاحب: ${m.author.label}',
+                style: const TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(
+              m.isText
+                  ? 'ستُحذف هذه الرسالة من الدردشة للجميع، ولا يمكن التراجع.'
+                  : 'سيُحذف هذا المرفق من الدردشة للجميع، ولا يمكن التراجع.',
+              style: TextStyle(fontSize: 13, color: XTheme.textDim, height: 1.5),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: TextStyle(color: XTheme.textDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('حذف',
+                style: TextStyle(
+                    color: XTheme.danger, fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await widget.api.chatDelete(m.id);
+      if (!mounted) return;
+      setState(() => _messages.removeWhere((x) => x.id == m.id));
+      _syncChatList();
+      _toast('حُذفت رسالة العضو');
+    } on ApiException catch (e) {
+      _toast(e.message);
+    } catch (_) {
+      _toast('تعذر الحذف — تحقق من الإنترنت');
+    }
   }
 
   /// نصّ جديد من المربّع — نفس مسار `_sendText` لكن الحزمة هي من ناداه،
@@ -1698,13 +1812,7 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// يعيد حالة الدردشة وحدها بلا إعادة تحميل الرسائل.
-  Future<void> _reloadStateOnly() async {
-    try {
-      final s = await widget.api.chatState();
-      if (!mounted) return;
-      setState(() => _state = s);
-    } catch (_) {}
-  }
+  Future<void> _reloadStateOnly() => _refreshState();
 
   static IconData _roomIcon(String name) {
     switch (name) {
