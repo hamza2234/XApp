@@ -657,6 +657,7 @@ class CourseVideo {
     this.sizeBytes = 0,
     this.playable = false,
     this.streamUrl = '',
+    this.thumbUrl = '',
   });
 
   final String id;
@@ -672,6 +673,10 @@ class CourseVideo {
   /// هل يملك الخادم إذن البث لهذا المستخدم؟ هو مصدر الحقيقة لا الواجهة.
   final bool playable;
   final String streamUrl;
+
+  /// مصغّرة يرفعها المالك. تُرسل للدرس المقفل أيضاً: الصورة لا تكشف المقطع،
+  /// ووجودها مع قفل واضح هو ما يسمح للمستخدم بأن يقرّر ما يفتحه.
+  final String thumbUrl;
 
   /// فيديو مجاني يُعرض بشارة «مجاني» بدل القفل.
   bool get isFree => mode == 'free';
@@ -700,6 +705,7 @@ class CourseVideo {
         sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
         playable: j['playable'] == true,
         streamUrl: j['streamUrl']?.toString() ?? '',
+        thumbUrl: j['thumbUrl']?.toString() ?? '',
       );
 }
 

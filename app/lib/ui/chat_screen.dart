@@ -732,10 +732,12 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  /// رأس الدردشة الزجاجي: مخرج + هوية القسم + عدّاد الحضور.
+  /// رأس الدردشة: مخرج + هوية القسم + عدّاد الحضور + الإشعارات والملف.
   ///
-  /// الرقم يجيب سؤالاً أول ما يفتح المستخدم القسم: هل هنا أحد؟ بلا هذا
-  /// السطر يقف المستخدم أمام فراغ ولا يدري أهي مهجورة أم مزدحمة.
+  /// الإشعارات والملف انتقلا هنا من الشريط السفلي (شريط الأقسام) لأن الشريط
+  /// كان يحمل ثلاثة مسؤوليات في سطر واحد: التنقل بين الأقسام، وكتم الإشعارات،
+  /// وفتح الملف — فيضيق على الأجهزة الصغيرة ويختلط فيه التنقل بالإعداد. الرأس
+  /// مكان الإعدادات، والشريط يبقى للأقسام وحدها.
   Widget _chatHeader() {
     final room = _room;
     if (room == null) return const SizedBox.shrink();
@@ -747,7 +749,7 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(6, 8, 14, 8),
+        padding: const EdgeInsets.fromLTRB(6, 8, 8, 8),
         child: Row(
           children: [
               // الدردشة بملء الشاشة دائماً، فلا شريط تنقّل: هذا المخرج
@@ -759,8 +761,26 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               _roomBadge(room),
               const SizedBox(width: 11),
+              // اسم القسم في الرأس حيث يقرأه المستخدم أولاً، لا في الشريط
+              // السفلي بين الأزرار.
               Expanded(child: _roomTitle(room)),
-              _onlineChip(),
+              // كتم/تفعيل إشعارات الدردشة — يعمل فعلاً عبر الخادم، ويحفظ
+              // الاختيار للجهاز فلا يُنسى بعد الإغلاق.
+              _iconBtn(
+                _state.notify
+                    ? Icons.notifications_active_outlined
+                    : Icons.notifications_off_outlined,
+                _state.notify ? 'إشعارات الدردشة مفعّلة' : 'إشعارات الدردشة مكتومة',
+                _toggleNotify,
+                tint: _state.notify ? XTheme.accent : XTheme.textDim,
+              ),
+              // الملف الشخصي: الاسم واللون والصورة والأصوات.
+              _iconBtn(
+                Icons.person_outline,
+                _state.myNickname.isEmpty ? 'ملفي' : _state.myNickname,
+                _openProfile,
+                tint: XTheme.cyan,
+              ),
           ],
         ),
       ),
@@ -837,37 +857,6 @@ class _ChatScreenState extends State<ChatScreen>
         ],
       );
 
-  /// شارة «متصل الآن» — تظهر فقط عند وجود من هو متصل فعلاً.
-  ///
-  /// إظهارها بصفر يقول للمستخدم «القسم مهجور» وهو قد يكون وحده في وقته؛
-  /// غيابها حينها أصدق من صفر صريح.
-  Widget _onlineChip() {
-    if (_online <= 0) return const SizedBox.shrink();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: XTheme.ok.withOpacity(.12),
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: XTheme.ok.withOpacity(.30)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _dot(XTheme.ok, 6),
-          const SizedBox(width: 6),
-          const Text(
-            'مباشر',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w900,
-              color: XTheme.ok,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _dot(Color c, double size) => Container(
         width: size,
         height: size,
@@ -922,9 +911,11 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       );
 
-  /// شريط الأقسام + أزرار الملف الشخصي والإشعارات.
+  /// شريط الأقسام وحده — الإشعارات والملف انتقلا إلى الرأس.
+  ///
+  /// كان الشريط يحمل ثلاثة أدوار في سطر: تنقّل + كتم + ملف. حصرُه في التنقّل
+  /// يعطي كل قرص عرضاً أكبر ويمنع اللمس الخاطئ بين التنقّل والإعداد.
   Widget _roomBar() {
-    final me = _state.myNickname.isEmpty ? 'ملفي' : _state.myNickname;
     return Container(
       decoration: BoxDecoration(
         color: XTheme.surface,
@@ -934,32 +925,15 @@ class _ChatScreenState extends State<ChatScreen>
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
-        child: Row(
-          children: [
-              Expanded(
-                child: SizedBox(
-                  height: 36,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    reverse: true,
-                    itemCount: _rooms.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 7),
-                    itemBuilder: (_, i) => _roomChip(_rooms[i]),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              _iconBtn(
-                _state.notify
-                    ? Icons.notifications_active_outlined
-                    : Icons.notifications_off_outlined,
-                _state.notify ? 'إشعارات مفعّلة' : 'إشعارات مكتومة',
-                _toggleNotify,
-                tint: _state.notify ? XTheme.accent : XTheme.textDim,
-              ),
-            _iconBtn(Icons.person_outline, me, _openProfile,
-                tint: XTheme.cyan),
-          ],
+        child: SizedBox(
+          height: 36,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            reverse: true,
+            itemCount: _rooms.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 7),
+            itemBuilder: (_, i) => _roomChip(_rooms[i]),
+          ),
         ),
       ),
     );

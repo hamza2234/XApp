@@ -889,6 +889,13 @@ class Api {
       ownerSend('POST', '/v1/owner/learn/cover',
           {'courseId': courseId, 'dataB64': dataB64, 'mime': mime});
 
+  /// مصغّرة الدرس. تُرفع منفصلة عن الفيديو حتى يستطيع المالك استبدال الصورة
+  /// وحدها بلا إعادة رفع المقطع — وسيط الملف قد يكون مئات الميغابايت.
+  Future<Map<String, dynamic>> ownerUploadCourseThumb(
+          String videoId, String dataB64, String mime) =>
+      ownerSend('POST', '/v1/owner/learn/thumb',
+          {'videoId': videoId, 'dataB64': dataB64, 'mime': mime});
+
   /// يرفع ملف فيديو إلى دلو الدورات على أجزاء.
   ///
   /// لماذا الأجزاء: Cloudflare يرد 413 على أي طلب يتجاوز 100MB على حافة

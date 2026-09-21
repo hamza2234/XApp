@@ -2365,6 +2365,18 @@ export default {
           ? auth.user?.quota_expires_at ?? 0
           : wallet?.expires_at ?? 0
         const freeLeft = Math.max(0, freeLimit - freeUsed)
+        // حالة هديّة اليوم محسوبة على الخادم لا على التطبيق: التطبيق كان
+        // يخمّنها من ردّ 409، فمن أعاد تشغيل التطبيق بعد الاستلام كان يرى
+        // الزر متاحاً (الخادم يرد 409 عند الضغط). الاستعلام هنا يجعل الشكل
+        // صادقاً من أول تحميل، ومنه أيضاً نعرف متى تُفتح هديّة الغد.
+        const giftAmount = Math.max(0, Math.min(1000,
+          Math.floor(Number(settings.dailyGiftAmount) || 0)))
+        const giftTaken = giftAmount > 0 && !!(await env.XDB.prepare(
+          "SELECT 1 AS t FROM x_quota_daily WHERE uid = ?1 AND day = ?2 AND kind = 'gift'"
+        ).bind(fp, today()).first())
+        // بداية يوم الغد بتوقيت UTC — نفس أساس `today()`، فالعدّاد يطابق
+        // اللحظة التي يفتح فيها الخادم هديّة جديدة.
+        const dayEnd = Date.parse(today() + 'T00:00:00.000Z') + 86400000
         return json({
           user: {
             id: caller.uid, role: caller.role,
@@ -2390,7 +2402,12 @@ export default {
               },
           cards: caller.role === 'owner'
             ? null
-            : { balance: coins, expiresAt }
+            : { balance: coins, expiresAt },
+          // الهديّة: المبلغ المعتمد، وهل استُلمت اليوم، ومتى تُفتح التالية.
+          // المالك يُستثنى لأن رصيده مفتوح أصلاً ولا معنى للهديّة عنده.
+          gift: caller.role === 'owner'
+            ? { amount: 0, claimed: true, nextAt: 0 }
+            : { amount: giftAmount, claimed: giftTaken, nextAt: dayEnd }
         })
       }
 
@@ -3985,6 +4002,8 @@ export default {
             courses: (courses.results ?? []).map(c => ({
               id: c.id, title: c.title, subtitle: c.subtitle,
               description: c.description, coverKey: c.cover_key,
+              // رابط الغلاف الجاهز للعرض في اللوحة (موقّع كما بقية الصور).
+              coverUrl: c.cover_key ? `/v1/learn/cover/${c.id}` : '',
               locked: !!c.locked, sort: c.sort, published: !!c.published,
               createdAt: c.created_at,
               videoCount: (byCourse.get(c.id) ?? []).length,
@@ -3995,6 +4014,10 @@ export default {
                 id: v.id, title: v.title, description: v.description,
                 mode: v.mode, sort: v.sort, durationS: v.duration_s,
                 sizeBytes: v.size_bytes, published: !!v.published,
+                // روابط الصور تُعاد للمالك ليرى غلافه ومصغّراته ويستبدلها من
+                // اللوحة مباشرة. بلا هذه الحقول كانت اللوحة عمياء عن الصور
+                // التي رفعها، فلا يعرف المالك أين رفعها ولا كيف تبدو.
+                thumbUrl: v.thumb_key ? `/v1/learn/thumb/${v.id}` : '',
               })),
             })),
             keys: (keys.results ?? []).map(k => ({

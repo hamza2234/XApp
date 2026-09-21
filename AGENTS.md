@@ -147,8 +147,34 @@ $BT/apksigner verify --print-certs build/app/outputs/flutter-apk/app-arm64-v8a-r
 - الاستثناءات غير الشبكية (خطأ من الخادم مثلاً) لا تُعاد — إعادة المحاولة بلا
   فائدة تُطيل الانتظار.
 - `flutter analyze lib` يجب أن يبقى 0 error / 0 warning.
-- اختبارات `app/test/` تحمي هذه السلوكيات: الثيم الفاتح، اسم MAPX، معرّف الحزمة
-  الثابت، واستقلال شعارات الشركات.
+- اختبارات `app/test/` تحمي هذه السلوكيات: الثيم الداكن الافتراضي، اسم PhoneX،
+  معرّف الحزمة الثابت، واستقلال شعارات الشركات.
+
+## الهوية الحالية: PhoneX
+
+الاسم الظاهر للتطبيق **PhoneX** (`kAppName` في `lib/core/config.dart` و
+`android:label` في البيان). معرّف الحزمة بقي `com.xapp.x_app` **قصداً**: تغييره
+يجعل أندرويد يعامله تطبيقاً جديداً فلا تُثبَّت التحديثات فوق النسخة القائمة،
+ويضيع ما على جهاز المستخدم.
+
+- **الثيم الداكن هو الافتراضي** (`XTheme.isLight = false`). تهيئة الحالة الثابتة
+  تسبق قراءة تفضيل المستخدم، فإن كانت فاتحة ظهر وميض فاتح في أول إطار قبل أن
+  يُطبَّق اختيار المستخدم المحفوظ.
+- الخط `IBM Plex Sans Arabic` بدل `Tajawal`: الأشكال العربية في الأول أقرب إلى
+  ما اعتاده المستخدم في الأنظمة، ومعها عربات أرقام أوضح.
+- معرّفات قنوات الإشعارات `phonex_announcements` و`phonex_chat`، ويجب أن تطابق
+  قيمة `com.google.firebase.messaging.default_notification_channel_id` في
+  البيان — اختلافهما يجعل إشعار FCM الواصل على القناة الافتراضية بلا أهميتها.
+
+### الفصل عن تطبيق PhoneX الأصلي على Cloudflare
+
+التطبيقان يتشاركان حساب Cloudflare، والفصل مقصود ومكتوب في `worker/wrangler.toml`:
+
+- الموارد **المشتركة قراءة فقط**: `phonex-mirror` (D1) و`phonex-schematics` (R2).
+- موارد التطبيق مستقلة تماماً: `x-app-db` (D1)، `x-app-media` و`x-app-learn`
+  (R2)، ومساحة `QUOTA` (KV). لا نكتب في مورد مشترك أبداً.
+- دلو إصدارات التطبيق `xapp-releases` منفصل عن أي دلو يخص التطبيق الآخر.
+- كل مشكلة في هذا المستودع تُصلح في مورد التطبيق، لا في المشترك.
 
 ## أندرويد: أخطاء متكررة
 
@@ -183,7 +209,7 @@ https://pub-8da12185716441d4bcdcd4c49f395174.r2.dev/download.html
 ```
 
 - الحاوية: `xapp-releases` على حساب Cloudflare، عامة عبر managed domain.
-- الملفات: `MAPX-v<النسخة>.apk` مع نسخ `-arm64` و `-armeabi-v7a` و `-x86_64`.
+- الملفات: `PhoneX-v<النسخة>.apk` مع نسخ `-arm64` و `-armeabi-v7a` و `-x86_64`.
 - الرفع عبر API بلا wrangler:
   `curl -X PUT https://api.cloudflare.com/client/v4/accounts/<ACC>/r2/buckets/xapp-releases/objects/<name> -H "Authorization: Bearer <token>" --data-binary @<file>`
   التوكن في `/workspace/.cf_token` والحساب `4b386375f3294750ffdb6f89de3a09db`.

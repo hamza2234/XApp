@@ -121,14 +121,14 @@ class Notifications {
   }
 
   /// قناة الإعلانات — أهمية عالية حتى يظهر الإشعار كرأس منبثق.
-  static const _annChannelId = 'mapx_announcements';
+  static const _annChannelId = 'phonex_announcements';
 
   /// قناة الدردشة منفصلة عن الإعلانات.
   ///
   /// الفصل مقصود: من وجد الإعلانات مزعجة يكتم قناتها وحدها فيبقى يعرف أن
   /// أحداً ناداه في الدردشة. قناة واحدة تخلط النوعين تجبره على الاختيار بين
   /// الضجيج والعزلة.
-  static const _chatChannelId = 'mapx_chat';
+  static const _chatChannelId = 'phonex_chat';
 
   static const _annChannel = AndroidNotificationChannel(
     _annChannelId,
@@ -408,7 +408,7 @@ class Notifications {
           ticker: roomName,
           category: AndroidNotificationCategory.message,
           // تجميع حسب القسم: كل أقسام الدردشة تحت عنوان واحد في الشريط.
-          groupKey: 'mapx_chat_group',
+          groupKey: 'phonex_chat_group',
         ),
       ),
       payload: NotificationTarget.chat(roomId).encode(),

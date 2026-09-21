@@ -204,21 +204,25 @@ class _CoursesScreenState extends State<CoursesScreen>
     await openExternal(context, link, label: 'المالك');
   }
 
-  /// يفتح فيديو. المجاني والمفتوح يذهبان للمشغّل، والمقفل يعرض رسالة واضحة.
+  /// يفتح فيديو. يقرّر قبل أي انتقال: المقفل يفتح طلب الكود فوراً، والمتاح
+  /// وحده يذهب للمشغّل.
+  ///
+  /// القرار هنا مبني على ما يقوله الخادم في آخر تحديث، لا على حالة مخزّنة قد
+  /// تكون قديمة. هذا ما يمنع «يفتح ثم يقول مقفل»: لا نُقلع المشغّل أصلاً إن كان
+  /// الدرس غير قابل للتشغيل، فلا شاشة تحميل ثم رسالة قفل — بل طلب الكود مباشرة.
   Future<void> _openVideo(Course course, CourseVideo video) async {
-    if (!video.playable || video.streamUrl.isEmpty) {
-      _showLockedSheet(course);
+    final fresh = _resolve(course.id, video.id) ?? video;
+    if (!_canPlay(course, fresh)) {
+      _showLockedSheet(course, fresh);
       return;
     }
-    // الفتح من الدورة الأم: الفيديو المقفل في دورة مقفلة لا يبلغ هنا أصلاً،
-    // والخادم يرفض بثّه لو طُلب يدوياً.
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => CoursePlayerScreen(
         api: widget.api,
-        video: video,
-        title: video.title,
+        video: fresh,
+        title: fresh.title,
         courseTitle: course.title,
-        onNeedUnlock: () => _showLockedSheet(course),
+        onNeedUnlock: () => _showLockedSheet(course, fresh),
       ),
     ));
     if (!mounted) return;
@@ -226,7 +230,104 @@ class _CoursesScreenState extends State<CoursesScreen>
     await _load();
   }
 
-  void _showLockedSheet(Course course) {
+  /// أحدث نسخة من الفيديو من آخر ردّ للخادم — يحرس من قرار مبني على نسخة قديمة
+  /// بعد أن فُتحت الدورة أو تغيّر وضعها في اللوحة.
+  CourseVideo? _resolve(String courseId, String videoId) {
+    for (final c in _courses) {
+      if (c.id != courseId) continue;
+      for (final v in c.videos) {
+        if (v.id == videoId) return v;
+      }
+    }
+    return null;
+  }
+
+  /// هل يملك المستخدم حق التشغيل؟ شرطان لا ثالث: إذن الخادم، ووجود رابط بثّ.
+  /// لو غاب أيّهما فالمشغّل لا يملك ما يشغّله، فالسؤال عن المفتاح أصدق من
+  /// فتح شاشة سوداء.
+  bool _canPlay(Course course, CourseVideo video) {
+    if (course.locked && !course.unlocked) return false;
+    return video.playable && video.streamUrl.isNotEmpty;
+  }
+
+  /// تنزيل الدرس للجهاز.
+  ///
+  /// الترتيب مقصود: يُفحص الاستحقاق أولاً. إن كان الدرس مقفلاً يُفتح طلب الكود
+  /// فوراً، ولا يبدأ تنزيل ولا يُستهلك وقت ولا بيانات ثم يفشل بعد دقيقة. التنزيل
+  /// لا يبدأ إلا بعد أن يصبح الخادم هو من يسمح بالبث.
+  Future<void> _download(Course course, CourseVideo video) async {
+    final fresh = _resolve(course.id, video.id) ?? video;
+    if (!_canPlay(course, fresh)) {
+      _showLockedSheet(course, fresh);
+      return;
+    }
+
+    final progress = ValueNotifier<int>(0);
+    final done = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        title: const Text('يُنزَّل للمشاهدة بلا إنترنت',
+            style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900)),
+        content: ValueListenableBuilder<int>(
+          valueListenable: progress,
+          builder: (_, pct, __) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: pct <= 0 ? null : pct / 100,
+                  minHeight: 5,
+                  color: XTheme.accent,
+                  backgroundColor: XTheme.surface2,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                pct <= 0
+                    ? 'يبدأ التنزيل…'
+                    : (pct >= 100 ? 'اكتمل — يُفتح بلا إنترنت' : '$pct٪'),
+                style: TextStyle(fontSize: 12.3, color: XTheme.textDim),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final r = await CourseCache.instance.provide(
+        widget.api,
+        fresh.streamUrl,
+        // التقدّم يُقيَّد بـ99 حتى لا يُعلن الاكتمال قبل أن يُكتب الملف فعلاً
+        // ويُنقل من ملفه المؤقت. الرقم يقفز إلى 100 عند النجاح وحده.
+        onProgress: (received, total) {
+          if (total <= 0) return;
+          final pct = (received * 100 ~/ total).clamp(0, 99);
+          progress.value = pct;
+        },
+      );
+      progress.value = 100;
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await done;
+      _toast(r.ok
+          ? 'تم التنزيل — «${fresh.title}» يُفتح بلا إنترنت'
+          : (r.error.isEmpty ? 'تعذر التنزيل' : r.error));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      await done;
+      _toast(e is ApiException ? e.message : 'تعذر التنزيل — تحقق من الإنترنت');
+    } finally {
+      progress.dispose();
+    }
+  }
+
+  void _showLockedSheet(Course course, [CourseVideo? video]) {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: XTheme.surface,
@@ -248,12 +349,14 @@ class _CoursesScreenState extends State<CoursesScreen>
                     color: XTheme.accent, size: 24),
               ),
               const SizedBox(height: 14),
-              const Text('هذا الفيديو مقفل',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+              Text(
+                course.locked ? 'دورة مقفلة' : 'هذا الفيديو مقفل',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+              ),
               const SizedBox(height: 8),
               Text(
-                'لفتح الدورة كاملة تواصل مع المالك للحصول على مفتاح خاص. '
-                'المفتاح يُفعَّل مرة واحدة على جهازك، وبعدها تُفتح كل فيديوهات '
+                'لفتح الدورة كاملة تواصل مع المالك واحصل على كود خاص. '
+                'الكود يُفعَّل مرة واحدة على جهازك، وبعدها تُفتح كل فيديوهات '
                 'الدورة تلقائياً — بما فيها ما يُضيفه المالك لاحقاً.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -268,7 +371,7 @@ class _CoursesScreenState extends State<CoursesScreen>
                     _askForKey(course);
                   },
                   icon: const Icon(Icons.key, size: 18),
-                  label: const Text('لدي مفتاح — تفعيل'),
+                  label: const Text('لدي كود — تفعيل الآن'),
                 ),
               ),
               const SizedBox(height: 8),
@@ -511,15 +614,15 @@ class _CoursesScreenState extends State<CoursesScreen>
 
   Widget _cover(Course c) {
     final url = c.coverUrl;
+    // كان الغلاف يُطلب بلا ترويسة توقيع، والخادم يرفض كل `/v1/*` بلا توقيع،
+    // فيرجع 403 دائماً ويُعرض التدرّج البديل — أي أن غلاف المالك لم يظهر
+    // ولا مرة. التوقيع يُخزَّن مؤقتاً داخل `signFor` فلا يُعاد توليده كل إطار.
     if (url.isEmpty) return _coverFallback();
-    // الغلاف صورة عامة بلا توقيع، فلا حاجة لتحميلها عبر عميلنا.
-    return Image.network(
-      url.startsWith('/') ? '$kApiBase$url' : url,
+    return _SignedImage(
+      api: widget.api,
+      url: url,
       fit: BoxFit.cover,
-      // فشل الصورة لا يجعل البطاقة فارغة: نرجع للتدرّج.
-      errorBuilder: (_, __, ___) => _coverFallback(),
-      loadingBuilder: (_, child, p) =>
-          p == null ? child : _coverFallback(),
+      fallback: _coverFallback(),
     );
   }
 
@@ -643,23 +746,34 @@ class _CoursesScreenState extends State<CoursesScreen>
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // رقم الحلقة أو القفل — أول ما يفهمه المستخدم عن حالة الفيديو.
+          // المصغّرة الحقيقية التي يرفعها المالك، وعليها علامة القفل إن كان
+          // الدرس مقفلاً — فيعرف المستخدم حاله من الصورة قبل أي نقر.
           Stack(children: [
-            Container(
+            SizedBox(
               width: 118,
               height: 66,
-              decoration: BoxDecoration(
-                color: XTheme.surface2,
+              child: ClipRRect(
                 borderRadius: BorderRadius.circular(XTheme.rSm),
-              ),
-              child: Center(
-                child: Icon(
-                  locked ? Icons.lock : Icons.play_circle_fill,
-                  color: locked ? XTheme.textDim : XTheme.accent,
-                  size: locked ? 22 : 30,
+                child: _VideoThumb(
+                  api: widget.api,
+                  video: v,
+                  locked: locked,
                 ),
               ),
             ),
+            // القفل فوق الصورة نفسها، لا بدل الصورة.
+            if (locked)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(XTheme.rSm),
+                    color: Colors.black.withOpacity(.42),
+                  ),
+                  child: const Center(
+                    child: Icon(Icons.lock, color: Colors.white, size: 26),
+                  ),
+                ),
+              ),
             Positioned(
               bottom: 4,
               right: 4,
@@ -711,6 +825,20 @@ class _CoursesScreenState extends State<CoursesScreen>
                         style: TextStyle(
                             fontSize: 10.5, color: XTheme.textDim)),
                   ],
+                  const Spacer(),
+                  // زر التنزيل: يسأل عن الكود قبل أي تنزيل، ولا يبدأ شيئاً
+                  // ثم يفشل. المقفل يفتح طلب الكود مباشرة، والمتاح وحده ينزّل.
+                  if (!locked)
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                          minWidth: 32, minHeight: 32),
+                      tooltip: 'تنزيل للمشاهدة بلا إنترنت',
+                      icon: const Icon(Icons.download_for_offline_outlined,
+                          size: 19, color: XTheme.cyan),
+                      onPressed: () => _download(c, v),
+                    ),
                 ]),
               ],
             ),
@@ -979,34 +1107,27 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
 
   Widget _body() {
     if (_preparing) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 62,
-            height: 62,
-            child: Stack(alignment: Alignment.center, children: [
-              CircularProgressIndicator(
-                value: _progress > 0 && _progress < 1 ? _progress : null,
+      // لا نصّ «جاري التحميل» ولا دوّار في المنتصف: المصغّرة التي رفعها المالك
+      // تُعرض كملصق، ويبدأ التشغيل فوقها. هذا يجعل الانتقال من القائمة إلى
+      // المشغّل متصلاً بصرياً بدل شاشة انتظار تُوحي بأن شيئاً يتعطّل.
+      return Stack(alignment: Alignment.center, children: [
+        Positioned.fill(child: _poster()),
+        if (_progress > 0 && _progress < 1)
+          Positioned(
+            bottom: 22,
+            left: 22,
+            right: 22,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: _progress,
+                minHeight: 3,
                 color: XTheme.accent,
-                backgroundColor: Colors.white12,
-                strokeWidth: 4,
+                backgroundColor: Colors.white24,
               ),
-              Text('${(_progress * 100).round()}%',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800)),
-            ]),
+            ),
           ),
-          const SizedBox(height: 14),
-          const Text('جاري تحضير الفيديو…',
-              style: TextStyle(color: Colors.white70, fontSize: 13)),
-          const SizedBox(height: 6),
-          const Text('يُنزَّل مرة واحدة ثم تُفتح المشاهدة القادمة فوراً',
-              style: TextStyle(color: Colors.white38, fontSize: 11.5)),
-        ],
-      );
+      ]);
     }
     if (_error != null) {
       return Padding(
@@ -1081,6 +1202,17 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     );
   }
 
+  /// ملصق المشغّل: مصغّرة الدرس إن رفعها المالك، وإلا خلفية داكنة هادئة.
+  /// لا يظهر أي نصّ انتظار فوقه.
+  Widget _poster() {
+    final url = widget.video.thumbUrl;
+    final bg = Container(color: const Color(0xFF0E1116));
+    if (url.isEmpty) return bg;
+    return SizedBox.expand(
+      child: _SignedImage(api: widget.api, url: url, fallback: bg),
+    );
+  }
+
   static String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -1092,3 +1224,76 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
 extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
+/// صورة موقّعة تُجلب من الخادم.
+///
+/// الخادم يفحص توقيع HMAC على كل مسار `/v1/*`، فـ`Image.network` بلا ترويسات
+/// يرجع 403 دائماً. هذا الغلاف يمرّر ترويسة موقّعة (`Api.signFor` تخزّنها
+/// مؤقتاً فلا تتغيّر كل إطار فتُبطل كاش الصور وتُهزّ القائمة).
+class _SignedImage extends StatelessWidget {
+  const _SignedImage({
+    required this.api,
+    required this.url,
+    required this.fallback,
+    this.fit = BoxFit.cover,
+  });
+
+  final Api api;
+  final String url;
+  final Widget fallback;
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    final absolute = url.startsWith('/') ? '$kApiBase$url' : url;
+    return Image.network(
+      absolute,
+      fit: fit,
+      headers: url.startsWith('/') ? api.signFor('GET', url) : null,
+      // فشل الصورة لا يُفرغ المكان: يبقى البديل ظاهراً بلا خطأ.
+      errorBuilder: (_, __, ___) => fallback,
+      // لا دوّار تحميل ولا وميض: يظهر البديل حتى تصل الصورة، فيبدو الانتقال
+      // ثابتاً بدل أن يقفز بين حالات.
+      frameBuilder: (_, child, frame, wasSync) =>
+          frame == null && !wasSync ? fallback : child,
+    );
+  }
+}
+
+/// مصغّرة الدرس: صورة المالك إن وُجدت، وإلا بديل مشتقّ من حالة الدرس.
+///
+/// البديل ليس صورة عشوائية: إطار داكن مع أيقونة تشغيل أو قفل، فيبقى الصف
+/// مفهوماً حتى قبل أن يرفع المالك أي صورة.
+class _VideoThumb extends StatelessWidget {
+  const _VideoThumb({
+    required this.api,
+    required this.video,
+    required this.locked,
+  });
+
+  final Api api;
+  final CourseVideo video;
+  final bool locked;
+
+  @override
+  Widget build(BuildContext context) {
+    final placeholder = Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1E2430), Color(0xFF2B3444)],
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Icon(
+        locked ? Icons.lock_outline : Icons.play_circle_outline,
+        color: locked ? Colors.white38 : XTheme.accent,
+        size: 28,
+      ),
+    );
+    final url = video.thumbUrl;
+    if (url.isEmpty) return placeholder;
+    return _SignedImage(api: api, url: url, fallback: placeholder);
+  }
+}
+

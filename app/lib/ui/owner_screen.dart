@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import '../core/api.dart';
 import '../core/app_config.dart';
+import '../core/config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'theme.dart';
@@ -3063,6 +3064,24 @@ class _CoursesTabState extends State<_CoursesTab>
       ));
   }
 
+  /// يختار صورة من المعرض ويعيد `(b64, mime)` أو null. يُستخدم للأغلفة
+  /// والمصغّرات معاً حتى يمرّ الاختيار بمسار واحد: حرف واحد مختلف في الترميز
+  /// يجعل الخادم يرد «لا بيانات».
+  Future<({String b64, String mime})?> _pickImageB64() async {
+    final picked = await ImagePicker()
+        .pickImage(source: ImageSource.gallery, maxWidth: 1280, imageQuality: 88);
+    if (picked == null) return null;
+    final bytes = await picked.readAsBytes();
+    if (bytes.isEmpty) return null;
+    final n = picked.name.toLowerCase();
+    final mime = n.endsWith('.png')
+        ? 'image/png'
+        : n.endsWith('.webp')
+            ? 'image/webp'
+            : 'image/jpeg';
+    return (b64: base64Encode(bytes), mime: mime);
+  }
+
   /// إنشاء دورة أو تعديلها.
   Future<void> _editCourse([Map<String, dynamic>? c]) async {
     final title = TextEditingController(text: '${c?['title'] ?? ''}');
@@ -3071,6 +3090,12 @@ class _CoursesTabState extends State<_CoursesTab>
     final locked = ValueNotifier<bool>(c?['locked'] != false);
     final published = ValueNotifier<bool>(c?['published'] != false);
     final busy = ValueNotifier<bool>(false);
+    // غلاف الدورة. `hasCover` يحمل الحالة الأولية من الخادم، و`coverB64` يُملأ
+    // فقط عند اختيار صورة جديدة — فحفظ دورة قديمة لا يمسح غلافها القائم.
+    final hasCover = ValueNotifier<bool>(
+        '${c?['coverKey'] ?? c?['coverUrl'] ?? ''}'.isNotEmpty);
+    String coverB64 = '';
+    String coverMime = 'image/jpeg';
 
     final ok = await showDialog<bool>(
       context: context,
@@ -3100,6 +3125,26 @@ class _CoursesTabState extends State<_CoursesTab>
               decoration: const InputDecoration(
                   labelText: 'وصف الدورة',
                   border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            // صورة الدورة: أول ما يراه المستخدم في الشبكة قبل أي نص.
+            ValueListenableBuilder<bool>(
+              valueListenable: hasCover,
+              builder: (_, has, __) => Row(children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: busy.value ? null : () async {
+                      final img = await _pickImageB64();
+                      if (img == null) return;
+                      coverB64 = img.b64;
+                      coverMime = img.mime;
+                      hasCover.value = true;
+                    },
+                    icon: const Icon(Icons.image_outlined, size: 18),
+                    label: Text(has ? 'تغيير صورة الدورة' : 'صورة الدورة (غلاف)'),
+                  ),
+                ),
+              ]),
             ),
             const SizedBox(height: 6),
             // قفل الدورة: الفرق بين دورة مجانية وأخرى تحتاج مفتاحاً.
@@ -3148,7 +3193,7 @@ class _CoursesTabState extends State<_CoursesTab>
                 }
                 busy.value = true;
                 try {
-                  await widget.api.ownerSaveCourse(
+                  final res = await widget.api.ownerSaveCourse(
                     id: '${c?['id'] ?? ''}',
                     title: title.text.trim(),
                     subtitle: subtitle.text.trim(),
@@ -3157,6 +3202,15 @@ class _CoursesTabState extends State<_CoursesTab>
                     published: published.value,
                     sort: ((c?['sort'] as num?)?.toInt()) ?? 0,
                   );
+                  // الصورة تُرفع بعد حفظ الدورة لأنها تحتاج معرّفها: الدورة
+                  // الجديدة لا معرّف لها قبل أن يعيده الخادم.
+                  if (coverB64.isNotEmpty) {
+                    final id = '${res['id'] ?? c?['id'] ?? ''}';
+                    if (id.isNotEmpty) {
+                      await widget.api
+                          .ownerUploadCourseCover(id, coverB64, coverMime);
+                    }
+                  }
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx, true);
                 } catch (e) {
@@ -3178,6 +3232,7 @@ class _CoursesTabState extends State<_CoursesTab>
     subtitle.dispose();
     desc.dispose();
     locked.dispose();
+    hasCover.dispose();
     published.dispose();
     busy.dispose();
     if (ok == true) {
@@ -3780,17 +3835,63 @@ class _CoursesTabState extends State<_CoursesTab>
             ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                '${(v as Map)['mode']}' == 'free'
-                    ? Icons.play_circle_outline
-                    : Icons.lock_outline,
-                size: 20,
-                color: '${v['mode']}' == 'free' ? XTheme.ok : XTheme.gold,
+              leading: Container(
+                width: 48,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: XTheme.surface2,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: '${v['thumbUrl'] ?? ''}'.isEmpty
+                    ? Icon(
+                        '${v['mode']}' == 'free'
+                            ? Icons.play_circle_outline
+                            : Icons.lock_outline,
+                        size: 18,
+                        color: '${v['mode']}' == 'free'
+                            ? XTheme.ok
+                            : XTheme.gold,
+                      )
+                    : Image.network(
+                        '${kApiBase}${v['thumbUrl']}',
+                        headers: widget.api
+                            .signFor('GET', '${v['thumbUrl']}'),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Icon(
+                            Icons.image_not_supported_outlined,
+                            size: 16, color: XTheme.textDim),
+                      ),
               ),
               title: Text('${v['title']}',
                   style: const TextStyle(
                       fontSize: 13, fontWeight: FontWeight.w700)),
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                // المصغّرة: زر مستقل حتى يبدّل المالك الصورة وحدها بلا إعادة
+                // رفع المقطع. اللون الأخضر يعني أن صورة موجودة فعلاً، فيعرف
+                // أي درس ما زال بلا صورة بلمحة.
+                IconButton(
+                  tooltip: '${v['thumbUrl'] ?? ''}'.isEmpty
+                      ? 'إضافة صورة مصغّرة'
+                      : 'تغيير الصورة المصغّرة',
+                  icon: Icon(Icons.image_outlined,
+                      size: 19,
+                      color: '${v['thumbUrl'] ?? ''}'.isEmpty
+                          ? XTheme.textDim
+                          : XTheme.ok),
+                  onPressed: () async {
+                    final img = await _pickImageB64();
+                    if (img == null) return;
+                    try {
+                      await widget.api.ownerUploadCourseThumb(
+                          '${v['id']}', img.b64, img.mime);
+                      _toast('حُفظت الصورة المصغّرة');
+                      await _load();
+                    } catch (e) {
+                      _toast(e is ApiException ? e.message : 'فشل رفع الصورة');
+                    }
+                  },
+                ),
                 // تعديل القفل بلا إعادة رفع: الرفع كان الوسيلة الوحيدة
                 // لتغيير حالة الفيديو، فيضيع الرابط وتُستهلك الحصة.
                 IconButton(

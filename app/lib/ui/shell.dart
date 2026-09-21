@@ -14,6 +14,7 @@ import 'brand_logo.dart';
 import 'chat_screen.dart';
 import 'compat_screen.dart';
 import 'courses_screen.dart';
+import 'gift_screen.dart';
 import 'schem_screen.dart';
 import 'owner_gate.dart';
 import 'splash.dart';
@@ -42,9 +43,17 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   ///
   /// الدورات تُحذف من الشريط كلياً حين يوقف المالك عرض الفيديوهات: المطلوب
   /// إخفاء شاشات العرض لا إيقاف التشغيل فقط، فلا يبقى تبويب يفتح على فراغ.
-  List<int> get _navTabs => _cfg.videosHidden
-      ? const [0, 1, 3]
-      : const [0, 1, 2, 3];
+  /// والهديّة تظهر فقط حين يضبط المالك مبلغاً أكبر من صفر.
+  List<int> get _navTabs {
+    final t = <int>[0, 1];
+    if (!_cfg.videosHidden) t.add(2);
+    if (_giftEnabled) t.add(4);
+    t.add(3);
+    return t;
+  }
+
+  /// تبويب الهديّة — خارج أرقام التنقّل الأساسية كي لا يزاحف موضعها.
+  static const int _giftTab = 4;
 
   /// موضع التبويب الحالي داخل الشريط الظاهر، مع الرجوع للأول إن غاب تبويبه.
   int get _navIndex {
@@ -68,36 +77,38 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// هديّة اليوم: تُقرأ من الإعدادات (المبلغ) ومن حالة الشريط (هل استُلمت).
   bool _giftEnabled = false;
   bool _giftClaimed = false;
+  /// لحظة فتح هديّة الغد (ms). صفر = الخادم لم يُخبرنا، فلا نعرض عدّاداً.
+  int _giftNextAt = 0;
   int _cardExpiry = 0;
   // الإعدادات المشتركة: رابط تيليجرام والباقات ومبلغ الهديّة من مصدر واحد.
   AppConfig get _cfg => AppConfig.instance;
 
-  /// مطالبة بهدية اليوم من الخادم.
+  /// غلاف لتبويب الهديّة: يحوّل ردّ الخادم إلى نتيجة يفهمها راسم العجلة.
   ///
-  /// المبلغ لا يُرسل من هنا: الخادم يقرّره ويحرسه بحدّ يومي، ثم نُحدّث الشريط
-  /// من `/v1/me` — فما يظهر في العدّاد هو نفس ما يقرّه الخادم لا تقدير محلي.
-  Future<void> _claimGift() async {
-    final messenger = ScaffoldMessenger.of(context);
+  /// لا يُعاد المبلغ من العميل أبداً — الخادم هو من يقرّره، وهذا الغلاف ينقله
+  /// كما وصل. العجلة شكل فقط ولا تملك قرار الجائزة.
+  Future<GiftClaimResult> _claimGiftForWheel() async {
     try {
       final r = await widget.api.claimGift();
       final amount = (r['amount'] as num?)?.toInt() ?? 0;
-      if (!mounted) return;
-      setState(() => _giftClaimed = true);
-      messenger.showSnackBar(SnackBar(
-        content: Text(r['message']?.toString() ?? 'حصلت على $amount عملة'),
-        behavior: SnackBarBehavior.floating));
-      _refresh();
+      if (mounted) setState(() => _giftClaimed = true);
+      // نجلب موعد هديّة الغد فوراً ليظهر العدّاد التنازلي.
+      unawaited(_refresh());
+      return GiftClaimResult(
+        ok: true,
+        amount: amount,
+        message: r['message']?.toString() ?? '',
+      );
     } on ApiException catch (e) {
-      if (!mounted) return;
-      // 409 = استُلمت اليوم بالفعل، فنُثبّت الحالة بلا إزعاج.
-      if (e.status == 409) setState(() => _giftClaimed = true);
-      messenger.showSnackBar(SnackBar(
-        content: Text(e.message), behavior: SnackBarBehavior.floating));
+      // 409 = استُلمت اليوم: نُثبّت الحالة ونجلب موعد الغد بدل ترك الزر متاحاً.
+      if (e.status == 409) {
+        if (mounted) setState(() => _giftClaimed = true);
+        unawaited(_refresh());
+      }
+      return GiftClaimResult(ok: false, message: e.message);
     } catch (_) {
-      if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(
-        content: Text('تعذّر استلام الهديّة — تحقّق من الاتصال'),
-        behavior: SnackBarBehavior.floating));
+      return const GiftClaimResult(
+          ok: false, message: 'تعذّر استلام الهديّة — تحقّق من الاتصال');
     }
   }
 
@@ -337,6 +348,8 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
       // الخادم الجديد يرسل wallet؛ والقديم quota/cards/compatQuota. نقرأ
       // الجديد أولاً ونرجع للقديم عند غيابه كي لا يظهر صفر خاطئ.
       final w = m['wallet'] as Map?;
+      // حالة الهديّة تأتي جاهزة من الخادم: الاستلام لا يُستنتج من ردّ خطأ.
+      final g = m['gift'] as Map?;
       if (!mounted) return;
       if (w != null) {
         setState(() {
@@ -345,6 +358,10 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
           _coins = (w['coins'] as num?)?.toInt() ?? 0;
           _cardExpiry = (w['expiresAt'] as num?)?.toInt() ?? 0;
           _giftEnabled = _cfg.hasGift;
+          if (g != null) {
+            _giftClaimed = g['claimed'] == true;
+            _giftNextAt = (g['nextAt'] as num?)?.toInt() ?? 0;
+          }
         });
         return;
       }
@@ -358,6 +375,10 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
         _coins = (c?['balance'] as num?)?.toInt() ?? 0;
         _cardExpiry = (c?['expiresAt'] as num?)?.toInt() ?? 0;
         _giftEnabled = _cfg.hasGift;
+        if (g != null) {
+          _giftClaimed = g['claimed'] == true;
+          _giftNextAt = (g['nextAt'] as num?)?.toInt() ?? 0;
+        }
       });
     } catch (_) {}
   }
@@ -415,8 +436,10 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          // زر الهديّة: بجانب عدّاد العملات مباشرة، لأنه يزيده.
-          // مخفي عن المالك (رصيده مفتوح أصلاً) ويظهر لغيره — زائر أو مشترك.
+          // زر الهديّة: بجانب عدّاد العملات لأنه يزيده. ينقل إلى تبويب
+          // العجلة بدل أن يستلم فوراً — الاستلام صار تجربة مرئية هناك،
+          // وزرّان يستلمان الهديّة نفسها يعنيان احتمال استلام مزدوج.
+          // مخفي عن المالك (رصيده مفتوح أصلاً) ويظهر لغيره.
           if (!isOwner && _giftEnabled)
             IconButton(
               tooltip: 'هديّة اليوم',
@@ -431,7 +454,11 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                   size: 18,
                 ),
               ),
-              onPressed: _claimGift,
+              // وسم أحمر صغير حين تكون الهديّة متاحة ولم تُستلم بعد.
+              onPressed: () => setState(() {
+                if (_tab != _chatTab) _lastNonChatTab = _giftTab;
+                _tab = _giftTab;
+              }),
             ),
           // زر + لشراء باقة — متاح للجميع (الزائر يُوجَّه لطلب حساب أولاً)
           IconButton(
@@ -478,6 +505,15 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 _chatUnread[id] = 0;
               },
             ),
+            // الهديّة في الفهرس 4، بعد الدردشة (3): الفهرس هو رقم التبويب
+            // نفسه، فأي إدراج في غير موضعه يفتح شاشةً خاطئة.
+            GiftScreen(
+              amount: _cfg.dailyGift,
+              claimed: _giftClaimed,
+              nextAt: _giftNextAt,
+              balance: _coins,
+              onClaim: _claimGiftForWheel,
+            ),
           ],
         ),
       ),
@@ -508,6 +544,11 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 icon: Icons.play_lesson_outlined,
                 activeIcon: Icons.play_lesson,
                 label: 'الدورات'),
+          if (_giftEnabled)
+            const NavItem(
+                icon: Icons.casino_outlined,
+                activeIcon: Icons.casino,
+                label: 'الهديّة'),
           const NavItem(
               icon: Icons.forum_outlined,
               activeIcon: Icons.forum,

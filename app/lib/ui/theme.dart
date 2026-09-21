@@ -18,12 +18,13 @@ class XTheme {
   static const _lText = Color(0xFF10141F);
   static const _lTextDim = Color(0xFF4E576C);
 
-  // تبدأ فاتحة حتى لا يظهر وميض داكن قبل أن يقرأ المتحكّم اختيار المستخدم.
-  static Color bg = _lBg;
-  static Color surface = _lSurface;
-  static Color surface2 = _lSurface2;
-  static Color text = _lText;
-  static Color textDim = _lTextDim;
+  // تبدأ داكنة: الوضع الافتراضي في التطبيق داكن. تهيئة الحالة الثابتة
+  // تسبق قراءة تفضيل المستخدم، فالقيمة هنا تحدد ما يُعرض في أول إطار.
+  static Color bg = _dBg;
+  static Color surface = _dSurface;
+  static Color surface2 = _dSurface2;
+  static Color text = _dText;
+  static Color textDim = _dTextDim;
 
   static const accent = Color(0xFFFF7A18);      // برتقالي دافئ — هوية التطبيق
   static const accent2 = Color(0xFFFFB020);     // كهرماني
@@ -106,7 +107,7 @@ class XTheme {
         ),
       );
 
-  static bool isLight = true;
+  static bool isLight = false;
 
   static void apply(bool light) {
     isLight = light;
@@ -125,7 +126,7 @@ class XTheme {
       useMaterial3: true,
       brightness: light ? Brightness.light : Brightness.dark,
       scaffoldBackgroundColor: bg,
-      textTheme: GoogleFonts.tajawalTextTheme(
+      textTheme: GoogleFonts.ibmPlexSansArabicTextTheme(
           (light ? ThemeData.light() : ThemeData.dark())
               .textTheme
               .apply(bodyColor: text, displayColor: text)),
@@ -247,7 +248,7 @@ class ThemeController extends ChangeNotifier {
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
-    XTheme.apply(p.getBool('light_theme') ?? true);
+    XTheme.apply(p.getBool('light_theme') ?? false);
     notifyListeners();
   }
 

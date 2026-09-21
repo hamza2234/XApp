@@ -9,8 +9,8 @@ const String kApiBase = 'https://x-app-api.www-hmzhh123-com.workers.dev';
 
 /// إصدار التطبيق — يُرسَل في كل طلب وتتحكم به لوحة المالك.
 const int kAppVersion = 5;
-const String kAppVersionName = '1.9.6';
-const String kAppName = 'MAPX';
+const String kAppVersionName = '2.0.0';
+const String kAppName = 'PhoneX';
 
 /// سر توقيع الطلبات — مشوّش (XOR + base64 + تقسيم) ليصعّب استخراجه
 /// من الحزمة. الحماية الحقيقية في الـ Worker: توقيع + JWT + ربط الجهاز.
