@@ -1327,6 +1327,69 @@ const SUSPICIOUS_REASONS = [
 
 const COMPAT_TYPES = ['SCREEN', 'BATTERY', 'GLASS', 'INCASSABLE']
 
+// حدود صارمة على مدخلات المالك: المالك موثوق، لكن جلسته قد تُسرق وحقول
+// التوافقات تُخزَّن ثم تُرسل لكل مستخدم. الحجم المحدود يمنع صفّاً ضخماً
+// يُثقل كل استجابة بحث، ويمنع كذلك تفجير حجم قاعدة D1 بأصفار قليلة.
+const COMPAT_MAX_MODELS = 300
+const COMPAT_MAX_MODEL_LEN = 80
+const COMPAT_MAX_SUB_LEN = 60
+const COMPAT_MAX_NOTE_LEN = 200
+
+/**
+ * يفصل نصّ الموديلات إلى قائمة. الفاصل هو السطر الجديد وحده.
+ *
+ * الفاصلة ليست فاصلاً: أسماء كثيرة تحملها أصلاً (`Redmi Note 8, 8 Pro`)،
+ * فكان انشقاقها يخلق موديلين وهميين لا وجود لهما في الواقع. والقسمة تشمل
+ * كل محارف الفصل في Unicode (`U+2028`/`U+2029`/`U+0085`) — وإلا مرّ سطر
+ * يحمل أحدها كسطر واحد.
+ */
+function splitModelLines(raw: unknown): string[] {
+  return String(raw ?? '')
+    .split(/[\n\r\u2028\u2029\u0085]/)
+    .map(s => s.replace(/[\u200b\u200e\u200f\ufeff]/g, '').trim().toLowerCase())
+    .map(s => s.slice(0, COMPAT_MAX_MODEL_LEN))
+    .filter(Boolean)
+    .slice(0, COMPAT_MAX_MODELS)
+}
+
+/**
+ * يُطبّع قائمة موديلات قادمة من العميل: يطبّق الحدود نفسها، ويرفض أي عنصر
+ * ليس نصّاً. يُستعمل في `patch` أيضاً — وليس في `add` وحده — لأن مسار
+ * `patch` كان يثق بـ`fields` كما وصلت، فجلسة مسروقة تستطيع تخطّي كل حدّ
+ * عبر تمرير `compatibleModels` بلا فحص.
+ */
+function sanitizeModels(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v.map(m => String(m).replace(/[\u200b\u200e\u200f\ufeff]/g, '').trim().toLowerCase())
+    .map(s => s.slice(0, COMPAT_MAX_MODEL_LEN))
+    .filter(Boolean)
+    .slice(0, COMPAT_MAX_MODELS)
+}
+
+/**
+ * يتحقق أن نوع القطعة معروف: إمّا من الأنواع الأصلية أو نوع أضافه المالك
+ * نفسه (`kind='cat'`). نوع آخر تماماً = طلب مُلفَّق، لا مجرّد خطأ كتابة.
+ */
+async function assertCompatType(env: Env, brandFile: string, kind: string): Promise<string> {
+  const k = String(kind ?? '').trim().toUpperCase().slice(0, 24)
+  if (!k) throw new HttpError(400, 'نوع القطعة مطلوب')
+  if (COMPAT_TYPES.includes(k)) return k
+  const own = await env.XDB.prepare(
+    `SELECT 1 x FROM x_compat_edits WHERE brand_file = ?1 AND kind = 'cat' AND deleted = 0`
+  ).bind(brandFile).first<any>()
+  if (own) {
+    const rows = await env.XDB.prepare(
+      `SELECT data FROM x_compat_edits WHERE brand_file = ?1 AND kind = 'cat' AND deleted = 0`
+    ).bind(brandFile).all<{ data: string }>()
+    for (const r of rows.results ?? []) {
+      try {
+        if (String(JSON.parse(r.data)?.name ?? '').toUpperCase() === k) return k
+      } catch { /* صفّ نوع تالف لا يُسقط التحقق */ }
+    }
+  }
+  throw new HttpError(400, 'نوع قطعة غير معروف')
+}
+
 /** شركات فرعية افتراضية — تُشتق قراءةً فقط من ملفات الشركات الأم، بلا أي كتابة على المصدر */
 const VIRTUAL_SUB_BRANDS: { name: string; file: string; key: string }[] = [
   { name: 'redmi', file: '01xiaomi.json', key: 'redmi' },
@@ -5031,6 +5094,27 @@ export default {
             let merged: Record<string, unknown> = {}
             if (prev) { try { merged = JSON.parse(prev.data) } catch { /* تجاهل */ } }
             merged = { ...merged, ...(fields as Record<string, unknown>) }
+            // كل حقل يُفلتَر باسمه: لا يُقبل مفتاح لم نختره، ولا قيمة بلا حدّ.
+            // كان `fields` يُدمج كما وصل، فجلسة مسروقة تكتب ما تشاء في الصفّ
+            // الذي يقرأه كل المستخدمين.
+            const safe: Record<string, unknown> = {}
+            for (const key of Object.keys(fields as Record<string, unknown>)) {
+              const v = (fields as Record<string, unknown>)[key]
+              if (key === 'compatibleModels') {
+                const list = sanitizeModels(Array.isArray(v) ? v : splitModelLines(v))
+                if (!list.length) throw new HttpError(400, 'لا موديلات صالحة في الصفّ')
+                safe.compatibleModels = list
+              } else if (key === 'componentType') {
+                safe.componentType = await assertCompatType(env, brandFile, String(v))
+              } else if (key === 'subCategory') {
+                const name = String((v as any)?.name ?? '').trim().slice(0, COMPAT_MAX_SUB_LEN)
+                safe.subCategory = { name }
+              } else if (key === 'note') {
+                safe.note = String(v ?? '').trim().slice(0, COMPAT_MAX_NOTE_LEN)
+              }
+              // أي مفتاح آخر يُهمَل بصمت — لا يصل إلى قاعدة البيانات.
+            }
+            merged = { ...merged, ...safe }
             // صف موجود في المرآة → patch، وصف أنشأه المالك → يُحدَّث كـ new
             // حتى لا ينقلب حذفه وهمياً في المصدر الذي لا وجود له فيه.
             const kind = prev ? 'new' : 'patch'
@@ -5081,20 +5165,19 @@ export default {
             for (const raw of rows) {
               const r = raw as Record<string, unknown>
               const models = Array.isArray(r.compatibleModels)
-                ? (r.compatibleModels as unknown[])
-                    .map(m => String(m).trim().toLowerCase()).filter(Boolean)
-                : String(r.compatibleModels ?? '').split(/[,،\n]/)
-                    .map(m => m.trim().toLowerCase()).filter(Boolean)
-              const kind = String(r.componentType ?? '').trim().toUpperCase()
-              const sub = String(r.subCategory ?? '').trim()
+                ? sanitizeModels(r.compatibleModels)
+                : splitModelLines(r.compatibleModels)
+              // النوع يُتحقق منه مقابل الأنواع المعروفة ومنها ما أضافه المالك،
+              // وكان قبلها يُقبل أي نصّ فيُخزَّن نوع لا وجود له.
+              const kind = await assertCompatType(env, brandFile, String(r.componentType ?? ''))
+              const sub = String(r.subCategory ?? '').trim().slice(0, COMPAT_MAX_SUB_LEN)
               if (!models.length) throw new HttpError(400, 'لا موديلات في أحد الصفوف')
-              if (!kind) throw new HttpError(400, 'نوع القطعة مطلوب في كل صف')
               const id = `new_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`
               await put(id, 'new', {
                 compatibleModels: models,
                 componentType: kind,
                 subCategory: { name: sub || kind },
-                note: String(r.note ?? ''),
+                note: String(r.note ?? '').trim().slice(0, COMPAT_MAX_NOTE_LEN),
               }, false)
               made.push(id)
             }

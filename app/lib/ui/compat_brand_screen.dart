@@ -232,16 +232,10 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         : [...base, current];
   }
 
-  Future<void> _ownerAddRow() => _ownerAdd(wholeSpec: false);
+  Future<void> _ownerAddRow() => _ownerAdd();
 
-  /// إضافة صنف كامل لشركة: اسم الصنف ثم كل موديلاته في نصّ واحد، فيُضاف
-  /// الصفّ الواحد باسم الصنف نفسه، جاهزاً للبحث فوراً.
-  Future<void> _ownerAddSpec() => _ownerAdd(wholeSpec: true);
-
-  /// نموذج الإضافة الوحيد. صفٌّ عادي وصنف كامل يختلفان في الشرح وسطور
-  /// الإدخال فقط — الجوهر واحد (موديلات + نوع + وصف)، فمصدر واحد أرحم من
-  /// نموذجين ينحرفان عن بعضهما عند أول تعديل.
-  Future<void> _ownerAdd({required bool wholeSpec}) async {
+  /// نموذج الإضافة الوحيد.
+  Future<void> _ownerAdd() async {
     final models = TextEditingController();
     final sub = TextEditingController();
     var chosen = _type ?? CompatTypeMeta.orderedTypes.first;
@@ -251,35 +245,32 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => AlertDialog(
           backgroundColor: XTheme.surface,
-          title: Text(wholeSpec ? 'إضافة صنف كامل' : 'إضافة صفّ توافق',
-              style: const TextStyle(
+          title: const Text('إضافة صفّ توافق',
+              style: TextStyle(
                   fontWeight: FontWeight.w900, fontSize: 16)),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text(
-                wholeSpec
-                    ? 'اكتب كل موديلات الصنف — سطر لكل موديل — فتُضاف كصفّ واحد '
-                        'باسم الصنف نفسه، جاهزة للبحث فوراً.'
-                    : 'اكتب موديلات الصفّ — سطر لكل موديل — فيظهر فوراً في نتائج البحث.',
-                style: const TextStyle(fontSize: 11.5, color: Colors.white60),
+              const Text(
+                'اكتب موديلاً في كل سطر — والنزول للأسفل يعني موديلات أكثر. '
+                'الفاصلة ليست فاصلاً: احتفظ بها إن كانت جزءاً من الاسم.',
+                style: TextStyle(fontSize: 11.5, color: Colors.white60),
               ),
               const SizedBox(height: 10),
               TextField(
                 controller: models,
-                maxLines: wholeSpec ? 6 : 4,
+                maxLines: 6,
+                minLines: 3,
                 autofocus: true,
                 decoration: const InputDecoration(
                   labelText: 'الموديلات المتوافقة',
-                  helperText: 'سطر لكل موديل، أو افصل بفاصلة',
+                  helperText: 'سطر لكل موديل',
                 ),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: sub,
-                decoration: InputDecoration(
-                    labelText: wholeSpec
-                        ? 'اسم الصنف / النوع الفرعي (اختياري)'
-                        : 'الوصف / النوع الفرعي (اختياري)'),
+                decoration: const InputDecoration(
+                    labelText: 'الوصف / النوع الفرعي (اختياري)'),
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
@@ -298,10 +289,8 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 child: const Text('إلغاء')),
             FilledButton(
               onPressed: () async {
-                final list = models.text
-                    .split(RegExp(r'[,،\n]'))
-                    .map((e) => e.trim().toLowerCase())
-                    .where((e) => e.isNotEmpty)
+                final list = splitModelLines(models.text)
+                    .map((e) => e.toLowerCase())
                     .toList();
                 if (list.isEmpty) return;
                 try {
@@ -339,7 +328,9 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   Future<void> _ownerEditRow(CompatRecord r) async {
-    final models = TextEditingController(text: r.models.join('، '));
+    // الفصل بسطر لا بفاصلة، أسوةً بنموذج الإضافة: الفاصلة قد تكون جزءاً من
+    // اسم الموديل نفسه.
+    final models = TextEditingController(text: r.models.join('\n'));
     final sub = TextEditingController(text: r.subCategory ?? '');
     final initial = r.componentType.toUpperCase();
     var chosen = initial;
@@ -355,11 +346,12 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               TextField(
                 controller: models,
-                maxLines: 4,
+                maxLines: 6,
+                minLines: 3,
                 autofocus: true,
                 decoration: const InputDecoration(
                   labelText: 'الموديلات المتوافقة',
-                  helperText: 'سطر لكل موديل، أو افصل بفاصلة',
+                  helperText: 'سطر لكل موديل',
                 ),
               ),
               const SizedBox(height: 12),
@@ -385,10 +377,8 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 child: const Text('إلغاء')),
             FilledButton(
               onPressed: () async {
-                final list = models.text
-                    .split(RegExp(r'[,،\n]'))
-                    .map((e) => e.trim().toLowerCase())
-                    .where((e) => e.isNotEmpty)
+                final list = splitModelLines(models.text)
+                    .map((e) => e.toLowerCase())
                     .toList();
                 if (list.isEmpty) return;
                 try {
@@ -659,15 +649,6 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                         label: const Text('إضافة صفّ', style: TextStyle(fontSize: 12.5)),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: _ownerAddSpec,
-                        icon: const Icon(Icons.playlist_add, size: 18),
-                        label: const Text('إضافة صنف كامل',
-                            style: TextStyle(fontSize: 12.5)),
-                      ),
-                    ),
                   ]),
                 ],
               ],
@@ -715,13 +696,24 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             Wrap(
               spacing: 7,
               runSpacing: 7,
-              children: models.map((m) => _modelChip(m, meta)).toList(),
+              children: models
+                  .map((m) => _modelChip(m, meta, row: _isOwner ? r : null))
+                  .toList(),
             ),
-            // أدوات المالك على الصفّ نفسه: تعديل وحذف في موضعهما الطبيعي
-            // بجانب البيانات التي يعدّلها، بلا تبويب منفصل.
+            // أدوات المالك على الصفّ نفسه: إضافة نصّ وتعديل وحذف في موضعها
+            // الطبيعي بجانب البيانات، بلا تبويب منفصل.
             if (_isOwner) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Row(children: [
+                TextButton.icon(
+                  onPressed: () => _ownerAddModel(r),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('إضافة نصّ', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    foregroundColor: meta.color,
+                  ),
+                ),
                 const Spacer(),
                 TextButton.icon(
                   onPressed: () => _ownerEditRow(r),
@@ -750,11 +742,14 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   /// رقاقة موديل — يُبرَز الجزء المطابق لكلمة البحث.
-  Widget _modelChip(String m, CompatTypeMeta meta) {
+  ///
+  /// للمالك تظهر × على الرقاقة نفسها فيحذف ذلك النصّ وحده من الصفّ، بلا
+  /// فتح نموذج ولا مساس ببقية الموديلات.
+  Widget _modelChip(String m, CompatTypeMeta meta, {CompatRecord? row}) {
     final q = normalizeModel(_query);
     final hit = q.isNotEmpty && normalizeModel(m).contains(q);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    final chip = Container(
+      padding: EdgeInsets.fromLTRB(12, 7, row == null ? 12 : 7, 7),
       decoration: BoxDecoration(
         color: hit ? meta.color.withOpacity(.22) : meta.color.withOpacity(.08),
         borderRadius: BorderRadius.circular(11),
@@ -762,9 +757,136 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             color: meta.color.withOpacity(hit ? .60 : .18),
             width: hit ? 1.3 : 1),
       ),
-      child: Text.rich(_highlighted(m, q, meta),
-          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Text.rich(_highlighted(m, q, meta),
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+        if (row != null) ...[
+          const SizedBox(width: 2),
+          // هدف لمس صغير فعلاً — أيقونة 15 داخل حشو 4 — فتُخطئ الضغطة أقل
+          // قدر ممكن على شاشة ازدحام الرقاقات.
+          InkWell(
+            onTap: () => _ownerRemoveModel(row, m),
+            borderRadius: BorderRadius.circular(9),
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: Icon(Icons.close_rounded,
+                  size: 15, color: meta.color.withOpacity(.85)),
+            ),
+          ),
+        ],
+      ]),
     );
+    return chip;
+  }
+
+  /// يحذف موديلاً واحداً من صفّ.
+  ///
+  /// لو كان آخر موديل لم يبقَ ما يُبحث فيه، فيُحذف الصفّ نفسه — والخادم
+  /// يرفض قائمة موديلات فارغة، فترك الصفّ فارغاً كان سيفشل بصمت.
+  Future<void> _ownerRemoveModel(CompatRecord r, String model) async {
+    final left = r.models.where((m) => m != model).toList();
+    final last = left.isEmpty;
+    final ok = await _confirm(
+        'حذف «$model» من الصفّ؟',
+        last
+            ? 'هذا آخر نصّ في الصفّ، فيُحذف الصفّ كاملاً لأنه لن يبقى فيه ما يُبحث.'
+            : 'يُحذف هذا النصّ وحده ويبقى بقية الصفّ كما هو.');
+    if (!ok) return;
+    try {
+      if (last) {
+        await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: r.id);
+      } else {
+        await widget.api.ownerCompatPatch(
+          brand: widget.brand.ref,
+          id: r.id,
+          fields: {'compatibleModels': left},
+        );
+      }
+      await _ownerRefresh();
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
+  }
+
+  /// يُضيف نصّاً إلى الصفّ القائم داخل السياق الذي يراه المالك.
+  Future<void> _ownerAddModel(CompatRecord r) async {
+    final c = TextEditingController();
+    final added = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        title: const Text('إضافة نصّ إلى الصفّ',
+            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+        content: TextField(
+          controller: c,
+          maxLines: 4,
+          minLines: 1,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'الموديل الجديد',
+            helperText: 'سطر لكل موديل إن أضفت أكثر من واحد',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+            onPressed: () async {
+              final add = splitModelLines(c.text).map((e) => e.toLowerCase());
+              if (add.isEmpty) return;
+              // الدمج في العميل يحفظ النصّ الأصلي للمالك ويرسل القائمة
+              // النهائية مرة واحدة، فلا يعتمد على دمج الخادم وحده.
+              final list = <String>[...r.models];
+              for (final m in add) {
+                if (!list.any((e) => normalizeModel(e) == normalizeModel(m))) {
+                  list.add(m);
+                }
+              }
+              try {
+                await widget.api.ownerCompatPatch(
+                  brand: widget.brand.ref,
+                  id: r.id,
+                  fields: {'compatibleModels': list},
+                );
+                if (ctx.mounted) Navigator.pop(ctx, true);
+              } on ApiException catch (e) {
+                if (ctx.mounted) {
+                  ScaffoldMessenger.of(ctx)
+                      .showSnackBar(SnackBar(content: Text(e.message)));
+                }
+              }
+            },
+            child: const Text('إضافة'),
+          ),
+        ],
+      ),
+    );
+    if (added == true) await _ownerRefresh();
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        title: Text(title,
+            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15.5)),
+        content: Text(body, style: const TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('تأكيد')),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   TextSpan _highlighted(String text, String q, CompatTypeMeta meta) {
@@ -815,12 +937,6 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             onPressed: _ownerAddRow,
             icon: const Icon(Icons.add, size: 18),
             label: const Text('إضافة صفّ'),
-          ),
-          const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: _ownerAddSpec,
-            icon: const Icon(Icons.playlist_add, size: 18),
-            label: const Text('إضافة صنف كامل'),
           ),
         ],
       ]),

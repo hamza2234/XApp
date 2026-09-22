@@ -19,6 +19,20 @@ String normalizeModel(String raw) => raw
     .trim()
     .toLowerCase();
 
+/// يفصل نصّ الموديلات إلى قائمة. الفاصل هو السطر الجديد وحده.
+///
+/// الفاصلة ليست فاصلاً لأن أسماء كثيرة تحملها أصلاً (`Redmi Note 8, 8 Pro`)
+/// فكانت تنشقّ إلى موديلين وهميين. ولهذا أيضاً لا تُزال الفاصلة من الاسم:
+/// حذفها يغيّر ما كتبه المالك.
+///
+/// القسمة على أي محرف فاصل في Unicode (`\n`, `\r`, `\u2028`, `\u2029`,
+/// `\u0085`) — وإلا مرّ سطر يحمل `U+2028` كسطر واحد فيُخزَّن مبتوراً.
+List<String> splitModelLines(String raw) => raw
+    .split(RegExp(r'[\n\r\u2028\u2029\u0085]'))
+    .map((e) => e.replaceAll('\u200b', '').trim())
+    .where((e) => e.isNotEmpty)
+    .toList();
+
 class CompatCatalog {
   CompatCatalog(this.records) {
     for (final r in records) {
