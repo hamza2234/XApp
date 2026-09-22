@@ -34,3 +34,6 @@ app/android/local.properties
 app/android/app/.cxx/
 app/android/.gradle/
 dist/
+
+# نسخ قاعدة البيانات الحيّة: بيانات مستخدمين حقيقية — لا تُرفع أبداً
+backups/
