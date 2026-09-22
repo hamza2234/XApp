@@ -450,6 +450,12 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 const BorderRadius.vertical(top: Radius.circular(26)),
           ),
           padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
+          // ارتفاع أقصى صريح: بلا سقف يدفع المحتوى الطويل النافذة خارج الشاشة،
+          // وبلا حدّ أدنى تنكمش حين يكون المحتوى قصيراً. كلاهما لا يترك مجالاً
+          // للتمرير فيظهر جزء فارغ أسود.
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * .92,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

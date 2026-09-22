@@ -232,24 +232,34 @@ class _GiftScreenState extends State<GiftScreen>
 
   @override
   Widget build(BuildContext context) {
+    // `SingleChildScrollView` لا `ListView`: الشاشة تُعرض في سياقين — تبويباً
+    // له ارتفاع محدود، وداخل نافذة سفلية في `Column` بارتفاع أدنى. القائمة
+    // في السياق الثاني ترمي «Vertical viewport was given unbounded height»
+    // فيفشل البناء كله وتظهر النافذة سوداء فارغة. هذا اللفّ يعمل في الحالتين:
+    // يتقلّص لطول المحتوى حين يكون الارتفاع غير محدود، ويتمدّد ويمرّر حين
+    // يكون محدوداً.
     return SafeArea(
-      child: ListView(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
-        children: [
-          _header(),
-          const SizedBox(height: 22),
-          Center(child: _wheel()),
-          const SizedBox(height: 22),
-          _statusCard(),
-          const SizedBox(height: 14),
-          _claimButton(),
-          if (_claimed && widget.nextAt > 0) ...[
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _header(),
+            const SizedBox(height: 22),
+            Center(child: _wheel()),
+            const SizedBox(height: 22),
+            _statusCard(),
+            const SizedBox(height: 14),
+            _claimButton(),
+            if (_claimed && widget.nextAt > 0) ...[
+              const SizedBox(height: 18),
+              _countdown(),
+            ],
             const SizedBox(height: 18),
-            _countdown(),
+            _notes(),
           ],
-          const SizedBox(height: 18),
-          _notes(),
-        ],
+        ),
       ),
     );
   }

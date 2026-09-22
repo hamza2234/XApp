@@ -138,6 +138,7 @@ interface Env {
   SCHEMATICS: R2Bucket
   XMEDIA: R2Bucket
   XLEARN: R2Bucket
+  RELEASES: R2Bucket
   X_JWT_SECRET: string
   X_SIG_SECRET: string
   X_OWNER_KEY: string
@@ -277,7 +278,7 @@ const DEFAULT_SETTINGS: XSettings = {
   ],
   // نص افتراضي مفهوم بلغة واضحة. المالك يستبدله من لوحته، ووجوده هنا يضمن
   // ألا يظهر للمستخدم صندوق فارغ إن لم يكتب المالك نصاً بعد.
-  privacyPolicy: `نحن في MAPX نحترم خصوصيتك ونوضح لك بلغة بسيطة ما نجمعه ولماذا.
+  privacyPolicy: `نحن في PhoneX نحترم خصوصيتك ونوضح لك بلغة بسيطة ما نجمعه ولماذا.
 ما نجمعه:
 • معرّف الجهاز: رقم مشتق من جهازك، نستخدمه لربط حسابك بجهازك ومنحك حصتك اليومية. لا يمكن من خلاله معرفة هويتك.
 • عنوان الإنترنت (IP): نستخدمه لحماية التطبيق من الهجمات والاستخدام الآلي المسيء.
@@ -316,7 +317,7 @@ const DEFAULT_SETTINGS: XSettings = {
   // الأكثر تقييداً حتى يقرر المالك خلافه.
   chatWriteScope: 'registered',
   chatMediaScope: 'subscribers',
-  chatMaxMediaMb: 12,
+  chatMaxMediaMb: 200,
   chatMediaSeconds: 120,
   chatPollMs: 4000,
 }
@@ -370,7 +371,7 @@ function normalizeSettings(s: XSettings, raw: Partial<XSettings>): XSettings {
   // الحدّ الأعلى 200MB لا 25: الرفع على أجزاء داخل R2 فلا سقف تقني عند 25
   // (سقف R2 نفسه 5TiB و10,000 جزء)، و25 كانت تكفي مقطعاً قصيراً فقط. يبقى
   // حدّاً يمنع تحويل الدلو إلى مزبلة ملفات ويراعي بيانات مستخدمي الجوال.
-  s.chatMaxMediaMb = Math.max(1, Math.min(200, Math.floor(Number(s.chatMaxMediaMb) || 12)))
+  s.chatMaxMediaMb = Math.max(25, Math.min(200, Math.floor(Number(s.chatMaxMediaMb) || 200)))
   s.chatMediaSeconds = Math.max(5, Math.min(300, Math.floor(Number(s.chatMediaSeconds) || 120)))
   // دور التحديث: أقل من ثانيتين يرهق الخادم، وأكثر من 30 يعني دردشة بطيئة.
   s.chatPollMs = Math.max(2000, Math.min(30000, Math.floor(Number(s.chatPollMs) || 4000)))
@@ -750,21 +751,33 @@ async function authenticate(env: Env, request: Request): Promise<{ caller: Calle
 /** بوابة الإصدارات — تُعيد استجابة 426 غنية (رسالة+صورة+زر) أو null إن مسموح */
 function versionGate(request: Request, settings: XSettings): Response | null {
   const v = versionOf(request)
-  if (v <= 0) return null
+  // ترويسة غائبة أو غير مقروءة تعني عميلاً لا يعرف البوابة أصلاً. كان
+  // يُقبل لأن `v <= 0`، وهذا بالضبط سبب عمل الإصدار 1 رغم رفع الحدّ الأدنى
+  // إلى 2: حذف الترويسة كان يتجاوز البوابة كلها. ما دام المالك قد فعّل
+  // حدّاً أدنى (> 1)، فغياب الترويسة حجب لا سماح.
+  if (v <= 0) {
+    if (settings.minVersion <= 1) return null
+    return blockedResponse(settings)
+  }
   if (v < settings.minVersion || settings.blockedVersions.includes(v)) {
-    return json({
-      ok: false,
-      error: 'إصدار التطبيق غير مدعوم — حدّث التطبيق',
-      status: 426,
-      update: {
-        required: true,
-        message: settings.updateMessage,
-        url: settings.updateUrl,
-        imageUrl: settings.updateImageUrl
-      }
-    }, 426)
+    return blockedResponse(settings)
   }
   return null
+}
+
+/** استجابة 426 الموحّدة — نفس الشكل في مسار غياب الترويسة ومسار الإصدار الأقدم */
+function blockedResponse(settings: XSettings): Response {
+  return json({
+    ok: false,
+    error: 'إصدار التطبيق غير مدعوم — حدّث التطبيق',
+    status: 426,
+    update: {
+      required: true,
+      message: settings.updateMessage,
+      url: settings.updateUrl,
+      imageUrl: settings.updateImageUrl
+    }
+  }, 426)
 }
 
 /**
@@ -1516,7 +1529,12 @@ function videoView(v: any, unlocked: boolean, hidden = false) {
     thumbUrl: v.thumb_key ? `/v1/learn/thumb/${v.id}` : '',
   }
   // الرابط لا يُبنى إلا لفيلم مباح — لا وجود له في ردّ المقفل إطلاقاً.
-  return canPlay ? { ...base, streamUrl: `/v1/learn/stream/${v.id}` } : base
+  // `streamUrl` هو المصدر الوحيد: الخادم يفكّ AES-CTR قطعةً قطعة ويدعم
+  // Range، فالمشغّل يبثّ هذه المسافة مباشرة ويرجّع موضعه بلا تنزيل الملف
+  // كاملاً. لا مسار ثانٍ ولا ملف وسيط عند العميل.
+  return canPlay
+    ? { ...base, streamUrl: `/v1/learn/stream/${v.id}` }
+    : base
 }
 
 /** يبني قائمة الدورات مع فلترة ما هو معروض للعميل حسب استحقاقه.
@@ -2286,6 +2304,25 @@ export default {
       if (!['GET', 'POST', 'PUT', 'DELETE'].includes(request.method)) throw new HttpError(405, 'method not allowed')
       if (path === '/health') return json({ ok: true, ts: Date.now() })
 
+      // تنزيل حِزم الإصدارات — عام بلا توقيع ولا جلسة، وبلا فحص حظر.
+      //
+      // لماذا؟ من يرى شاشة «حدّث التطبيق» قد يكون محجوباً أو جهازه محظوراً،
+      // وهو أحوج الناس إلى الرابط. ولأن التنزيل يجري من متصفح لا من التطبيق
+      // فلا توقيع فيه أصلاً. الحماية هنا في اسم الملف المسموح وحده: لا مسارات
+      // ولا مجلدات، فلا يمكن استخدامه للوصول إلى مفاتيح أخرى في الدلو.
+      if (path === '/download/PhoneX.apk' || path === '/download') {
+        const name = 'PhoneX-v2.0.1.apk'
+        const obj = await env.RELEASES.get(name)
+        if (!obj) throw new HttpError(404, 'الحزمة غير متوفرة')
+        return new Response(obj.body, {
+          headers: {
+            'Content-Type': 'application/vnd.android.package-archive',
+            'Content-Disposition': `attachment; filename="${name}"`,
+            'Cache-Control': 'public, max-age=300'
+          }
+        })
+      }
+
       if (BLOCKED_UA.test(request.headers.get('user-agent') ?? '')) throw new HttpError(403, 'forbidden')
       // مسارات المالك وتسجيل الدخول معفاة من فحص الحظر: بدون ذلك يبقى
       // المالك خارج تطبيقه نهائياً إذا حُظر جهازه أو عنوانه (نقرة خاطئة على
@@ -2683,12 +2720,24 @@ export default {
         // صادقاً من أول تحميل، ومنه أيضاً نعرف متى تُفتح هديّة الغد.
         const giftAmount = Math.max(0, Math.min(1000,
           Math.floor(Number(settings.dailyGiftAmount) || 0)))
-        const giftTaken = giftAmount > 0 && !!(await env.XDB.prepare(
+        // لحظة الفتح تُقرأ من صفّ المحفظة. بلا هذا كان العدّاد يشير إلى منتصف
+        // الليل بينما الاستلام الفعلي بعد 24 ساعة من الاستلام — فرق يصل إلى
+        // 24 ساعة بين ما يعرضه العدّاد وما يقبله الخادم.
+        const giftRow = giftAmount > 0
+          ? await env.XDB.prepare(
+              'SELECT next_at FROM x_gift_claims WHERE wallet = ?1'
+            ).bind(fp).first<{ next_at: number }>()
+          : null
+        // قاعدة لم تُحدَّث بعد لا تحمل الصفّ: نرجع لفحص اليوم التقويمي كي لا
+        // يظهر الزر متاحاً ثم يردّ الخادم 409.
+        const legacyTaken = giftRow ? false : !!(await env.XDB.prepare(
           "SELECT 1 AS t FROM x_quota_daily WHERE uid = ?1 AND day = ?2 AND kind = 'gift'"
         ).bind(fp, today()).first())
-        // بداية يوم الغد بتوقيت UTC — نفس أساس `today()`، فالعدّاد يطابق
-        // اللحظة التي يفتح فيها الخادم هديّة جديدة.
-        const dayEnd = Date.parse(today() + 'T00:00:00.000Z') + 86400000
+        const nextAt = giftRow
+          ? Number(giftRow.next_at)
+          : Date.parse(today() + 'T00:00:00.000Z') + 86400000
+        const giftTaken = giftAmount > 0 &&
+          (giftRow ? Number(giftRow.next_at) > Date.now() : legacyTaken)
         return json({
           user: {
             id: caller.uid, role: caller.role,
@@ -2719,7 +2768,7 @@ export default {
           // المالك يُستثنى لأن رصيده مفتوح أصلاً ولا معنى للهديّة عنده.
           gift: caller.role === 'owner'
             ? { amount: 0, claimed: true, nextAt: 0 }
-            : { amount: giftAmount, claimed: giftTaken, nextAt: dayEnd }
+            : { amount: giftAmount, claimed: giftTaken, nextAt }
         })
       }
 
@@ -3559,14 +3608,48 @@ export default {
         if (amount <= 0) {
           return json({ ok: false, error: 'الهديّة معطّلة حالياً', status: 403 }, 403)
         }
-        // الحجز ذرّي: INSERT..ON CONFLICT مشروط بيوم واحد لكل محفظة، فطلبان
-        // متزامنان لا يمنحان الهديّة مرتين.
-        const claim = await env.XDB.prepare(
-          `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'gift', ?3)
-           ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + ?3 WHERE 0
-           RETURNING used`
-        ).bind(fp, today(), amount).first<{ used: number }>()
-        if (!claim) {
+        // الحجز ذرّي على صفّ المحفظة وحده: الشرط `next_at <= now` داخل UPDATE
+        // يعني أن طلبين متزامنين لا يمنحان الهديّة مرتين — الثاني لا يجد صفاً
+        // يُحدَّث فيفشل بلا منح.
+        //
+        // النافذة 24 ساعة من لحظة الاستلام لا يوم تقويمي: مع مفتاح اليوم كان
+        // من يستلم الساعة 23:00 يفقد هديّته بعد ساعة، ومن يستلم 00:05 يُمنع
+        // 24 ساعة — أي هديّتان في يوم واحد أو واحدة في يومين حسب التوقيت.
+        const nowMs = Date.now()
+        const nextMs = nowMs + DAY
+        let claimed = false
+        try {
+          // محاولة تحديث صفّ قائم انتهت مهلته.
+          const upd = await env.XDB.prepare(
+            `UPDATE x_gift_claims SET last_at = ?2, next_at = ?3, updated_at = ?4
+             WHERE wallet = ?1 AND next_at <= ?5
+             RETURNING wallet`
+          ).bind(fp, nowMs, nextMs, new Date(nowMs).toISOString(), nowMs)
+            .first<{ wallet: string }>()
+          if (upd) claimed = true
+          else {
+            // لا صفّ أصلاً = أول استلام. الإدخال يفشل إن سبقه طلب متزامن،
+            // فيبقى المنح مرة واحدة.
+            const ins = await env.XDB.prepare(
+              `INSERT INTO x_gift_claims (wallet, last_at, next_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4)
+               ON CONFLICT(wallet) DO NOTHING
+               RETURNING wallet`
+            ).bind(fp, nowMs, nextMs, new Date(nowMs).toISOString())
+              .first<{ wallet: string }>()
+            if (ins) claimed = true
+          }
+        } catch {
+          // الجدول غير موجود بعد على قاعدة لم تُحدَّث: لا نُسقط الاستلام،
+          // ونرجع للمفتاح اليومي كي تبقى الهديّة تعمل بلا انقطاع.
+          const fallback = await env.XDB.prepare(
+            `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'gift', ?3)
+             ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + ?3 WHERE 0
+             RETURNING used`
+          ).bind(fp, today(), amount).first<{ used: number }>()
+          claimed = !!fallback
+        }
+        if (!claimed) {
           return json({ ok: false, error: 'حصلت على هديّة اليوم بالفعل', status: 409 }, 409)
         }
         // الإيداع في المحفظة الحقيقية: مشترك في رصيده، وزائر في محفظته.
@@ -3590,7 +3673,7 @@ export default {
         }
         await logSecurity(env, request, 'gift_claim', `amount=${amount} role=${caller.role}`)
         return json({
-          ok: true, amount, balance,
+          ok: true, amount, balance, nextAt: nextMs,
           message: `حصلت على ${amount} عملة هديّة اليوم`,
         })
       }
@@ -3733,13 +3816,17 @@ export default {
         const mime = video.mime || 'video/mp4'
 
         /**
-         * التشفير على دفعات، لا الملف كاملاً في الذاكرة.
+         * فكّ التشفير هنا، لا في المشغّل.
          *
-         * الفيديو قد يبلغ مئات الميغابايت، وجلبه كاملاً قد يُنهي عامل الـWorker
-         * بحدّ الذاكرة. AES-CTR دفقية: كل قطعة تُشفّر بعدّاد يزحف بعدد الكتل
-         * السابقة، فالقطع المتسلسلة تُفكّ في التطبيق كملف واحد متصل.
+         * السبب: `video_player` لا يفكّ AES-CTR، والحلّ السابق كان تنزيل الملف
+         * كاملاً ثم فكّه وحفظه عند العميل — أي كاش كامل بالميغابايت يخالف
+         * المطلوب. بفكّه على الخادم تُخدم البايتات الأصلية مباشرة بدعم Range،
+         * فيبثّ المشغّل نفسه من هذه النقطة ويرجّع موضعه بلا أي ملف وسيط.
+         *
+         * لا تُرسل ترويسات `x-enc` إطلاقاً: العميل يفترض نصّاً عادياً الآن.
+         * النوع `video/mp4` صريح كي يعرف المشغّل أنه مقطع مباشر فيبدأ فوراً.
          */
-        const CHUNK = 1024 * 1024          // مضاعف لـ16 بايت: لا كتلة مشقوقة
+        const CHUNK = 64 * 1024            // 64KB: مضاعف لـ16 بايت ولا شقّ لكتلة
         const key = await fileCryptoKey(env)
 
         async function chunkAt(offset: number, len: number): Promise<Uint8Array> {
@@ -3752,8 +3839,8 @@ export default {
             range: { offset: aligned, length: lead + len }
           })
           if (!range?.body) return new Uint8Array(0)
-          // عدّاد القطعة = nonce + (offset / 16) — نفس عدّاد التطبيق لو قرأ
-          // الملف متصلاً، لذا تُفكّ القطع في العميل بلا أي تعديل.
+          // عدّاد القطعة = nonce + (offset / 16) — المشتقّ من الإزاحة المطلقة،
+          // فكل قطعة تُفكّ مستقلة عن سابقاتها وهذا ما يجعل Range ممكناً.
           const ctr = new Uint8Array(nonce)
           ctr.fill(0, 8)
           let carry = BigInt(aligned / 16)
@@ -3761,10 +3848,10 @@ export default {
             ctr[i] = Number(carry & 0xffn)
             carry >>= 8n
           }
-          const enc = await crypto.subtle.encrypt(
+          const dec = await crypto.subtle.decrypt(
             { name: 'AES-CTR', counter: ctr, length: 64 },
             key, await range.arrayBuffer())
-          const out = new Uint8Array(enc)
+          const out = new Uint8Array(dec)
           return lead > 0 ? out.subarray(lead) : out
         }
 
@@ -3813,10 +3900,9 @@ export default {
           : await chunkAt(start, span)
 
         const headers = new Headers({
-          'content-type': 'application/octet-stream',
-          'x-enc': 'aes-ctr',
-          'x-enc-nonce': [...nonce].map(b => b.toString(16).padStart(2, '0')).join(''),
-          'x-orig-type': mime,
+          // النوع الأصلي صريحاً: `application/octet-stream` كان يجعل المشغّل
+          // لا يعرف أنه مقطع فيرفض البدء. القيمة تكشف نوع الوسائط لا محتواها.
+          'content-type': mime,
           // المشغّل يطلب قطعاً متتابعة، وهذا ما يجعله يستأنف من موضعه بلا
           // إعادة تنزيل ما شاهده. `no-store` كي لا يُخزَّن النصّ المخصّص.
           'accept-ranges': 'bytes',
@@ -3967,8 +4053,8 @@ export default {
               ? String(body.chatWriteScope) : settings.chatWriteScope,
             chatMediaScope: ['subscribers', 'none'].includes(String(body.chatMediaScope))
               ? String(body.chatMediaScope) : settings.chatMediaScope,
-            chatMaxMediaMb: Math.max(1, Math.min(200,
-              Math.floor(Number(body.chatMaxMediaMb ?? settings.chatMaxMediaMb) || 12))),
+            chatMaxMediaMb: Math.max(25, Math.min(200,
+              Math.floor(Number(body.chatMaxMediaMb ?? settings.chatMaxMediaMb) || 200))),
             chatMediaSeconds: Math.max(5, Math.min(300,
               Math.floor(Number(body.chatMediaSeconds ?? settings.chatMediaSeconds) || 120))),
             chatPollMs: Math.max(2000, Math.min(30000,
@@ -4352,7 +4438,7 @@ export default {
           // بلا انتظار: نشر الإعلان يجب أن يعود فوراً ولو حمّل الإرسال ثواني.
           ctx.waitUntil(pushToAll(env, {
             title: body.title.trim(),
-            body: body.subtitle?.trim() || 'إعلان جديد من MAPX',
+            body: body.subtitle?.trim() || 'إعلان جديد من PhoneX',
             target: { k: 'ad' },
           }).catch(() => 0))
           return sealed({ ok: true, id, imageUrl, pushed: pushEnabled(env) })
@@ -4704,6 +4790,239 @@ export default {
             .bind(videoDel[1]).run()
           await logSecurity(env, request, 'owner_learn_video_delete', `id=${videoDel[1]}`)
           return sealed({ ok: true })
+        }
+
+        // ---------- تحرير التوافقات (للمالك) ----------
+        //
+        // السجلات تأتي من المرآة للقراءة فقط ولا تُمسّ. كل تحرير يُحفظ في
+        // `x_compat_edits` كطبقة فوقها: `patch` تعديل سجل قائم، `new` سجل
+        // جديد كتبه المالك، `cat` صفة/نوع فرعي. الحذف لا يمسح المصدر أيضاً —
+        // يُعلَّم `deleted` فيُخفى من نتائج البحث ويبقى قابلاً للاسترجاع.
+        //
+        // القائمة تعرض السجل بعد تطبيق التعديلات، فيرى المالك ما يراه
+        // المستخدم لا الصفّ الخام.
+
+        /** يطبّق تعديلات المالك على سجل مصدر واحد. */
+        const applyEdit = (
+          docKey: string, fields: Record<string, unknown>,
+          edits: Map<string, any>
+        ): Record<string, unknown> | null => {
+          const e = edits.get(docKey)
+          if (!e || e.deleted) return e?.deleted ? null : fields
+          try {
+            const patch = JSON.parse(e.data) as Record<string, unknown>
+            return { ...fields, ...patch }
+          } catch {
+            return fields
+          }
+        }
+
+        const compatEditsMap = async (brandFile?: string) => {
+          const rows = brandFile
+            ? await env.XDB.prepare(
+                'SELECT doc_key, data, deleted FROM x_compat_edits WHERE brand_file = ?1'
+              ).bind(brandFile).all<any>()
+            : await env.XDB.prepare(
+                'SELECT doc_key, data, deleted FROM x_compat_edits'
+              ).all<any>()
+          const m = new Map<string, any>()
+          for (const r of rows.results ?? []) m.set(r.doc_key, r)
+          return m
+        }
+
+        // بحث داخل سجلات شركة — للمالك بلا خصم ولا حدود بحث ضيّقة، لأن
+        // اللوحة تحتاج أن ترى الشركة كاملة لتختار منها ما تعدّله.
+        if (path === '/v1/owner/compat/list' && request.method === 'GET') {
+          const url = new URL(request.url)
+          const brand = (url.searchParams.get('brand') ?? '').trim().slice(0, 80)
+          const q = (url.searchParams.get('q') ?? '').trim().slice(0, 48).toLowerCase()
+          const type = (url.searchParams.get('type') ?? '').trim().slice(0, 24).toUpperCase()
+          if (!brand) throw new HttpError(400, 'brand required')
+
+          // السجلات الخام من المرآة لهذه الشركة (أو صيغة `v_` الافتراضية).
+          let brandFile = brand
+          let keyword: string | undefined
+          if (brand.startsWith('v_')) {
+            const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brand)
+            brandFile = vb?.file ?? brand
+            keyword = vb?.key
+          }
+
+          const res = await mirrorSearchCompat(env.MIRROR, {
+            query: q || ' ', brandFile, keyword,
+            type: type || undefined, limit: 200
+          })
+          const edits = await compatEditsMap(brandFile)
+          const records: any[] = []
+          for (const d of res) {
+            const merged = applyEdit(d.id, d.fields, edits)
+            if (merged) records.push({ id: d.id, edited: edits.has(d.id), ...merged })
+          }
+          // السجلات الجديدة التي كتبها المالك لهذه الشركة: ليست في المرآة
+          // أصلاً، فبلا إضافتها هنا لا يراها المالك بعد إنشائها.
+          const newRows = await env.XDB.prepare(
+            `SELECT doc_key, data FROM x_compat_edits
+             WHERE brand_file = ?1 AND kind = 'new' AND deleted = 0`
+          ).bind(brandFile).all<any>()
+          for (const r of newRows.results ?? []) {
+            try {
+              records.push({ id: r.doc_key, edited: true, isNew: true, ...JSON.parse(r.data) })
+            } catch { /* صفّ تالف لا يُسقط القائمة */ }
+          }
+
+          const types = await cached(env, `ctypes:${brandFile}`, 3600,
+            () => compatTypesOf(env.MIRROR, brandFile))
+          // الأنواع التي أضافها المالك تُضمّ إلى المعروض أيضاً.
+          const catRows = await env.XDB.prepare(
+            `SELECT data FROM x_compat_edits WHERE brand_file = ?1 AND kind = 'cat' AND deleted = 0`
+          ).bind(brandFile).all<any>()
+          const catTypes: string[] = []
+          for (const r of catRows.results ?? []) {
+            try {
+              const t = String(JSON.parse(r.data)?.name ?? '').toUpperCase()
+              if (t && !types.includes(t) && !catTypes.includes(t)) catTypes.push(t)
+            } catch { /* تجاهل */ }
+          }
+          return sealed({
+            records,
+            types: [...types, ...catTypes],
+            knownTypes: [...COMPAT_TYPES, ...catTypes],
+            brand: brandFile
+          })
+        }
+
+        // إنشاء/تعديل وعمليات على صفوف التوافقات — بحسب `op`.
+        //
+        // كتابة واحدة موحّدة بدل مسارات متعدّدة: العمليات الأربع (تعديل صف،
+        // حذف صف، إضافة صفوف، حذف صف جديد) كلها تغيير على طبقة واحدة، ومسار
+        // واحد يبقى مفهوماً ومُدقّقاً.
+        if (path === '/v1/owner/compat/edit' && request.method === 'POST') {
+          const body = await request.json<any>().catch(() => ({}))
+          const op = String(body.op ?? '').trim()
+          const brandFile = String(body.brand ?? '').trim().slice(0, 80)
+          const now = new Date().toISOString()
+
+          const put = async (docKey: string, kind: string, data: unknown, deleted: boolean) =>
+            env.XDB.prepare(
+              `INSERT INTO x_compat_edits (id, doc_key, brand_file, kind, data, deleted, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               ON CONFLICT(id) DO UPDATE SET
+                 data = ?5, deleted = ?6, updated_at = ?7, brand_file = ?3, kind = ?4`
+            ).bind(`ce_${docKey}_${kind}`, docKey, brandFile, kind,
+                   JSON.stringify(data), deleted ? 1 : 0, now).run()
+
+          if (op === 'patch') {
+            const id = String(body.id ?? '').trim().slice(0, 64)
+            const fields = body.fields
+            if (!id || !fields || typeof fields !== 'object') {
+              throw new HttpError(400, 'id و fields مطلوبان')
+            }
+            // الطبقة تُبنى على أي تعديل سابق لنفس الصف: المالك يعدّل حقلين
+            // تباعاً، ولو استُبدل الصف لضاع الأول.
+            const prev = await env.XDB.prepare(
+              'SELECT data FROM x_compat_edits WHERE doc_key = ?1 AND kind = ?2'
+            ).bind(id, 'new').first<{ data: string }>()
+            let merged: Record<string, unknown> = {}
+            if (prev) { try { merged = JSON.parse(prev.data) } catch { /* تجاهل */ } }
+            merged = { ...merged, ...(fields as Record<string, unknown>) }
+            // صف موجود في المرآة → patch، وصف أنشأه المالك → يُحدَّث كـ new
+            // حتى لا ينقلب حذفه وهمياً في المصدر الذي لا وجود له فيه.
+            const kind = prev ? 'new' : 'patch'
+            await put(id, kind, merged, false)
+            await logSecurity(env, request, 'owner_compat_patch', `id=${id} brand=${brandFile}`)
+            return sealed({ ok: true, id, kind })
+          }
+
+          if (op === 'delete') {
+            const id = String(body.id ?? '').trim().slice(0, 64)
+            if (!id) throw new HttpError(400, 'id مطلوب')
+            // صف أنشأه المالك يُحذف فعلياً: لا مصدر تحته ليُعلَّم عليه.
+            const isNew = await env.XDB.prepare(
+              `SELECT 1 x FROM x_compat_edits WHERE doc_key = ?1 AND kind = 'new'`
+            ).bind(id).first<any>()
+            if (isNew) {
+              await env.XDB.prepare('DELETE FROM x_compat_edits WHERE doc_key = ?1')
+                .bind(id).run()
+            } else {
+              const prev = await env.XDB.prepare(
+                `SELECT data FROM x_compat_edits WHERE doc_key = ?1 AND kind = 'patch'`
+              ).bind(id).first<{ data: string }>()
+              await put(id, 'patch', prev ? JSON.parse(prev.data) : {}, true)
+            }
+            await logSecurity(env, request, 'owner_compat_delete', `id=${id} brand=${brandFile}`)
+            return sealed({ ok: true, id })
+          }
+
+          if (op === 'restore') {
+            const id = String(body.id ?? '').trim().slice(0, 64)
+            if (!id) throw new HttpError(400, 'id مطلوب')
+            const prev = await env.XDB.prepare(
+              'SELECT data, kind FROM x_compat_edits WHERE doc_key = ?1'
+            ).bind(id).first<{ data: string; kind: string }>()
+            if (!prev) throw new HttpError(404, 'لا تعديل لهذا الصف')
+            await put(id, prev.kind, JSON.parse(prev.data), false)
+            await logSecurity(env, request, 'owner_compat_restore', `id=${id}`)
+            return sealed({ ok: true, id })
+          }
+
+          if (op === 'add') {
+            // صفوف متعدّدة في نداء واحد: المالك يكتب صفّين تحت بعضهما كما
+            // يكتب قائمة، والنداء الواحد يجعل الإضافة إمّا كلها أو لا شيء.
+            const rows = Array.isArray(body.rows) ? body.rows : []
+            if (!rows.length) throw new HttpError(400, 'rows مطلوبة')
+            if (rows.length > 50) throw new HttpError(400, 'الحد 50 صفاً في المرة')
+            const made: string[] = []
+            for (const raw of rows) {
+              const r = raw as Record<string, unknown>
+              const models = Array.isArray(r.compatibleModels)
+                ? (r.compatibleModels as unknown[])
+                    .map(m => String(m).trim().toLowerCase()).filter(Boolean)
+                : String(r.compatibleModels ?? '').split(/[,،\n]/)
+                    .map(m => m.trim().toLowerCase()).filter(Boolean)
+              const kind = String(r.componentType ?? '').trim().toUpperCase()
+              const sub = String(r.subCategory ?? '').trim()
+              if (!models.length) throw new HttpError(400, 'لا موديلات في أحد الصفوف')
+              if (!kind) throw new HttpError(400, 'نوع القطعة مطلوب في كل صف')
+              const id = `new_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`
+              await put(id, 'new', {
+                compatibleModels: models,
+                componentType: kind,
+                subCategory: { name: sub || kind },
+                note: String(r.note ?? ''),
+              }, false)
+              made.push(id)
+            }
+            await logSecurity(env, request, 'owner_compat_add',
+              `brand=${brandFile} n=${made.length}`)
+            return sealed({ ok: true, ids: made })
+          }
+
+          if (op === 'addType') {
+            const name = String(body.name ?? '').trim().slice(0, 24).toUpperCase()
+            if (!name) throw new HttpError(400, 'اسم النوع مطلوب')
+            await put(`type_${name}`, 'cat', { name }, false)
+            await logSecurity(env, request, 'owner_compat_addtype', `type=${name}`)
+            return sealed({ ok: true, name })
+          }
+
+          throw new HttpError(400, 'عملية غير معروفة')
+        }
+
+        // ملفات الشركات المتاحة للتحرير — مصدرها المرآة نفسها التي يبحث
+        // فيها المستخدمون، فلا تُعرض على المالك شركة لا أثر لها.
+        if (path === '/v1/owner/compat/brands' && request.method === 'GET') {
+          const files = await compatBrandFiles(env.MIRROR)
+          const added = await env.XDB.prepare(
+            `SELECT DISTINCT brand_file f FROM x_compat_edits
+             WHERE brand_file <> '' AND deleted = 0`
+          ).all<{ f: string }>()
+          const set = new Set(files)
+          for (const r of added.results ?? []) set.add(r.f)
+          return sealed({
+            brands: [...set].sort(),
+            subBrands: VIRTUAL_SUB_BRANDS.map(v => ({ key: v.key, name: v.name, file: v.file })),
+            types: [...COMPAT_TYPES]
+          })
         }
 // ── الرفع المُجزَّأ للفيديوهات الكبيرة ──
         //

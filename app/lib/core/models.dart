@@ -567,7 +567,7 @@ class ChatState {
     this.imagesEnabled = true,
     this.writeScope = 'registered',
     this.mediaScope = 'subscribers',
-    this.maxMediaMb = 12,
+    this.maxMediaMb = 200,
     this.mediaSeconds = 120,
     // 7 ثوان لا 4: كل دورة تكلّف طلبين (الرسائل والحالة)، و4 ثوان تضاعف
     // الطلبات بلا فرق محسوس — الرسالة تصل خلال ثوان في الحالتين.
@@ -625,7 +625,7 @@ class ChatState {
       imagesEnabled: j['imagesEnabled'] != false,
       writeScope: j['writeScope']?.toString() ?? 'registered',
       mediaScope: j['mediaScope']?.toString() ?? 'subscribers',
-      maxMediaMb: (j['maxMediaMb'] as num?)?.toInt() ?? 12,
+      maxMediaMb: (j['maxMediaMb'] as num?)?.toInt() ?? 200,
       mediaSeconds: (j['mediaSeconds'] as num?)?.toInt() ?? 120,
       pollMs: (j['pollMs'] as num?)?.toInt() ?? 7000,
       rooms: ((j['rooms'] as List?) ?? const [])

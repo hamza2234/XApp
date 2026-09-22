@@ -287,3 +287,15 @@ CREATE TABLE IF NOT EXISTS x_compat_edits (
 );
 CREATE INDEX IF NOT EXISTS x_compat_edits_doc ON x_compat_edits (doc_key);
 CREATE INDEX IF NOT EXISTS x_compat_edits_brand ON x_compat_edits (brand_file);
+
+-- استلام الهديّة اليوميّة: صفّ واحد لكل محفظة يحمل لحظة الاستلام ولحظة
+-- الفتح التالية. المفتاح هو المحفظة لا اليوم التقويمي: بلحظة الفتح المحفوظة
+-- هنا تُمنح الهديّة بعد 24 ساعة تماماً من الاستلام، فلا تضيع هديّة من استلم
+-- قرب منتصف الليل ولا تُمنع هديّة من استلم بعيداً عنه.
+CREATE TABLE IF NOT EXISTS x_gift_claims (
+  wallet     TEXT PRIMARY KEY,
+  last_at    INTEGER NOT NULL,
+  next_at    INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_gift_claims_next ON x_gift_claims (next_at);

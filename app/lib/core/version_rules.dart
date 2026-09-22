@@ -35,5 +35,12 @@ String? blockWithoutExitError({
   if (updateUrl.trim().isEmpty) {
     return 'ضع رابط التحديث أولاً — بلا رابط لا يستطيع المستخدم فكّ القفل';
   }
+  // الرابط يجب أن يكون قابلاً للتحميل فعلاً. رابط من نسخة قديمة (اسم حزمة
+  // قديم، مسار محذوف) يجعل المستخدم يرى «حدّث التطبيق» ولا يجد ما يحمّله —
+  // وهو أسوأ من عدم الحجب أصلاً.
+  final u = updateUrl.trim();
+  if (!u.startsWith('http://') && !u.startsWith('https://')) {
+    return 'رابط التحديث يجب أن يبدأ بـ http أو https';
+  }
   return null;
 }

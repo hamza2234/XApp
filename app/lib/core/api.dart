@@ -168,6 +168,16 @@ class Api {
   Map<String, String> _signLearn(String method, String pathWithQuery) =>
       _sign(method, pathWithQuery);
 
+  /// عنوان مطلق لمسار بثّ داخل الخادم — تستعمله وكيل الوسائط المحلي.
+  Uri streamUriFor(String path) => _uri(path);
+
+  /// ترويسات موقّعة لمسار بثّ.
+  ///
+  /// التوقيع يحمل طابعاً زمنياً يُرفض بعد 10 دقائق، فلا يصلح ترويسة ثابتة
+  /// تُمرَّر للمشغّل مرة واحدة: التشغيل الطويل ينقطع في المنتصف. يستدعي هذا
+  /// من الوكيل المحلي عند **كل** طلب قطعة، فيبقى التوقيع صالحاً دائماً.
+  Map<String, String> streamHeadersFor(String path) => _signLearn('GET', path);
+
   Uri _uri(String path, [Map<String, String>? query]) {
     final base = Uri.parse(kApiBase);
     return Uri(
@@ -1104,4 +1114,55 @@ class Api {
     if (n.endsWith('.m4v')) return 'video/x-m4v';
     return 'video/mp4';
   }
+
+  // ---------- تحرير التوافقات (للمالك) ----------
+
+  /// الشركات المتاحة للتحرير وأنواع القطع المعروفة.
+  Future<Map<String, dynamic>> ownerCompatBrands() =>
+      ownerGet('/v1/owner/compat/brands');
+
+  /// سجلات شركة بعد تطبيق تعديلات المالك، مع الأنواع المتوفرة فيها.
+  Future<Map<String, dynamic>> ownerCompatList({
+    required String brand,
+    String? q,
+    String? type,
+  }) =>
+      ownerGet('/v1/owner/compat/list', query: {
+        'brand': brand,
+        if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
+        if (type != null && type.isNotEmpty) 'type': type,
+      });
+
+  /// يعدّل صفّاً قائماً. `fields` تُدمج مع أي تعديل سابق لا تستبدله.
+  Future<Map<String, dynamic>> ownerCompatPatch({
+    required String brand,
+    required String id,
+    required Map<String, dynamic> fields,
+  }) =>
+      ownerSend('POST', '/v1/owner/compat/edit',
+          {'op': 'patch', 'brand': brand, 'id': id, 'fields': fields});
+
+  /// يُضيف صفوفاً متعدّدة في نداء واحد — إمّا كلها أو لا شيء.
+  Future<Map<String, dynamic>> ownerCompatAdd({
+    required String brand,
+    required List<Map<String, dynamic>> rows,
+  }) =>
+      ownerSend('POST', '/v1/owner/compat/edit',
+          {'op': 'add', 'brand': brand, 'rows': rows});
+
+  /// يحذف صفّاً (المصدر لا يُمسّ، الحذف قابل للاسترجاع).
+  Future<Map<String, dynamic>> ownerCompatDelete({
+    required String brand,
+    required String id,
+  }) =>
+      ownerSend('POST', '/v1/owner/compat/edit',
+          {'op': 'delete', 'brand': brand, 'id': id});
+
+  /// يُضيف نوع قطعة جديداً للشركة.
+  Future<Map<String, dynamic>> ownerCompatAddType({
+    required String brand,
+    required String name,
+  }) =>
+      ownerSend('POST', '/v1/owner/compat/edit',
+          {'op': 'addType', 'brand': brand, 'name': name});
 }

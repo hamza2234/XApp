@@ -25,6 +25,12 @@ bucket_name = "x-app-media"
 binding = "XLEARN"
 bucket_name = "x-app-learn"
 
+# حِزم الإصدارات المنشورة (APK). القراءة فقط من مسار التنزيل العام؛
+# الرفع يتم من سطر الأوامر وقت البناء فلا يحتاج الـWorker كتابةً عليه.
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "xapp-releases"
+
 # ── موارد تطبيق X الخاصة (معزولة بالكامل) ─────────────────────
 # قاعدة مستقلة: مستخدمون، تثبيتات، إعدادات، سجل أمان
 [[d1_databases]]

@@ -14,9 +14,8 @@ import 'package:video_player/video_player.dart';
 import '../core/api.dart';
 import '../core/app_config.dart';
 import '../core/config.dart';
-import '../core/course_cache.dart';
+import '../core/media_proxy.dart';
 import '../core/models.dart';
-import '../core/video_stream_server.dart';
 import 'external_link.dart';
 import 'secure_screen.dart';
 import 'theme.dart';
@@ -815,19 +814,12 @@ class CoursePlayerScreen extends StatefulWidget {
 
 class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   VideoPlayerController? _player;
+
+  /// العنوان المحلي الذي يخدمه الوكيل — يُطلق عند الخروج.
+  String? _proxyUrl;
   bool _preparing = true;
   String? _error;
-
-  /// جلسة البثّ المتزايد إن كان الفيديو غير مخزّن بعد. تُستخدم لقراءة
-  /// تقدّم التنزيل ولإغلاق الخادم المحلي عند الخروج.
-  StreamSession? _session;
-  String? _liveKey;
-  Timer? _progressTimer;
   bool _killed = false;
-
-  /// 0..1 أثناء التنزيل الأول، و1 عند التشغيل من الكاش.
-  double _progress = 0;
-  bool _fromCache = false;
 
   @override
   void initState() {
@@ -843,10 +835,8 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   void dispose() {
     SecureScreen.off();
     AppConfig.instance.removeListener(_onCfg);
-    _progressTimer?.cancel();
-    // إغلاق الجلسة المحلية: الملف يبقى في الكاش، ولا يبقى خادم يخدمه.
-    final k = _liveKey;
-    if (k != null) VideoStreamServer.instance.release(k);
+    final u = _proxyUrl;
+    if (u != null) MediaProxy.instance.release(u);
     // الإنهاء قد يفشل إن كان المشغّل نصف مهيّأ — لا نُسقط الشاشة بسببه.
     try {
       _player?.dispose();
@@ -854,70 +844,41 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     super.dispose();
   }
 
+  /// يبدأ التشغيل مباشرة من الخادم.
+  ///
+  /// لا تنزيل كامل ولا ملف وسيط: الخادم يفكّ التشفير ويخدم القطع بمدى Range،
+  /// والوكيل المحلي يوقّع كل طلب طازجاً. المشغّل يجلب أول أجزاء الملف فقط كي
+  /// يعرض، ثم يواصل ما يحتاجه فعلاً — فالبداية فورية والتنزيل لا يكتمل أبداً.
   Future<void> _prepare() async {
     setState(() {
       _preparing = true;
       _error = null;
-      _progress = 0;
     });
+    // حرس أخير: الخادم لا يرسل رابطاً لغير المستحق. الوصول إلى هنا برابط
+    // فارغ كان يحاول تشغيل مسار باطل فيُظهر سواداً ثم «فشل». الرسالة الصريحة
+    // والزرّ أدناه يقودان إلى طلب الكود مباشرة.
+    if (widget.video.streamUrl.isEmpty) {
+      setState(() {
+        _preparing = false;
+        _error = 'هذا الدرس يحتاج كود فتح من المالك';
+      });
+      return;
+    }
     try {
-      // التشغيل المتزايد أولاً: إن كان الملف في الكاش نُشغّله من القرص مباشرة
-      // (أسرع مسار)، وإلا نبدأ العرض من أول قطعة بينما يكمل التنزيل خلفه.
-      final res = await CourseCache.instance
-          .provideProgressive(widget.api, widget.video.streamUrl);
+      // الطريق المباشر أولاً: الوكيل لا يضيف شيئاً إن قبل المشغّل الرابط.
+      final url = await MediaProxy.instance
+          .urlFor(widget.api, widget.video.streamUrl);
+      _proxyUrl = url;
       if (!mounted) return;
 
-      VideoPlayerController c;
-      if (res.cached != null) {
-        _fromCache = true;
-        c = VideoPlayerController.file(res.cached!);
-      } else if (res.session != null) {
-        final s = res.session!;
-        _session = s;
-        final url = await VideoStreamServer.instance.urlFor(s);
-        if (!mounted) return;
-        _liveKey = s.key;
-        // ملاحظة على العنوان: المشغّل يقرأ من خادم محلي على 127.0.0.1 يخدم
-        // الملف وهو يُكتب، فيبدأ العرض من أول إطار بدل انتظار التنزيل كاملاً.
-        c = VideoPlayerController.networkUrl(Uri.parse(url));
-      } else {
-        setState(() {
-          _preparing = false;
-          _error = 'تعذر تشغيل الفيديو — تحقق من الإنترنت';
-        });
-        return;
-      }
-
+      final c = VideoPlayerController.networkUrl(Uri.parse(url));
       try {
-        // مهلة صريحة: بلا سقف زمني، تعليق الخادم المحلي (لا يصل رأس الملف)
-        // يُبقي `initialize` معلّقاً للأبد على ملصق داكن بلا أي رسالة —
-        // وهو ما ظهر شاشة سوداء لا تنتهي. انقضاء المهلة يعود إلى المسار
-        // الاحتياطي أسفله بدل الجمود بلا تفسير.
+        // مهلة صريحة: بلا سقف، تعليق الاتصال يُبقي التهيئة معلّقة للأبد على
+        // صورة سوداء بلا رسالة — وهو ما ظهر شاشة سوداء لا تنتهي.
         await c.initialize().timeout(const Duration(seconds: 25));
       } catch (_) {
-        // البثّ من الملف المتزايد قد يفشل (خادم محلي لم يستجب، أو رأس الملف
-        // وصل ناقصاً قبل اكتماله). لا نتركه شاشة سوداء: نُنزّل الملف كاملاً
-        // ثم نُشغّله من القرص. مسار واحد للأمان لا يترك المستخدم بلا صورة.
         await c.dispose();
-        if (res.session == null) rethrow;
-        // شريط التقدّم يُشغَّل هنا أيضاً: التنزيل الاحتياطي قد يستغرق دقائق،
-        // وصورة داكنة بلا أي حركة تبدو شاشة سوداء متجمدة لا انتظاراً.
-        _watchProgress();
-        final full = await CourseCache.instance.provide(
-            widget.api, widget.video.streamUrl);
-        if (!mounted) return;
-        if (!full.ok) {
-          setState(() {
-            _preparing = false;
-            _error = full.error.isEmpty ? 'تعذر تشغيل الفيديو' : full.error;
-          });
-          return;
-        }
-        _fromCache = true;
-        _session = null;
-        c = VideoPlayerController.file(full.file!);
-        // مهلة هنا كذلك: ملف تالف في الكاش يُبقي التهيئة معلّقة بلا نهاية.
-        await c.initialize().timeout(const Duration(seconds: 25));
+        rethrow;
       }
       await c.setLooping(false);
       if (!mounted) {
@@ -928,9 +889,6 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
         _player = c;
         _preparing = false;
       });
-      // نُعلن التقدّم في الخلفية: شريط التحميل يبقى مرئياً إن أراد المستخدم
-      // التقديم لمنطقة لم تصل بعد، بلا أن يعطّل ذلك بدء العرض.
-      _watchProgress();
       await c.play();
     } catch (e) {
       if (mounted) {
@@ -942,38 +900,9 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     }
   }
 
-  /// يعكس تقدّم التنزيل إلى الواجهة ما دام يجري، بلا حجب العرض.
-  void _watchProgress() {
-    final s = _session;
-    if (s == null) return;
-    _progressTimer?.cancel();
-    _progressTimer = Timer.periodic(const Duration(milliseconds: 400), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      final total = s.total ?? 0;
-      final ratio = total > 0 ? (s.downloaded / total).clamp(0.0, 1.0) : 0.0;
-      if (s.done) {
-        t.cancel();
-        if (mounted) setState(() => _progress = 1);
-        return;
-      }
-      if (s.failed && mounted) {
-        t.cancel();
-        // التنزيل تعثّر: نُبقي ما شوهد ونُظهر الخطأ بدل تجميد الصورة.
-        setState(() => _error = s.error.isEmpty
-            ? 'تعذر إكمال التنزيل — حاول مرة أخرى'
-            : s.error);
-        return;
-      }
-      if (mounted) setState(() => _progress = ratio);
-    });
-  }
-
   /// يسجّل الشاشة كمراقبة لمفتاح المالك: إن أوقف الفيديوهات أثناء المشاهدة
-  /// يتوقف العرض فوراً بدل أن يستمر من الكاش المحلي — وإلا صار المفتاح
-  /// بلا معنى على الأجهزة التي فتحت الفيديو قبل تفعيله.
+  /// يتوقف العرض فوراً — وإلا صار المفتاح بلا معنى على الأجهزة التي فتحت
+  /// الفيديو قبل تفعيله.
   void _watchKillSwitch() {
     AppConfig.instance.addListener(_onCfg);
     _onCfg();
@@ -991,22 +920,19 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     }
   }
 
-  /// يمسح ملف الفيديو المعطوب ويعيد التحميل — للملفات التالفة في الكاش.
+  /// يعيد المحاولة من الصفر: يُنهي المشغّل ويعيد التهيئة.
+  ///
+  /// لا شيء يُمسح من القرص لأن شيئاً لم يُكتب عليه أصلاً — التشغيل بثٌّ مباشر.
   Future<void> _hardReload() async {
+    // إغلاق المشغّل والوكيل معاً: إعادة تسجيل المسار مطلوبة لأن التوقيع
+    // المرتبط بالمسار قد يكون انتهى، ولا معنى لتشغيل ملف لم يعد له عنوان.
     try {
       await _player?.dispose();
     } catch (_) {}
     _player = null;
-    _progressTimer?.cancel();
-    // إغلاق الجلسة أولاً: طالما كانت مسجّلة يمنع الكاش حذف ملفها الناقص،
-    // فيُعاد تشغيل الملف التالف نفسه بدل تنزيله من جديد.
-    final k = _liveKey;
-    if (k != null) VideoStreamServer.instance.release(k);
-    _liveKey = null;
-    _session = null;
-    // حذف الكاش كاملاً: أبسط وأضمن من مطاردة ملف واحد، ولا يضرّ لأن
-    // التنزيل يُستأنف عند الطلب.
-    await CourseCache.instance.clear();
+    final u = _proxyUrl;
+    if (u != null) MediaProxy.instance.release(u);
+    _proxyUrl = null;
     await _prepare();
   }
 
@@ -1033,14 +959,6 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
           ],
         ),
         actions: [
-          if (_fromCache && _player != null)
-            const Padding(
-              padding: EdgeInsets.only(right: 6),
-              child: Tooltip(
-                message: 'يعمل من الكاش — بلا استهلاك للشبكة',
-                child: Icon(Icons.offline_bolt, color: XTheme.ok, size: 19),
-              ),
-            ),
           IconButton(
             tooltip: 'إغلاق',
             icon: const Icon(Icons.close),
@@ -1057,23 +975,10 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
       // لا نصّ «جاري التحميل» ولا دوّار في المنتصف: المصغّرة التي رفعها المالك
       // تُعرض كملصق، ويبدأ التشغيل فوقها. هذا يجعل الانتقال من القائمة إلى
       // المشغّل متصلاً بصرياً بدل شاشة انتظار تُوحي بأن شيئاً يتعطّل.
+      // لا شريط تقدّم هنا: لا تنزيل كاملاً ليقاس تقدّمه — التشغيل بثٌّ مباشر
+      // يبدأ من أول قطعة يجلبها المشغّل.
       return Stack(alignment: Alignment.center, children: [
         Positioned.fill(child: _poster()),
-        if (_progress > 0 && _progress < 1)
-          Positioned(
-            bottom: 22,
-            left: 22,
-            right: 22,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: _progress,
-                minHeight: 3,
-                color: XTheme.accent,
-                backgroundColor: Colors.white24,
-              ),
-            ),
-          ),
       ]);
     }
     if (_error != null) {
