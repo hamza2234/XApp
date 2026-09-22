@@ -13,8 +13,8 @@ const String kApiBase = 'https://x-app-api.www-hmzhh123-com.workers.dev';
 /// كان 5 بينما pubspec يقول 20، فيعرض المالك في اللوحة «إصدار 5» ثم يكتب
 /// في حقل الإيقاف رقماً آخر — أو اسم الإصدار 2.0.0 — فلا يُقفل ما يريد.
 /// رقم واحد متسق في الكود والبيان يجعل ما يراه المالك هو ما يُقارَن فعلاً.
-const int kAppVersion = 21;
-const String kAppVersionName = '2.0.1';
+const int kAppVersion = 22;
+const String kAppVersionName = '2.0.2';
 const String kAppName = 'PhoneX';
 
 /// سر توقيع الطلبات — مشوّش (XOR + base64 + تقسيم) ليصعّب استخراجه
