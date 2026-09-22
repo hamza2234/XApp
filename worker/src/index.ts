@@ -1023,6 +1023,97 @@ async function mirrorSearchCompat(
 }
 
 /**
+ * تعديلات المالك على التوافقات — طبقة تُدمج فوق سجلات المرآة عند القراءة.
+ *
+ * المرآة مصدر قراءة فقط ولا تُكتب أبداً؛ كل تحرير يقع في `x_compat_edits`.
+ * لذلك أي مسار يقرأ توافقات للمستخدمين يجب أن يمرّ من هنا، وإلا ظلّ
+ * التحرير محبوساً في اللوحة ويرى المستخدم البيانات الأصلية وحدها.
+ */
+async function compatEditsFor(env: Env, brandFile?: string): Promise<Map<string, any>> {
+  const rows = brandFile
+    ? await env.XDB.prepare(
+        'SELECT doc_key, data, deleted FROM x_compat_edits WHERE brand_file = ?1'
+      ).bind(brandFile).all<any>()
+    : await env.XDB.prepare(
+        'SELECT doc_key, data, deleted FROM x_compat_edits'
+      ).all<any>()
+  const m = new Map<string, any>()
+  for (const r of rows.results ?? []) m.set(r.doc_key, r)
+  return m
+}
+
+/** هل يطابق صفٌّ (بعد التحليل) بحث المستخدم؟ نفس شرط المرآة: كل الكلمات. */
+function compatRowMatches(
+  fields: Record<string, any>, tokens: string[], keyword: string | undefined,
+  type: string | undefined
+): boolean {
+  if (type && String(fields.componentType ?? '').toUpperCase() !== type) return false
+  const hay = JSON.stringify(fields).toLowerCase()
+  if (keyword && !hay.includes(keyword.toLowerCase())) return false
+  return tokens.every(t => hay.includes(t))
+}
+
+/**
+ * يدمج تعديلات المالك في نتائج بحث المرآة ويضمّ الصفوف التي أنشأها.
+ *
+ * الصفوف الجديدة لا وجود لها في المرآة، فلا يجدها بحث المستخدم أبداً بلا
+ * ضمّها هنا — وهي الغرض كله من الإضافة. تظهر للجميع لا للمالك وحده.
+ */
+async function mergeCompatEdits(
+  env: Env,
+  brandFile: string | undefined,
+  results: MirrorDoc[],
+  tokens: string[],
+  keyword: string | undefined,
+  type: string | undefined,
+  limit: number
+): Promise<MirrorDoc[]> {
+  const edits = await compatEditsFor(env, brandFile)
+  const out: MirrorDoc[] = []
+  for (const d of results) {
+    const e = edits.get(d.id)
+    if (e?.deleted) continue
+    let fields = d.fields
+    if (e) {
+      try {
+        fields = { ...fields, ...JSON.parse(e.data) }
+      } catch { /* تعديل تالف لا يُسقط الصفّ */ }
+    }
+    out.push({ id: d.id, fields })
+  }
+  if (brandFile) {
+    const newRows = await env.XDB.prepare(
+      `SELECT doc_key, data FROM x_compat_edits
+       WHERE brand_file = ?1 AND kind = 'new' AND deleted = 0`
+    ).bind(brandFile).all<any>()
+    for (const r of newRows.results ?? []) {
+      let f: Record<string, any>
+      try {
+        f = JSON.parse(r.data)
+      } catch { continue }
+      if (!compatRowMatches(f, tokens, keyword, type)) continue
+      out.push({ id: r.doc_key, fields: f })
+    }
+  }
+  return out.slice(0, limit)
+}
+
+/** أنواع القطع التي أضافها المالك لشركة — كانت تُعرض في اللوحة وحدها. */
+async function compatOwnerTypes(env: Env, brandFile: string): Promise<string[]> {
+  const rows = await env.XDB.prepare(
+    `SELECT data FROM x_compat_edits WHERE brand_file = ?1 AND kind = 'cat' AND deleted = 0`
+  ).bind(brandFile).all<any>()
+  const out: string[] = []
+  for (const r of rows.results ?? []) {
+    try {
+      const t = String(JSON.parse(r.data)?.name ?? '').toUpperCase()
+      if (t && !out.includes(t)) out.push(t)
+    } catch { /* تجاهل */ }
+  }
+  return out
+}
+
+/**
  * تطبيع النص قبل المقارنة: حذف الفواصل والأشكال المتشابهة وعلامات التشكيل.
  *
  * مشترك بين الترتيب والبحث لأن كليهما يقارن نصّ المستخدم بنصّ البيانات،
@@ -2608,17 +2699,24 @@ export default {
           brandFile = vb?.file
           keyword = vb?.key
         }
-        // نوع غير معروف لا يطابق شيئاً — نرفضه بدل تمريره للاستعلام
-        if (type && !COMPAT_TYPES.includes(type)) {
-          throw new HttpError(400, 'نوع قطعة غير معروف')
-        }
+        // النوع يُفحص بعد معرفة أنواع الشركة: نوع أضافه المالك لهذه الشركة
+        // صار نوعاً صحيحاً، ورفضه هنا كان يجعل النوع الذي يعرضه التطبيق
+        // غير قابل للبحث — أي ميزة تعطّل نفسها.
         const types = brandFile
           ? await cached(env, `ctypes:${brandFile}`, 3600, () => compatTypesOf(env.MIRROR, brandFile!))
           : [...COMPAT_TYPES]
+        // الأنواع التي أضافها المالك تُعرض للجميع أيضاً، وإلا اختار المستخدم
+        // نوعاً لا يمكنه البحث فيه أصلاً.
+        const ownerTypes = brandFile ? await compatOwnerTypes(env, brandFile) : []
+        const allTypes = [...types, ...ownerTypes.filter(t => !types.includes(t))]
+        // نوع غير معروف لا يطابق شيئاً — نرفضه بدل تمريره للاستعلام
+        if (type && !allTypes.includes(type)) {
+          throw new HttpError(400, 'نوع قطعة غير معروف')
+        }
 
         // لا خصم على استعلام فارغ: هو استعراض لأنواع الشركة لا سحب بيانات.
         if (!q) {
-          return json({ records: [], types, charged: false, remaining: -1 },
+          return json({ records: [], types: allTypes, charged: false, remaining: -1 },
             200, { 'cache-control': 'no-store' })
         }
 
@@ -2627,11 +2725,17 @@ export default {
         const r = await ensureCompatOpen(
           env, ctx, request, caller, settings, fp, brandRef || 'all')
 
-        const results = await mirrorSearchCompat(env.MIRROR, {
+        const raw = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
           limit: Math.max(1, Math.min(Number(body.limit) || 60, 120))
         })
+        // تعديلات المالك وصفوفه الجديدة تُدمج هنا وإلا ظلّت مرئية في اللوحة
+        // وحدها ولن يراها مستخدم البتة. الدمج قبل فحص السحب كي يُحسب ما
+        // سُلّم فعلاً لا ما وُجد في المرآة.
+        const tokens = q.split(/\s+/).filter(Boolean).slice(0, 4)
+        const results = await mergeCompatEdits(
+          env, brandFile, raw, tokens, keyword, type || undefined, 120)
         // سحب قاعدة التوافقات: من يبحث بعبارات مختلفة كثيرة في نافذة واحدة
         // يريد بناء نسخة كاملة، لا أن يجد قطعة. الإعفاء للمالك وحده.
         if (caller.role !== 'owner') {
@@ -2639,7 +2743,7 @@ export default {
         }
         return json({
           records: results.map(d => ({ id: d.id, ...d.fields })),
-          types, charged: r.charged, source: r.source,
+          types: allTypes, charged: r.charged, source: r.source,
           remaining: r.freeLeft,
           balance: r.balance
         }, 200, {
@@ -2665,9 +2769,6 @@ export default {
         }
         let brandRef = url.searchParams.get('brand')?.trim() ?? ''
         const type = (url.searchParams.get('type')?.trim() ?? '').toUpperCase()
-        if (type && !COMPAT_TYPES.includes(type)) {
-          throw new HttpError(400, 'نوع قطعة غير معروف')
-        }
         let brandFile = brandRef || undefined
         let keyword: string | undefined
         if (brandRef.startsWith('v_')) {
@@ -2675,14 +2776,23 @@ export default {
           brandFile = vb?.file
           keyword = vb?.key
         }
+        // نوع أضافه المالك يُقبل هنا أيضاً، وإلا صار النوع الذي يعرضه التطبيق
+        // غير قابل للبحث في الإصدارات التي تستعمل هذا المسار.
+        const ownerTypes = brandFile ? await compatOwnerTypes(env, brandFile) : []
+        if (type && !COMPAT_TYPES.includes(type) && !ownerTypes.includes(type)) {
+          throw new HttpError(400, 'نوع قطعة غير معروف')
+        }
         const fp = await walletOf(env, request)
         const r = await ensureCompatOpen(
           env, ctx, request, caller, settings, fp, brandRef || 'all')
-        const results = await mirrorSearchCompat(env.MIRROR, {
+        const raw = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
           limit: Math.min(Number(url.searchParams.get('limit')) || 60, 120)
         })
+        const tokens = q.split(/\s+/).filter(Boolean).slice(0, 4)
+        const results = await mergeCompatEdits(
+          env, brandFile, raw, tokens, keyword, type || undefined, 120)
         return json({
           records: results.map(d => ({ id: d.id, ...d.fields })),
           charged: r.charged, source: r.source,
@@ -4817,19 +4927,6 @@ export default {
           }
         }
 
-        const compatEditsMap = async (brandFile?: string) => {
-          const rows = brandFile
-            ? await env.XDB.prepare(
-                'SELECT doc_key, data, deleted FROM x_compat_edits WHERE brand_file = ?1'
-              ).bind(brandFile).all<any>()
-            : await env.XDB.prepare(
-                'SELECT doc_key, data, deleted FROM x_compat_edits'
-              ).all<any>()
-          const m = new Map<string, any>()
-          for (const r of rows.results ?? []) m.set(r.doc_key, r)
-          return m
-        }
-
         // بحث داخل سجلات شركة — للمالك بلا خصم ولا حدود بحث ضيّقة، لأن
         // اللوحة تحتاج أن ترى الشركة كاملة لتختار منها ما تعدّله.
         if (path === '/v1/owner/compat/list' && request.method === 'GET') {
@@ -4852,7 +4949,7 @@ export default {
             query: q || ' ', brandFile, keyword,
             type: type || undefined, limit: 200
           })
-          const edits = await compatEditsMap(brandFile)
+          const edits = await compatEditsFor(env, brandFile)
           const records: any[] = []
           for (const d of res) {
             const merged = applyEdit(d.id, d.fields, edits)
@@ -4899,7 +4996,16 @@ export default {
         if (path === '/v1/owner/compat/edit' && request.method === 'POST') {
           const body = await request.json<any>().catch(() => ({}))
           const op = String(body.op ?? '').trim()
-          const brandFile = String(body.brand ?? '').trim().slice(0, 80)
+          const brandRef = String(body.brand ?? '').trim().slice(0, 80)
+          // صيغة `v_*` تُحوَّل إلى ملف الشركة الأم كما في مسارات القراءة؛ بلا
+          // هذا كان التحرير يُكتب على اسم الشركة الافتراضية بينما البحث يقرأ
+          // الملف الحقيقي، فلا يرى أحد التعديل.
+          let brandFile = brandRef
+          if (brandRef.startsWith('v_')) {
+            const vb = VIRTUAL_SUB_BRANDS.find(v => `v_${v.key}` === brandRef)
+            if (!vb) throw new HttpError(400, 'شركة افتراضية غير معروفة')
+            brandFile = vb.file
+          }
           const now = new Date().toISOString()
 
           const put = async (docKey: string, kind: string, data: unknown, deleted: boolean) =>

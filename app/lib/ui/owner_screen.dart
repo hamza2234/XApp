@@ -11,7 +11,6 @@ import '../core/store.dart';
 import 'theme.dart';
 import 'biometric_gate.dart';
 import 'brand_logo.dart';
-import 'compat_editor_screen.dart';
 
 /// نسخ معرّف الجهاز — يُستخدم من عدة تبويبات في لوحة المالك.
 Future<void> copyDeviceId(BuildContext context, String value) async {
@@ -36,7 +35,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 10,
+      length: 9,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('لوحة تحكم المالك'),
@@ -53,7 +52,6 @@ class _OwnerScreenState extends State<OwnerScreen> {
               Tab(text: 'الإعلانات', icon: Icon(Icons.campaign_outlined, size: 18)),
               Tab(text: 'الدردشة', icon: Icon(Icons.forum_outlined, size: 18)),
               Tab(text: 'الدورات', icon: Icon(Icons.play_lesson_outlined, size: 18)),
-              Tab(text: 'التوافقات', icon: Icon(Icons.hub_outlined, size: 18)),
               Tab(text: 'الحظر', icon: Icon(Icons.gpp_bad_outlined, size: 18)),
               Tab(text: 'الأمان', icon: Icon(Icons.security, size: 18)),
             ],
@@ -67,7 +65,6 @@ class _OwnerScreenState extends State<OwnerScreen> {
           _AnnouncementsTab(api: widget.api),
           _ChatTab(api: widget.api),
           _CoursesTab(api: widget.api),
-          CompatEditorScreen(api: widget.api),
           _BansTab(api: widget.api),
           _SecurityTab(api: widget.api),
         ]),

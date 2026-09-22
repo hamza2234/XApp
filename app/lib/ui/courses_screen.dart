@@ -204,16 +204,16 @@ class _CoursesScreenState extends State<CoursesScreen>
     await openExternal(context, link, label: 'المالك');
   }
 
-  /// يفتح فيديو. يقرّر قبل أي انتقال: المقفل يفتح طلب الكود فوراً، والمتاح
-  /// وحده يذهب للمشغّل.
+  /// يفتح فيديو. المقفل يستقبل طلب المفتاح فوراً، والمتاح وحده يذهب للمشغّل.
   ///
-  /// القرار هنا مبني على ما يقوله الخادم في آخر تحديث، لا على حالة مخزّنة قد
-  /// تكون قديمة. هذا ما يمنع «يفتح ثم يقول مقفل»: لا نُقلع المشغّل أصلاً إن كان
-  /// الدرس غير قابل للتشغيل، فلا شاشة تحميل ثم رسالة قفل — بل طلب الكود مباشرة.
+  /// لا ننتقل إلى المشغّل أبداً إن كان الدرس مقفلاً: الانتقال ثم الفشل هو ما
+  /// كان يُظهر شاشة سوداء تنتهي برسالة قفل. أما فيديو مُباح لكن تعذّر بناؤه
+  /// (مشكلة شبكة أو مزوّد) فيُفتح المشغّل، فهناك رسالة خطأ وزرّ إعادة محاولة
+  /// — ولا معنى لطلب مفتاح لا يحلّ مشكلة ليست قفلاً.
   Future<void> _openVideo(Course course, CourseVideo video) async {
     final fresh = _resolve(course.id, video.id) ?? video;
-    if (!_canPlay(course, fresh)) {
-      _showLockedSheet(course, fresh);
+    if (_isLocked(course, fresh)) {
+      await _askForKey(course);
       return;
     }
     await Navigator.of(context).push(MaterialPageRoute(
@@ -222,13 +222,18 @@ class _CoursesScreenState extends State<CoursesScreen>
         video: fresh,
         title: fresh.title,
         courseTitle: course.title,
-        onNeedUnlock: () => _showLockedSheet(course, fresh),
+        onNeedUnlock: () => _askForKey(course),
       ),
     ));
     if (!mounted) return;
     // قد يكون المفتاح فُتح من داخل المشغّل: نحدّث القائمة عند العودة.
     await _load();
   }
+
+  /// هل السبب قفلٌ يحتاج مفتاحاً؟ الشرط من الخادم: دورة تحتاج مفتاحاً لم
+  /// يُفتح بعد، ودرسٌ ليس مجانياً. ما دون ذلك عُطل لا يُصلحه مفتاح.
+  bool _isLocked(Course course, CourseVideo video) =>
+      !video.playable && !video.isFree && course.locked && !course.unlocked;
 
   /// أحدث نسخة من الفيديو من آخر ردّ للخادم — يحرس من قرار مبني على نسخة قديمة
   /// بعد أن فُتحت الدورة أو تغيّر وضعها في اللوحة.
@@ -251,73 +256,6 @@ class _CoursesScreenState extends State<CoursesScreen>
   /// مصدران يتناقضان — وهو أصل ظهور الفيديو المقفل «متاحاً» في الواجهة.
   bool _canPlay(Course course, CourseVideo video) =>
       video.playable && video.streamUrl.isNotEmpty;
-
-
-  void _showLockedSheet(Course course, [CourseVideo? video]) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: XTheme.surface,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(XTheme.rXl))),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 46, height: 46,
-                decoration: BoxDecoration(
-                  color: XTheme.accent.withOpacity(.12),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.lock_outline,
-                    color: XTheme.accent, size: 24),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                course.locked ? 'دورة مقفلة' : 'هذا الفيديو مقفل',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'لفتح الدورة كاملة تواصل مع المالك واحصل على كود خاص. '
-                'الكود يُفعَّل مرة واحدة على جهازك، وبعدها تُفتح كل فيديوهات '
-                'الدورة تلقائياً — بما فيها ما يُضيفه المالك لاحقاً.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    fontSize: 12.8, color: XTheme.textDim, height: 1.6),
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _askForKey(course);
-                  },
-                  icon: const Icon(Icons.key, size: 18),
-                  label: const Text('لدي كود — تفعيل الآن'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _contactOwner();
-                  },
-                  icon: const Icon(Icons.support_agent, size: 18),
-                  label: const Text('تواصل مع المالك'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -543,20 +481,27 @@ class _CoursesScreenState extends State<CoursesScreen>
     // كان الغلاف يُطلب بلا ترويسة توقيع، والخادم يرفض كل `/v1/*` بلا توقيع،
     // فيرجع 403 دائماً ويُعرض التدرّج البديل — أي أن غلاف المالك لم يظهر
     // ولا مرة. التوقيع يُخزَّن مؤقتاً داخل `signFor` فلا يُعاد توليده كل إطار.
-    if (url.isEmpty) return _coverFallback();
+    if (url.isEmpty) return _coverFallback(c);
     return _SignedImage(
       api: widget.api,
       url: url,
       fit: BoxFit.cover,
-      fallback: _coverFallback(),
+      fallback: _coverFallback(c),
     );
   }
 
-  Widget _coverFallback() => Container(
+  /// غلاف بديل حين لا صورة للمالك — أيقونته تتبع حال الدورة لا التزيين:
+  /// دورة مقفلة تعرض قفلاً لا زرّ تشغيل. زرّ التشغيل على دورة لا تُفتح كان
+  /// يَعِد بما لا يقع، والقفل هو الحقيقة الوحيدة المعروفة هنا.
+  Widget _coverFallback(Course c) => Container(
         decoration: const BoxDecoration(gradient: XTheme.gradient),
         alignment: Alignment.center,
-        child: const Icon(Icons.play_circle_outline,
-            color: Colors.white70, size: 40),
+        child: Icon(
+            c.locked && !c.unlocked
+                ? Icons.lock_outline
+                : Icons.play_circle_outline,
+            color: Colors.white70,
+            size: 40),
       );
 
   Widget _pill(String t, Color color) => Container(
@@ -665,7 +610,10 @@ class _CoursesScreenState extends State<CoursesScreen>
       );
 
   Widget _videoTile(Course c, CourseVideo v, int index) {
-    final locked = !v.playable;
+    // القفل يتبع القدرة الفعلية على التشغيل لا راية الدورة وحدها: هذا ما
+    // يجعل فيديو مجانياً داخل دورة مقفلة يظهر بلا قفل — وهو ما يسمح به
+    // الخادم فعلاً، فلا تتناقض الواجهة مع الاستحقاق.
+    final locked = !_canPlay(c, v);
     return InkWell(
       borderRadius: BorderRadius.circular(XTheme.rMd),
       onTap: () => _openVideo(c, v),

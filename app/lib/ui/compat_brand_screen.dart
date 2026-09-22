@@ -89,6 +89,14 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   String _source = '';
   bool _searched = false;
 
+  /// أنواع القطع المتوفرة لهذه الشركة كما يعيدها الخادم مع نتائج البحث،
+  /// إضافةً إلى ما أضافه المالك. تُستعمل كخيارات في نموذج التحرير.
+  List<String> _types = const [];
+
+  /// المالك يبحث كأي مستخدم، لكن واجهات الإضافة والتعديل تظهر له وحده
+  /// داخل النتائج نفسها — بلا تبويب منفصل في اللوحة.
+  bool get _isOwner => widget.api.store.hasOwnerSession;
+
   @override
   void initState() {
     super.initState();
@@ -179,6 +187,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _balance = r.balance;
         _source = r.source;
         _records = r.records.map((e) => CompatRecord.fromJson(e)).toList();
+        if (r.types.isNotEmpty) _types = r.types;
       });
       if (r.charged) widget.onCharged?.call();
     } on ApiException catch (e) {
@@ -206,6 +215,236 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         _records = const [];
         _error = 'تعذر الاتصال بالخادم — تحقق من الإنترنت';
       });
+    }
+  }
+
+  /// ── تحرير المالك: يعيش داخل شاشة البحث نفسها ──
+  ///
+  /// المالك يبحث كأي مستخدم عادي (نفس الخصم ونفس النتائج)، وتظهر له فوق
+  /// النتائج أزرار الإضافة، وعلى كل صفّ أزرار التعديل والحذف. لا تبويب
+  /// منفصل ولا شاشة مستقلة: التعديل يقع حيث يرى الصفّ فعلاً.
+
+  /// يبني قائمة الأنواع للاختيار، ويضمن ألا يختفي النوع الحالي منها.
+  List<String> _typeChoices(String current) {
+    final base = _types.isNotEmpty ? _types : CompatTypeMeta.orderedTypes;
+    return base.contains(current) || current.isEmpty
+        ? base
+        : [...base, current];
+  }
+
+  Future<void> _ownerAddRow() => _ownerAdd(wholeSpec: false);
+
+  /// إضافة صنف كامل لشركة: اسم الصنف ثم كل موديلاته في نصّ واحد، فيُضاف
+  /// الصفّ الواحد باسم الصنف نفسه، جاهزاً للبحث فوراً.
+  Future<void> _ownerAddSpec() => _ownerAdd(wholeSpec: true);
+
+  /// نموذج الإضافة الوحيد. صفٌّ عادي وصنف كامل يختلفان في الشرح وسطور
+  /// الإدخال فقط — الجوهر واحد (موديلات + نوع + وصف)، فمصدر واحد أرحم من
+  /// نموذجين ينحرفان عن بعضهما عند أول تعديل.
+  Future<void> _ownerAdd({required bool wholeSpec}) async {
+    final models = TextEditingController();
+    final sub = TextEditingController();
+    var chosen = _type ?? CompatTypeMeta.orderedTypes.first;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: XTheme.surface,
+          title: Text(wholeSpec ? 'إضافة صنف كامل' : 'إضافة صفّ توافق',
+              style: const TextStyle(
+                  fontWeight: FontWeight.w900, fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(
+                wholeSpec
+                    ? 'اكتب كل موديلات الصنف — سطر لكل موديل — فتُضاف كصفّ واحد '
+                        'باسم الصنف نفسه، جاهزة للبحث فوراً.'
+                    : 'اكتب موديلات الصفّ — سطر لكل موديل — فيظهر فوراً في نتائج البحث.',
+                style: const TextStyle(fontSize: 11.5, color: Colors.white60),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: models,
+                maxLines: wholeSpec ? 6 : 4,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'الموديلات المتوافقة',
+                  helperText: 'سطر لكل موديل، أو افصل بفاصلة',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: sub,
+                decoration: InputDecoration(
+                    labelText: wholeSpec
+                        ? 'اسم الصنف / النوع الفرعي (اختياري)'
+                        : 'الوصف / النوع الفرعي (اختياري)'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: chosen,
+                decoration: const InputDecoration(labelText: 'نوع القطعة'),
+                items: _typeChoices(chosen)
+                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                    .toList(),
+                onChanged: (v) => setLocal(() => chosen = v ?? chosen),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () async {
+                final list = models.text
+                    .split(RegExp(r'[,،\n]'))
+                    .map((e) => e.trim().toLowerCase())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+                if (list.isEmpty) return;
+                try {
+                  await widget.api
+                      .ownerCompatAdd(brand: widget.brand.ref, rows: [
+                    {
+                      'compatibleModels': list,
+                      'componentType': chosen,
+                      'subCategory': {'name': sub.text.trim()},
+                    }
+                  ]);
+                  if (ctx.mounted) Navigator.pop(ctx, true);
+                } on ApiException catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx)
+                        .showSnackBar(SnackBar(content: Text(e.message)));
+                  }
+                }
+              },
+              child: const Text('حفظ'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) await _ownerRefresh();
+  }
+
+  /// بعد أي تحرير: نعيد تنفيذ البحث نفسه بنفس النص، فيرى المالك النتيجة
+  /// النهائية كما يراها المستخدم — لا انعكاس محلي قد يخفي فشل الحفظ.
+  Future<void> _ownerRefresh() async {
+    final q = _query.trim();
+    if (q.length < _minQuery) return;
+    await _search(q);
+  }
+
+  Future<void> _ownerEditRow(CompatRecord r) async {
+    final models = TextEditingController(text: r.models.join('، '));
+    final sub = TextEditingController(text: r.subCategory ?? '');
+    final initial = r.componentType.toUpperCase();
+    var chosen = initial;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: XTheme.surface,
+          title: const Text('تعديل صفّ توافق',
+              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: models,
+                maxLines: 4,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'الموديلات المتوافقة',
+                  helperText: 'سطر لكل موديل، أو افصل بفاصلة',
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: chosen,
+                decoration: const InputDecoration(labelText: 'نوع القطعة'),
+                items: _typeChoices(chosen)
+                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                    .toList(),
+                onChanged: (v) => setLocal(() => chosen = v ?? chosen),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: sub,
+                decoration: const InputDecoration(
+                    labelText: 'الوصف / النوع الفرعي'),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () async {
+                final list = models.text
+                    .split(RegExp(r'[,،\n]'))
+                    .map((e) => e.trim().toLowerCase())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+                if (list.isEmpty) return;
+                try {
+                  await widget.api.ownerCompatPatch(
+                    brand: widget.brand.ref,
+                    id: r.id,
+                    fields: {
+                      'compatibleModels': list,
+                      'componentType': chosen,
+                      'subCategory': {'name': sub.text.trim()},
+                    },
+                  );
+                  if (ctx.mounted) Navigator.pop(ctx, true);
+                } on ApiException catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx)
+                        .showSnackBar(SnackBar(content: Text(e.message)));
+                  }
+                }
+              },
+              child: const Text('حفظ'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) await _ownerRefresh();
+  }
+
+  Future<void> _ownerDeleteRow(CompatRecord r) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: XTheme.surface,
+        title: const Text('حذف الصفّ؟'),
+        content: const Text('يُخفى من نتائج البحث. البيانات الأصلية لا تُمسّ '
+            'ويمكن التراجع عنه.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('حذف')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: r.id);
+      await _ownerRefresh();
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
+      }
     }
   }
 
@@ -394,17 +633,45 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
       itemCount: _records.length + 1,
       itemBuilder: (context, i) {
         if (i == 0) {
-          // شريحة عدد النتائج — الحدّ الفاصل بين البحث وقائمته
+          // شريحة عدد النتائج — الحدّ الفاصل بين البحث وقائمته، ويُلحق بها
+          // شريط أدوات المالك (إضافة صفّ / صنف كامل) في نفس المكان الذي
+          // يرى فيه النتائج — لا تبويب منفصل ولا شاشة أخرى.
           return Padding(
             padding: const EdgeInsets.fromLTRB(2, 4, 2, 12),
-            child: Row(children: [
-              StatusPill('${_records.length} نتيجة', color: meta.color,
-                  icon: meta.icon),
-              const SizedBox(width: 8),
-              Text('في ${meta.label}',
-                  style: TextStyle(
-                      color: XTheme.textDim, fontSize: 12.5)),
-            ]),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  StatusPill('${_records.length} نتيجة', color: meta.color,
+                      icon: meta.icon),
+                  const SizedBox(width: 8),
+                  Text('في ${meta.label}',
+                      style: TextStyle(
+                          color: XTheme.textDim, fontSize: 12.5)),
+                ]),
+                if (_isOwner) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _ownerAddRow,
+                        icon: const Icon(Icons.add, size: 17),
+                        label: const Text('إضافة صفّ', style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _ownerAddSpec,
+                        icon: const Icon(Icons.playlist_add, size: 18),
+                        label: const Text('إضافة صنف كامل',
+                            style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ),
+                  ]),
+                ],
+              ],
+            ),
           );
         }
         return _recordCard(_records[i - 1], meta, i - 1);
@@ -450,6 +717,32 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
               runSpacing: 7,
               children: models.map((m) => _modelChip(m, meta)).toList(),
             ),
+            // أدوات المالك على الصفّ نفسه: تعديل وحذف في موضعهما الطبيعي
+            // بجانب البيانات التي يعدّلها، بلا تبويب منفصل.
+            if (_isOwner) ...[
+              const SizedBox(height: 10),
+              Row(children: [
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: () => _ownerEditRow(r),
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('تعديل', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    foregroundColor: XTheme.cyan,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _ownerDeleteRow(r),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('حذف', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    foregroundColor: XTheme.danger,
+                  ),
+                ),
+              ]),
+            ],
           ],
         ),
       ),
@@ -514,6 +807,22 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                   height: 1.7,
                   fontSize: 13.5)),
         ),
+        // المالك قد لا يجد الصفّ لأنه غير موجود بعد — فيضيفه من هنا فوراً
+        // بدل أن يخرج إلى شاشة تحرير منفصلة ثم يعود ليبحث.
+        if (_isOwner) ...[
+          const SizedBox(height: 18),
+          OutlinedButton.icon(
+            onPressed: _ownerAddRow,
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('إضافة صفّ'),
+          ),
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: _ownerAddSpec,
+            icon: const Icon(Icons.playlist_add, size: 18),
+            label: const Text('إضافة صنف كامل'),
+          ),
+        ],
       ]),
     );
   }
