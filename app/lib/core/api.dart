@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart' as cg;
 import 'package:http/http.dart' as http;
 import 'config.dart';
@@ -48,6 +49,27 @@ class OwnerCrypto {
     final padded = s.replaceAll('-', '+').replaceAll('_', '/');
     final pad = (4 - padded.length % 4) % 4;
     return base64.decode(padded + '=' * pad);
+  }
+}
+
+/// إشارة قفل الإصدار — يراها الغلاف فيُبدّل الشاشة فوراً.
+///
+/// لماذا إشارة عامة لا استثناء فقط؟ لأن الطلب قد يفشل داخل شاشة فرعية
+/// (عارض، دردشة، لوحة) وليس في الإقلاع، والقفل يجب أن يسري على التطبيق
+/// كله لا على الشاشة التي صادفت الخطأ.
+class VersionLock extends ChangeNotifier {
+  VersionLock._();
+  static final VersionLock instance = VersionLock._();
+
+  String? _message;
+  String? get message => _message;
+  bool get locked => _message != null;
+
+  static void trigger(String message) {
+    final i = instance;
+    if (i._message != null) return;
+    i._message = message;
+    i.notifyListeners();
   }
 }
 
@@ -335,6 +357,11 @@ class Api {
         return {'ok': true};
       }
     }
+    // 426 يعني أن المالك أوقف هذا الإصدار أثناء فتح التطبيق. بدون التقاطه
+    // هنا يرى المستخدم «خطأ 426» في كل شاشة ويظل يستعمل التطبيق شكلياً،
+    // وهو أسوأ من القفل: لا يعرف أن عليه التحديث. الإشارة عامة فتُغلق
+    // الواجهة كلها من موضع واحد.
+    if (res.statusCode == 426) VersionLock.trigger(_errMsg(res));
     throw ApiException(res.statusCode, _errMsg(res));
   }
 
@@ -727,6 +754,7 @@ class Api {
     String? mediaB64,
     int mediaSeconds = 0,
     List<double> waveform = const [],
+    String replyTo = '',
   }) async {
     final j = await post(
       '/v1/chat/send',
@@ -736,6 +764,7 @@ class Api {
         if (mediaB64 != null) 'mediaB64': mediaB64,
         if (mediaSeconds > 0) 'mediaSeconds': mediaSeconds,
         if (waveform.isNotEmpty) 'waveform': waveform,
+        if (replyTo.isNotEmpty) 'replyTo': replyTo,
       },
       // رفع مقطع يحتاج مهلة أطول من رسالة نصية.
       timeout: mediaB64 == null
@@ -744,6 +773,104 @@ class Api {
     );
     return ChatMessage.fromJson(
         (j['message'] as Map?)?.cast<String, dynamic>() ?? const {});
+  }
+
+  /// يبدأ جلسة رفع مقطع دردشة، ثم يدفع الأجزاء ويُكملها.
+  ///
+  /// لماذا على أجزاء بدل `chatSend`؟ لأن `chatSend` يحمل الوسيط base64
+  /// داخل JSON: حشو يضخّم الحجم 4/3، واحتفاظ بالملف كاملاً في الذاكرة،
+  /// فينهي العامل عند مقاطع عشرات الميغابايت. هنا يُقرأ الملف من القرص
+  /// جزءاً جزءاً ويُدفَع كما هو — لا حشو ولا تحميل كامل.
+  Future<ChatMessage> chatUploadVideo({
+    required String room,
+    required String filePath,
+    String kind = 'video',
+    String text = '',
+    int seconds = 0,
+    String replyTo = '',
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final file = File(filePath);
+    final length = await file.length();
+    if (length == 0) throw ApiException(400, 'الملف فارغ');
+    final name = filePath.split('/').last;
+
+    final init = await post('/v1/chat/upload/init', {
+      'room': room,
+      'kind': kind,
+      'name': name,
+      'mime': _videoMime(name, audio: kind == 'audio'),
+      'size': length,
+      'seconds': seconds,
+      if (text.isNotEmpty) 'text': text,
+      if (replyTo.isNotEmpty) 'replyTo': replyTo,
+    }, timeout: const Duration(seconds: 60));
+    final uploadId = init['uploadId'] as String? ?? '';
+    if (uploadId.isEmpty) throw ApiException(500, 'تعذر بدء الرفع');
+    // 8MiB يطابق `CHAT_UPLOAD_CHUNK` في العامل. القيمة الاحتياطية هنا
+    // لا تنزل عن 5MiB أبداً: R2 يرفض كل جزء أصغر منها (آخر جزء وحده مستثنى)،
+    // فخطأ في قيمة واحدة كان يمنع رفع أي فيديو فوق جزء واحد.
+    final chunk = (init['chunk'] as num?)?.toInt() ?? 8 * 1024 * 1024;
+
+    final parts = <Map<String, dynamic>>[];
+    var sent = 0;
+    var partNo = 1;
+    try {
+      while (sent < length) {
+        final end = (sent + chunk < length) ? sent + chunk : length;
+        final bytes = await file
+            .openRead(sent, end)
+            .fold<List<int>>(<int>[], (acc, b) => acc..addAll(b));
+        final res = await _putRaw(
+            '/v1/chat/upload/$uploadId/part/$partNo', bytes,
+            timeout: const Duration(minutes: 5));
+        parts.add({'partNumber': partNo, 'etag': res['etag']});
+        sent = end;
+        onProgress?.call(sent, length);
+        partNo++;
+      }
+      final done = await post(
+          '/v1/chat/upload/complete', {'uploadId': uploadId, 'parts': parts},
+          timeout: const Duration(minutes: 2));
+      return ChatMessage.fromJson(
+          (done['message'] as Map?)?.cast<String, dynamic>() ?? const {});
+    } catch (e) {
+      // لا نترك أجزاء معلّقة في R2 بلا كائن يُشار إليها.
+      try {
+        await post('/v1/chat/upload/abort', {'uploadId': uploadId},
+            timeout: const Duration(seconds: 20));
+      } catch (_) {}
+      rethrow;
+    }
+  }
+
+  /// طلب PUT بجسم خام (بايتات ملف) مع ترويسات التطبيق الموقّعة.
+  ///
+  /// مسار `_send` يرمّز الجسم JSON وهذا يفسد مقطع فيديو، فالجسم هنا بايتات
+  /// كما هي. التوقيع يشمل المسار وحده كبقية المسارات.
+  Future<Map<String, dynamic>> _putRaw(
+    String path,
+    List<int> body, {
+    Duration timeout = const Duration(minutes: 2),
+  }) async {
+    final uri = _uri(path);
+    final res = await http
+        .put(uri,
+            headers: {
+              ..._sign('PUT', uri.path),
+              'Content-Type': 'application/octet-stream',
+            },
+            body: body)
+        .timeout(timeout);
+    final decoded = res.bodyBytes.isEmpty
+        ? <String, dynamic>{}
+        : (jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true)) as Map)
+            .cast<String, dynamic>();
+    if (res.statusCode >= 400) {
+      throw ApiException(res.statusCode,
+          decoded['error']?.toString() ?? 'فشل الرفع (${res.statusCode})');
+    }
+    return decoded;
   }
 
   /// حفظ ملف الدردشة: كنية، صورة شخصية، وكتم الإشعارات.
@@ -962,8 +1089,15 @@ class Api {
   }
 
   /// نوع المحتوى من الامتداد — الخادم يقرأه فيخزّنه مع الملف.
-  static String _videoMime(String name) {
+  static String _videoMime(String name, {bool audio = false}) {
     final n = name.toLowerCase();
+    if (audio) {
+      if (n.endsWith('.m4a')) return 'audio/mp4';
+      if (n.endsWith('.aac')) return 'audio/aac';
+      if (n.endsWith('.mp3')) return 'audio/mpeg';
+      if (n.endsWith('.ogg') || n.endsWith('.opus')) return 'audio/ogg';
+      return 'audio/mp4';
+    }
     if (n.endsWith('.webm')) return 'video/webm';
     if (n.endsWith('.mov')) return 'video/quicktime';
     if (n.endsWith('.mkv')) return 'video/x-matroska';

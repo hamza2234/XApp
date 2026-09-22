@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/app_config.dart';
 import 'theme.dart';
 import 'external_link.dart';
 
@@ -42,11 +43,55 @@ class UpdateScreen extends StatelessWidget {
                   (message?.isNotEmpty == true)
                       ? message!
                       : 'يتوفر إصدار جديد — حدّث التطبيق للمتابعة',
+                  key: const Key('update-message'),
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: XTheme.textDim, fontSize: 15, height: 1.6),
                 ),
                 const SizedBox(height: 26),
+                // حين لا يضبط المالك رابطاً (أو لم يصل بعد) لا نترك المستخدم
+                // أمام نصّ بلا مخرج: نعطيه وصفاً واضحاً وقناة تواصل مع
+                // الإدارة، بدل شاشة مسدودة لا يفهم منها ما يفعل.
+                if ((url ?? '').isEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                        color: XTheme.gold.withOpacity(.10),
+                        borderRadius: BorderRadius.circular(14)),
+                    child: Column(children: [
+                      Icon(Icons.info_outline, color: XTheme.gold, size: 22),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'هذه النسخة لم تعد مدعومة. حدّث التطبيق من مصدر '
+                        'التحميل نفسه الذي حصلت منه عليه، ثم افتحه من جديد.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13.5, height: 1.6),
+                      ),
+                      if (AppConfig.instance.hasTelegram) ...[
+                        const SizedBox(height: 10),
+                        Text('أو تواصل مع الإدارة لتصلك النسخة الجديدة',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: XTheme.textDim, fontSize: 12.5)),
+                      ],
+                    ]),
+                  ),
+                  if (AppConfig.instance.hasTelegram) ...[
+                    const SizedBox(height: 14),
+                    OutlinedButton.icon(
+                      onPressed: () => openExternal(
+                          context, AppConfig.instance.telegram,
+                          label: 'تيليجرام'),
+                      icon: const Icon(Icons.support_agent, size: 19),
+                      label: const Text('تواصل مع الإدارة'),
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: XTheme.gold,
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 13),
+                          minimumSize: const Size(double.infinity, 0)),
+                    ),
+                  ],
+                ],
                 if ((url ?? '').isNotEmpty)
                   SizedBox(
                     width: double.infinity,

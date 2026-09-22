@@ -67,7 +67,11 @@ class _SplashScreenState extends State<SplashScreen>
       final settings =
           XSettings.fromJson(boot['settings'] as Map<String, dynamic>? ?? {});
 
-      // بوابة الإصدار — يتحكم بها المالك من لوحته
+      // بوابة الإصدار — يتحكم بها المالك من لوحته.
+      //
+      // الإعدادات تُقرأ من `bootstrap` الذي يبقى متاحاً حتى والتطبيق
+      // مقفول، وإلا وصل القفل بلا رسالته: التطبيق يرى 503 من كل مسار
+      // آخر فيعرض «تعذر الاتصال» ولا يفهم المستخدم أن المالك أوقفه.
       if (settings.appLocked) {
         setState(() {
           _blocked = true;
@@ -203,6 +207,30 @@ class _SplashScreenState extends State<SplashScreen>
                 child: Text(_blockMsg,
                     textAlign: TextAlign.center,
                     style: TextStyle(color: XTheme.text, fontSize: 16)),
+              ),
+              const SizedBox(height: 8),
+              // القفل يقع على الخادم ويرفع نفسه بنفسه عند انتهاء الصيانة،
+              // فلا نعرض زر دخول ولا تحديثاً — بل إعادة محاولة فقط، كي لا
+              // يظن المستخدم أن التطبيق انتهى أو أن عليه إعادة التثبيت.
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 40),
+                child: Text(
+                  'سنعاود العمل تلقائياً عند انتهاء الصيانة. لا حاجة لإعادة '
+                  'التثبيت.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12.5, height: 1.5),
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _retry,
+                icon: const Icon(Icons.refresh_rounded, size: 19),
+                label: const Text('إعادة المحاولة'),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: XTheme.accent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 26, vertical: 12)),
               ),
             ] else if (_offline) ...[
               Icon(Icons.cloud_off_rounded,

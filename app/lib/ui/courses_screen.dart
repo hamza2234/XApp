@@ -18,6 +18,7 @@ import '../core/course_cache.dart';
 import '../core/models.dart';
 import '../core/video_stream_server.dart';
 import 'external_link.dart';
+import 'secure_screen.dart';
 import 'theme.dart';
 
 class CoursesScreen extends StatefulWidget {
@@ -242,90 +243,16 @@ class _CoursesScreenState extends State<CoursesScreen>
     return null;
   }
 
-  /// هل يملك المستخدم حق التشغيل؟ شرطان لا ثالث: إذن الخادم، ووجود رابط بثّ.
-  /// لو غاب أيّهما فالمشغّل لا يملك ما يشغّله، فالسؤال عن المفتاح أصدق من
-  /// فتح شاشة سوداء.
-  bool _canPlay(Course course, CourseVideo video) {
-    if (course.locked && !course.unlocked) return false;
-    return video.playable && video.streamUrl.isNotEmpty;
-  }
-
-  /// تنزيل الدرس للجهاز.
+  /// هل يملك المستخدم حق التشغيل؟ إذن الخادم وحده، ولا شيء غيره.
   ///
-  /// الترتيب مقصود: يُفحص الاستحقاق أولاً. إن كان الدرس مقفلاً يُفتح طلب الكود
-  /// فوراً، ولا يبدأ تنزيل ولا يُستهلك وقت ولا بيانات ثم يفشل بعد دقيقة. التنزيل
-  /// لا يبدأ إلا بعد أن يصبح الخادم هو من يسمح بالبث.
-  Future<void> _download(Course course, CourseVideo video) async {
-    final fresh = _resolve(course.id, video.id) ?? video;
-    if (!_canPlay(course, fresh)) {
-      _showLockedSheet(course, fresh);
-      return;
-    }
+  /// الشرط هو `playable` **و** وجود رابط بثّ: الخادم لا يرسل الرابط إلا لمن
+  /// استحقّ، فغياب أيّهما يعني «مقفل» قطعاً. والتحقق من `course.locked` قبل
+  /// ذلك كان يجعل الحكم مزدوجاً: قد تقول الدورة «مقفلة» بينما الخادم أباح
+  /// الفيديو المجاني داخلها، فيُمنع من أباحه الخادم. مصدر واحد للحقيقة لا
+  /// مصدران يتناقضان — وهو أصل ظهور الفيديو المقفل «متاحاً» في الواجهة.
+  bool _canPlay(Course course, CourseVideo video) =>
+      video.playable && video.streamUrl.isNotEmpty;
 
-    final progress = ValueNotifier<int>(0);
-    final done = showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: XTheme.surface,
-        title: const Text('يُنزَّل للمشاهدة بلا إنترنت',
-            style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900)),
-        content: ValueListenableBuilder<int>(
-          valueListenable: progress,
-          builder: (_, pct, __) => Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: pct <= 0 ? null : pct / 100,
-                  minHeight: 5,
-                  color: XTheme.accent,
-                  backgroundColor: XTheme.surface2,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                pct <= 0
-                    ? 'يبدأ التنزيل…'
-                    : (pct >= 100 ? 'اكتمل — يُفتح بلا إنترنت' : '$pct٪'),
-                style: TextStyle(fontSize: 12.3, color: XTheme.textDim),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    try {
-      final r = await CourseCache.instance.provide(
-        widget.api,
-        fresh.streamUrl,
-        // التقدّم يُقيَّد بـ99 حتى لا يُعلن الاكتمال قبل أن يُكتب الملف فعلاً
-        // ويُنقل من ملفه المؤقت. الرقم يقفز إلى 100 عند النجاح وحده.
-        onProgress: (received, total) {
-          if (total <= 0) return;
-          final pct = (received * 100 ~/ total).clamp(0, 99);
-          progress.value = pct;
-        },
-      );
-      progress.value = 100;
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-      await done;
-      _toast(r.ok
-          ? 'تم التنزيل — «${fresh.title}» يُفتح بلا إنترنت'
-          : (r.error.isEmpty ? 'تعذر التنزيل' : r.error));
-    } catch (e) {
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-      await done;
-      _toast(e is ApiException ? e.message : 'تعذر التنزيل — تحقق من الإنترنت');
-    } finally {
-      progress.dispose();
-    }
-  }
 
   void _showLockedSheet(Course course, [CourseVideo? video]) {
     showModalBottomSheet<void>(
@@ -825,20 +752,6 @@ class _CoursesScreenState extends State<CoursesScreen>
                         style: TextStyle(
                             fontSize: 10.5, color: XTheme.textDim)),
                   ],
-                  const Spacer(),
-                  // زر التنزيل: يسأل عن الكود قبل أي تنزيل، ولا يبدأ شيئاً
-                  // ثم يفشل. المقفل يفتح طلب الكود مباشرة، والمتاح وحده ينزّل.
-                  if (!locked)
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                          minWidth: 32, minHeight: 32),
-                      tooltip: 'تنزيل للمشاهدة بلا إنترنت',
-                      icon: const Icon(Icons.download_for_offline_outlined,
-                          size: 19, color: XTheme.cyan),
-                      onPressed: () => _download(c, v),
-                    ),
                 ]),
               ],
             ),
@@ -919,12 +832,16 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   @override
   void initState() {
     super.initState();
+    // حجب التقاط الشاشة طوال مشاهدة الدرس: الفيديو محتوى مدفوع، والتسجيل
+    // منه بالتقاط الشاشة يسرّبه كاملاً بلا استحقاق.
+    SecureScreen.on();
     _watchKillSwitch();
     _prepare();
   }
 
   @override
   void dispose() {
+    SecureScreen.off();
     AppConfig.instance.removeListener(_onCfg);
     _progressTimer?.cancel();
     // إغلاق الجلسة المحلية: الملف يبقى في الكاش، ولا يبقى خادم يخدمه.
@@ -971,7 +888,37 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
         return;
       }
 
-      await c.initialize();
+      try {
+        // مهلة صريحة: بلا سقف زمني، تعليق الخادم المحلي (لا يصل رأس الملف)
+        // يُبقي `initialize` معلّقاً للأبد على ملصق داكن بلا أي رسالة —
+        // وهو ما ظهر شاشة سوداء لا تنتهي. انقضاء المهلة يعود إلى المسار
+        // الاحتياطي أسفله بدل الجمود بلا تفسير.
+        await c.initialize().timeout(const Duration(seconds: 25));
+      } catch (_) {
+        // البثّ من الملف المتزايد قد يفشل (خادم محلي لم يستجب، أو رأس الملف
+        // وصل ناقصاً قبل اكتماله). لا نتركه شاشة سوداء: نُنزّل الملف كاملاً
+        // ثم نُشغّله من القرص. مسار واحد للأمان لا يترك المستخدم بلا صورة.
+        await c.dispose();
+        if (res.session == null) rethrow;
+        // شريط التقدّم يُشغَّل هنا أيضاً: التنزيل الاحتياطي قد يستغرق دقائق،
+        // وصورة داكنة بلا أي حركة تبدو شاشة سوداء متجمدة لا انتظاراً.
+        _watchProgress();
+        final full = await CourseCache.instance.provide(
+            widget.api, widget.video.streamUrl);
+        if (!mounted) return;
+        if (!full.ok) {
+          setState(() {
+            _preparing = false;
+            _error = full.error.isEmpty ? 'تعذر تشغيل الفيديو' : full.error;
+          });
+          return;
+        }
+        _fromCache = true;
+        _session = null;
+        c = VideoPlayerController.file(full.file!);
+        // مهلة هنا كذلك: ملف تالف في الكاش يُبقي التهيئة معلّقة بلا نهاية.
+        await c.initialize().timeout(const Duration(seconds: 25));
+      }
       await c.setLooping(false);
       if (!mounted) {
         await c.dispose();
@@ -1165,7 +1112,9 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
       mainAxisSize: MainAxisSize.min,
       children: [
         AspectRatio(
-          aspectRatio: p.value.aspectRatio == 0 ? 16 / 9 : p.value.aspectRatio,
+          // `aspectRatio` يبقى صفراً حتى يصل أول إطار، والنسبة 16/9 هنا
+          // تُبقي المساحة محجوزة فلا تقفز الصفحة عند بدء العرض.
+          aspectRatio: p.value.aspectRatio <= 0 ? 16 / 9 : p.value.aspectRatio,
           child: VideoPlayer(p),
         ),
         const SizedBox(height: 10),
@@ -1196,6 +1145,22 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
                 style: const TextStyle(color: Colors.white70, fontSize: 12.5),
               ),
             ]),
+            // خطأ المشغّل بعد بدء التشغيل (ترميز غير مدعوم، ملف تالف) كان
+            // يُترك على سطح أسود صامت. نعرضه مع طريق إعادة المحاولة.
+            if (v.hasError) ...[
+              const SizedBox(height: 8),
+              Text(
+                v.errorDescription ?? 'تعذر تشغيل الفيديو',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12.5),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _hardReload,
+                icon: const Icon(Icons.refresh, size: 17),
+                label: const Text('إعادة المحاولة'),
+              ),
+            ],
           ]),
         ),
       ],

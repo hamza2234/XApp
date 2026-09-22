@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import '../core/version_rules.dart';
 import '../core/api.dart';
 import '../core/app_config.dart';
 import '../core/config.dart';
@@ -291,7 +292,31 @@ class _SettingsTabState extends State<_SettingsTab> {
     });
     try {
       _s!.telegramLink = _telegram.text.trim();
-      _s!.minVersion = int.tryParse(_minVer.text.trim()) ?? 1;
+      // القواعد في version_rules.dart كي تُفحص بلا واجهة — العطل الأصلي كان
+      // في هذه القفزة بالذات: `int.tryParse('1.4.0')` تُعيد null فيُحفظ 1.
+      final badMin = minVersionError(_minVer.text);
+      if (badMin != null) {
+        setState(() {
+          _saving = false;
+          _msg = badMin;
+        });
+        return;
+      }
+      final minVer = int.parse(_minVer.text.trim());
+      final badBlock = blockWithoutExitError(
+        minVersion: minVer,
+        hasBlockedVersions: _s!.blockedVersions.isNotEmpty,
+        updateMessage: _updMsg.text,
+        updateUrl: _updUrl.text,
+      );
+      if (badBlock != null) {
+        setState(() {
+          _saving = false;
+          _msg = badBlock;
+        });
+        return;
+      }
+      _s!.minVersion = minVer;
       _s!.updateMessage = _updMsg.text.trim();
       _s!.updateUrl = _updUrl.text.trim();
       _s!.updateImageUrl = _updImg.text.trim();
@@ -433,12 +458,20 @@ class _SettingsTabState extends State<_SettingsTab> {
                 Text('التحكم بالإصدارات',
                     style: TextStyle(fontWeight: FontWeight.w900)),
               ]),
+              const SizedBox(height: 6),
+              // شرح صريح لأن الخطأ الشائع هو كتابة اسم الإصدار (2.0.0)
+              // بدل رقم البناء، وكلاهما يبدو «إصداراً» في نظر المالك.
+              Text(
+                  'اكتب رقم البناء الظاهر في «التثبيتات حسب الإصدار» أعلاه '
+                  '(مثال: 5)، لا اسم الإصدار مثل 2.0.0.',
+                  style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 12),
               TextField(
                 controller: _minVer,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                    labelText: 'أدنى إصدار مسموح (versionCode)',
+                    labelText: 'أدنى رقم بناء مسموح',
+                    helperText: 'كل بناء أقدم من هذا الرقم يُقفل',
                     isDense: true),
               ),
               const SizedBox(height: 10),
@@ -448,19 +481,32 @@ class _SettingsTabState extends State<_SettingsTab> {
                     controller: _blockVer,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                        labelText: 'إيقاف إصدار محدد', isDense: true),
+                        labelText: 'إيقاف رقم بناء محدد',
+                        helperText: 'للتراجع عن إصدار بعينه',
+                        isDense: true),
                   ),
                 ),
                 const SizedBox(width: 8),
                 IconButton.filled(
                   onPressed: () {
-                    final v = int.tryParse(_blockVer.text.trim());
-                    if (v != null && !s.blockedVersions.contains(v)) {
-                      setState(() {
-                        s.blockedVersions.add(v);
-                        _blockVer.clear();
-                      });
+                    final raw = _blockVer.text.trim();
+                    final v = int.tryParse(raw);
+                    // الرقم غير الصالح كان يُتجاهل بلا أي أثر: يضغط المالك
+                    // الزر ولا يحدث شيء ولا يعرف السبب.
+                    if (v == null) {
+                      setState(() => _msg =
+                          'رقم البناء غير صالح — اكتب رقماً فقط (مثال: 5)');
+                      return;
                     }
+                    if (s.blockedVersions.contains(v)) {
+                      setState(() => _msg = 'هذا البناء موقوف أصلاً');
+                      return;
+                    }
+                    setState(() {
+                      s.blockedVersions.add(v);
+                      _blockVer.clear();
+                      _msg = 'أُضيف البناء $v — اضغط حفظ لتطبيقه';
+                    });
                   },
                   icon: const Icon(Icons.block, size: 18),
                   style: IconButton.styleFrom(
@@ -667,7 +713,10 @@ class _SettingsTabState extends State<_SettingsTab> {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(_msg!,
                 textAlign: TextAlign.center,
-                style: TextStyle(color: XTheme.ok)),
+                // رسالة الفشل كانت تُعرض بالأخضر نفسه، فيقرأ المالك «فشل
+                // الحفظ» أو «رقم غير صالح» كأنها نجاح ويمضي مطمئناً.
+                style: TextStyle(
+                    color: _msg == 'تم الحفظ' ? XTheme.ok : XTheme.danger)),
           ),
         _OwnerPanelSecurity(),
         const SizedBox(height: 18),
@@ -3147,33 +3196,22 @@ class _CoursesTabState extends State<_CoursesTab>
               ]),
             ),
             const SizedBox(height: 6),
-            // قفل الدورة: الفرق بين دورة مجانية وأخرى تحتاج مفتاحاً.
+            // مفتاح واحد: مقفلة أو مفتوحة. لا خيار «ظاهرة/مخفية» منفصل —
+            // الدورة إما تُعرض للطلاب وإما لا، والقفل هو ما يحدّد ذلك.
             ValueListenableBuilder<bool>(
               valueListenable: locked,
               builder: (_, v, __) => SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('تحتاج مفتاحاً للفتح',
-                    style: TextStyle(fontSize: 13.5)),
+                title: Text(v ? 'مقفلة — تحتاج مفتاحاً' : 'مفتوحة للجميع',
+                    style: const TextStyle(fontSize: 13.5)),
                 subtitle: Text(
                   v
-                      ? 'المشترك يُدخل مفتاحاً فتفتح كل فيديوهات الدورة'
-                      : 'كل الفيديوهات متاحة للجميع بلا مفتاح',
+                      ? 'يُدخل المشترك مفتاحاً فتفتح كل فيديوهات الدورة'
+                      : 'كل الفيديوهات متاحة بلا مفتاح',
                   style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
                 ),
                 value: v,
                 onChanged: (b) => locked.value = b,
-              ),
-            ),
-            ValueListenableBuilder<bool>(
-              valueListenable: published,
-              builder: (_, v, __) => SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('ظاهرة في التطبيق',
-                    style: TextStyle(fontSize: 13.5)),
-                subtitle: Text('المنشورة فقط تظهر للمستخدمين',
-                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
-                value: v,
-                onChanged: (b) => published.value = b,
               ),
             ),
           ]),
@@ -3289,31 +3327,23 @@ class _CoursesTabState extends State<_CoursesTab>
                 decoration: const InputDecoration(labelText: 'وصف مختصر'),
               ),
               const SizedBox(height: 6),
+              // خيار واحد لا أكثر: مقفل أو مفتوح. بقية الأوضاع (مجاني/منشور)
+              // كانت تُشتّت المالك في ثلاث حالات لا فرق بينها عملياً: الفيديو
+              // إما يُفتح أو يُقفل.
               ValueListenableBuilder<bool>(
                 valueListenable: free,
-                builder: (_, on, __) => SwitchListTile(
+                builder: (_, open, __) => SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('مجاني — متاح للجميع',
-                      style: TextStyle(fontSize: 13.5)),
+                  title: Text(open ? 'مفتوح' : 'مقفل',
+                      style: const TextStyle(fontSize: 13.5)),
                   subtitle: Text(
-                    'المجاني يُشاهَد حتى لو كانت الدورة مقفلة',
+                    open
+                        ? 'يُشاهد بلا مفتاح دورة'
+                        : 'يحتاج مفتاح فتح الدورة',
                     style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
                   ),
-                  value: on,
+                  value: open,
                   onChanged: (b) => free.value = b,
-                ),
-              ),
-              ValueListenableBuilder<bool>(
-                valueListenable: published,
-                builder: (_, on, __) => SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('منشور', style: TextStyle(fontSize: 13.5)),
-                  subtitle: Text(
-                    'المخفي لا يظهر لأي طالب',
-                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
-                  ),
-                  value: on,
-                  onChanged: (b) => published.value = b,
                 ),
               ),
             ]),
@@ -3429,15 +3459,17 @@ class _CoursesTabState extends State<_CoursesTab>
             const SizedBox(height: 6),
             ValueListenableBuilder<bool>(
               valueListenable: free,
-              builder: (_, v, __) => SwitchListTile(
+              builder: (_, open, __) => SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('مجاني — متاح للجميع',
-                    style: TextStyle(fontSize: 13.5)),
+                title: Text(open ? 'مفتوح' : 'مقفل',
+                    style: const TextStyle(fontSize: 13.5)),
                 subtitle: Text(
-                  'المجاني يُشاهَد حتى لو كانت الدورة مقفلة',
+                  open
+                      ? 'يُشاهد بلا مفتاح دورة'
+                      : 'يحتاج مفتاح فتح الدورة',
                   style: TextStyle(fontSize: 11.5, color: XTheme.textDim),
                 ),
-                value: v,
+                value: open,
                 onChanged: (b) => free.value = b,
               ),
             ),
@@ -3815,6 +3847,16 @@ class _CoursesTabState extends State<_CoursesTab>
       child: ExpansionTile(
         shape: const Border(),
         collapsedShape: const Border(),
+        // غلاف الدورة متاح من هنا مباشرة، لا من داخل نافذة التعديل وحدها:
+        // تغيير الصورة إجراء متكرّر لا يستحق فتح نموذج كامل من أجله.
+        leading: _CourseCoverButton(
+          api: widget.api,
+          courseId: id,
+          hasCover: '${c['coverUrl'] ?? ''}'.isNotEmpty,
+          coverUrl: '${c['coverUrl'] ?? ''}',
+          onUploaded: _load,
+          onToast: _toast,
+        ),
         title: Text(title,
             style:
                 const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w900)),
@@ -4068,4 +4110,71 @@ class _CoursesTabState extends State<_CoursesTab>
             style: TextStyle(
                 fontSize: 10, fontWeight: FontWeight.w800, color: color)),
       );
+}
+
+
+/// زر غلاف الدورة: يعرض الصورة الحالية ويستبدلها بضغطة.
+///
+/// صورة الغلاف تمرّ من الخادم موقّعة كبقية الصور، فلا يُكشف مفتاح R2 الخام.
+class _CourseCoverButton extends StatelessWidget {
+  const _CourseCoverButton({
+    required this.api,
+    required this.courseId,
+    required this.hasCover,
+    required this.coverUrl,
+    required this.onUploaded,
+    required this.onToast,
+  });
+
+  final Api api;
+  final String courseId;
+  final bool hasCover;
+  final String coverUrl;
+  final Future<void> Function() onUploaded;
+  final void Function(String) onToast;
+
+  @override
+  Widget build(BuildContext context) {
+    final thumb = Container(
+      width: 46,
+      height: 46,
+      decoration: BoxDecoration(
+        color: XTheme.surface2,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: hasCover
+          ? Image.network(
+              '$kApiBase$coverUrl',
+              headers: api.signFor('GET', coverUrl),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Icon(
+                  Icons.image_not_supported_outlined,
+                  size: 16, color: XTheme.textDim),
+            )
+          : Icon(Icons.image_outlined, size: 18, color: XTheme.textDim),
+    );
+    return Tooltip(
+      message: hasCover ? 'تغيير صورة الدورة' : 'إضافة صورة للدورة',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () async {
+          final picker = ImagePicker();
+          final picked = await picker.pickImage(
+              source: ImageSource.gallery, maxWidth: 1280, imageQuality: 88);
+          if (picked == null) return;
+          try {
+            final bytes = await picked.readAsBytes();
+            await api.ownerUploadCourseCover(
+                courseId, base64Encode(bytes), 'image/jpeg');
+            onToast('حُفظ غلاف الدورة');
+            await onUploaded();
+          } catch (e) {
+            onToast(e is ApiException ? e.message : 'فشل رفع الغلاف');
+          }
+        },
+        child: thumb,
+      ),
+    );
+  }
 }

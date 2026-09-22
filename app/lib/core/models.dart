@@ -365,6 +365,48 @@ class ChatAuthor {
 }
 
 /// رسالة دردشة: نص أو صورة أو صوت أو فيديو، مع من رآها.
+/// مقتطف الرسالة المقتبَسة في ردّ.
+///
+/// يأتي جاهزاً من الخادم مع كل ردّ: عرضه في العميل يعني أن الردّ يظل مفهوماً
+/// ولو كانت الرسالة الأصلية حُذفت أو خرجت من الصفحة المحمّلة.
+class ChatReplyPreview {
+  const ChatReplyPreview({
+    required this.id,
+    this.body = '',
+    this.kind = 'text',
+    this.nickname = '',
+  });
+
+  final String id;
+  final String body;
+  final String kind;
+  final String nickname;
+
+  /// نصّ معروض بدل الفراغ حين لا يكون للرسالة المقتبَسة نصّ.
+  String get label {
+    final t = body.trim();
+    if (t.isNotEmpty) return t;
+    switch (kind) {
+      case 'image':
+        return 'صورة';
+      case 'video':
+        return 'مقطع فيديو';
+      case 'audio':
+        return 'رسالة صوتية';
+      default:
+        return 'رسالة';
+    }
+  }
+
+  factory ChatReplyPreview.fromJson(Map<String, dynamic> j) =>
+      ChatReplyPreview(
+        id: j['id']?.toString() ?? '',
+        body: j['body']?.toString() ?? '',
+        kind: j['kind']?.toString() ?? 'text',
+        nickname: j['nickname']?.toString() ?? '',
+      );
+}
+
 class ChatMessage {
   const ChatMessage({
     required this.id,
@@ -382,6 +424,8 @@ class ChatMessage {
     this.waveform = const [],
     this.pending = false,
     this.failed = false,
+    this.replyTo = '',
+    this.replyPreview,
   });
 
   final String id;
@@ -409,6 +453,13 @@ class ChatMessage {
   final bool pending;
   final bool failed;
 
+  /// معرّف الرسالة التي يردّ عليها هذا المستخدم (فارغ إن لم يكن ردّاً).
+  final String replyTo;
+
+  /// مقتطف الرسالة المقتبَسة كما أرسله الخادم — يُعرض في رأس الردّ بلا
+  /// نداء إضافي، ولو كانت الرسالة الأصلية خارج الصفحة المحمّلة.
+  final ChatReplyPreview? replyPreview;
+
   bool get isText => kind == 'text' || kind == 'system';
   bool get isImage => kind == 'image';
   bool get isAudio => kind == 'audio';
@@ -435,17 +486,21 @@ class ChatMessage {
   }
 
   ChatMessage copyWith({
+    String? id,
+    String? mediaUrl,
     List<ChatAuthor>? seenBy,
     List<double>? waveform,
     bool? pending,
     bool? failed,
+    String? replyTo,
+    ChatReplyPreview? replyPreview,
   }) =>
       ChatMessage(
-        id: id,
+        id: id ?? this.id,
         roomId: roomId,
         kind: kind,
         body: body,
-        mediaUrl: mediaUrl,
+        mediaUrl: mediaUrl ?? this.mediaUrl,
         mediaMime: mediaMime,
         mediaSize: mediaSize,
         at: at,
@@ -456,6 +511,8 @@ class ChatMessage {
         waveform: waveform ?? this.waveform,
         pending: pending ?? this.pending,
         failed: failed ?? this.failed,
+        replyTo: replyTo ?? this.replyTo,
+        replyPreview: replyPreview ?? this.replyPreview,
       );
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -476,6 +533,11 @@ class ChatMessage {
             .map((e) => ChatAuthor.fromJson(e.cast<String, dynamic>()))
             .toList(),
         waveform: _parseWaveform(j['waveform']),
+        replyTo: j['replyTo']?.toString() ?? '',
+        replyPreview: j['replyPreview'] is Map
+            ? ChatReplyPreview.fromJson(
+                (j['replyPreview'] as Map).cast<String, dynamic>())
+            : null,
       );
 
   /// يفكّ مخطط الموجة من سلسلة «0.120,0.480,...».
@@ -507,7 +569,9 @@ class ChatState {
     this.mediaScope = 'subscribers',
     this.maxMediaMb = 12,
     this.mediaSeconds = 120,
-    this.pollMs = 4000,
+    // 7 ثوان لا 4: كل دورة تكلّف طلبين (الرسائل والحالة)، و4 ثوان تضاعف
+    // الطلبات بلا فرق محسوس — الرسالة تصل خلال ثوان في الحالتين.
+    this.pollMs = 7000,
     this.rooms = const [],
     this.canWrite = false,
     this.writeBlockedReason = '',
@@ -563,7 +627,7 @@ class ChatState {
       mediaScope: j['mediaScope']?.toString() ?? 'subscribers',
       maxMediaMb: (j['maxMediaMb'] as num?)?.toInt() ?? 12,
       mediaSeconds: (j['mediaSeconds'] as num?)?.toInt() ?? 120,
-      pollMs: (j['pollMs'] as num?)?.toInt() ?? 4000,
+      pollMs: (j['pollMs'] as num?)?.toInt() ?? 7000,
       rooms: ((j['rooms'] as List?) ?? const [])
           .whereType<Map>()
           .map((e) => ChatRoom.fromJson(e.cast<String, dynamic>()))

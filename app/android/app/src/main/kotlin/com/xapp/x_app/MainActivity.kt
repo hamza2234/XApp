@@ -35,6 +35,21 @@ class MainActivity : FlutterFragmentActivity() {
                             ""
                         }
                     )
+                    // منع التقاط الشاشة (لقطات ولقطات فيديو) — يُفعَّل عند فتح
+                    // المخططات وفيديوهات الدورات ويُطفأ عند الخروج.
+                    //
+                    // FLAG_SECURE يجعل النظام نفسه يرفض الالتقاط، فلا تُحفظ
+                    // صورة ولا يسجّل مسجّل الشاشة المحتوى. هذا حجب على مستوى
+                    // النظام: لا ينفع معه تطبيق تصوير يطلب صلاحية، بخلاف أي
+                    // حجب داخل الواجهة الذي يُلتفّ عليه بالتصوير الخارجي.
+                    "setSecure" -> {
+                        val on = call.arguments as? Boolean ?: false
+                        window.setFlags(
+                            if (on) android.view.WindowManager.LayoutParams.FLAG_SECURE else 0,
+                            android.view.WindowManager.LayoutParams.FLAG_SECURE
+                        )
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }

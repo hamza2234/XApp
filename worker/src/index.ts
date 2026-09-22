@@ -166,6 +166,12 @@ const LOCAL_PREFIX = 'local:'
 const LOCAL_R2 = 'local/'
 const ROOT_CATALOG = 'catalog/v1/brands.json'
 
+// 8MiB لا 4: R2 يرفض كل جزء أصغر من 5MiB (آخر جزء وحده مستثنى)، فالرفع
+// بـ4MiB كان يفشل على أي مقطع يتجاوز جزءاً واحداً — أي كل فيديو فوق 4MiB،
+// وهو حدّ الفشل الذي ظهر كأنه «تقييد على الرفع». و8MiB تبقى تحت حدّ حافة
+// العامل بهامش مريح مع ترويسات الطلب.
+const CHAT_UPLOAD_CHUNK = 8 * 1024 * 1024
+
 const BLOCKED_UA = /(curl|wget|python-requests|python-urllib|scrapy|go-http-client|libwww|node-fetch|axios\/|postmanruntime|httpie)|^\s*$|bot|spider|crawler/i
 
 function json(body: unknown, status = 200, extra?: Record<string, string>): Response {
@@ -361,7 +367,10 @@ function normalizeSettings(s: XSettings, raw: Partial<XSettings>): XSettings {
   s.chatWelcome = String(s.chatWelcome ?? '').slice(0, 300)
   if (!['all', 'registered', 'subscribers'].includes(s.chatWriteScope)) s.chatWriteScope = 'registered'
   if (!['subscribers', 'none'].includes(s.chatMediaScope)) s.chatMediaScope = 'subscribers'
-  s.chatMaxMediaMb = Math.max(1, Math.min(25, Math.floor(Number(s.chatMaxMediaMb) || 12)))
+  // الحدّ الأعلى 200MB لا 25: الرفع على أجزاء داخل R2 فلا سقف تقني عند 25
+  // (سقف R2 نفسه 5TiB و10,000 جزء)، و25 كانت تكفي مقطعاً قصيراً فقط. يبقى
+  // حدّاً يمنع تحويل الدلو إلى مزبلة ملفات ويراعي بيانات مستخدمي الجوال.
+  s.chatMaxMediaMb = Math.max(1, Math.min(200, Math.floor(Number(s.chatMaxMediaMb) || 12)))
   s.chatMediaSeconds = Math.max(5, Math.min(300, Math.floor(Number(s.chatMediaSeconds) || 120)))
   // دور التحديث: أقل من ثانيتين يرهق الخادم، وأكثر من 30 يعني دردشة بطيئة.
   s.chatPollMs = Math.max(2000, Math.min(30000, Math.floor(Number(s.chatPollMs) || 4000)))
@@ -397,7 +406,11 @@ async function noteAbuse(env: Env, request: Request, reason: string, severity: '
       const dk = `abusedev:${dev}`
       const dc = Number(await env.QUOTA.get(dk)) || 0
       await env.QUOTA.put(dk, String(dc + 1), { expirationTtl: 3600 })
-      if (dc + 1 >= 15) {
+      // 15 إساءة كانت تكفي لحظر جهاز نهائياً. هذا الرقم يبلغه إنسان
+      // بسهولة: تحديث سريع للتطبيق، أو بقاء الشاشة مفتوحة على شبكة
+      // تتقطّع، أو جهاز يرسل طلبه مرتين. الحظر النهائي للجهاز صار 40،
+      // وهو رقم لا يصله إلا من يعيد المحاولة آلياً بعد الرفض.
+      if (dc + 1 >= 40) {
         await banDevice(env, dev, `auto:${reason}`, request)
       }
     }
@@ -408,7 +421,10 @@ async function noteAbuse(env: Env, request: Request, reason: string, severity: '
       // الحظر بعد 20 إساءة كان يضرب عناوين CGNAT المشتركة: جهاز واحد مسيء
       // يحجب جيرانه كلهم. صار التسجيل أولاً، والحظر عند 60 إساءة في نفس
       // النافذة القصيرة — رقم لا يبلغه مستخدم شرعي.
-      if (count + 1 >= 60) {
+      // حظر العنوان أوسع أثراً من حظر الجهاز: مشغّلو الجوال يضعون آلاف
+      // المستخدمين خلف عنوان واحد، فحظره يعاقب من لم يذنب. صار 200 إساءة
+      // في النافذة القصيرة — رقم آلي بحت.
+      if (count + 1 >= 200) {
         await env.QUOTA.put(`hardban:${addr}`, 'repeat', { expirationTtl: 3600 })
         await logSecurity(env, request, 'ip_hardban', `reason=${reason} strikes=${count + 1}`)
       }
@@ -437,6 +453,64 @@ async function banDevice(env: Env, deviceId: string, reason: string, request?: R
      ON CONFLICT(id) DO NOTHING`
   ).bind(deviceId, reason, new Date().toISOString()).run()
   if (request) await logSecurity(env, request, 'device_banned', reason)
+}
+
+/**
+ * حدّ الانفجار: نافذة ثانية واحدة.
+ *
+ * كل الحدود الأخرى نوافذها دقائق، فالعدّاد يسمح بسحب الحدّ كاملاً في جزء من
+ * الثانية: 240 بحثاً في 600 ثانية تعني عملياً «بلا حدّ» لمن يكتب حلقة.
+ * هذا الحدّ يقيس المعدّل اللحظي فيوقف الآلة دون أن يلمس المستخدم الذي
+ * يفتح ملفاً أو يبحث بيده — الحدّ 8 أضعاف أسرع استعمال بشري.
+ */
+async function burstLimit(env: Env, request: Request, bucket: string, max: number): Promise<void> {
+  const dev = deviceOf(request)
+  const who = dev || `ip:${ip(request)}`
+  const slot = Math.floor(Date.now() / 1000)
+  const key = `burst:${bucket}:${who}:${slot}`
+  const used = Number(await kvGet(env, key)) || 0
+  if (used + 1 > max) {
+    if (await hasOwnerSession(env, request)) return
+    await logSecurity(env, request, 'burst_limited', `bucket=${bucket} max=${max}/s`)
+    // لا يُحتسب الانفجار إساءةً خطيرة: عاصفة إعادة المحاولة بعد انقطاع شبكة
+    // ترسل عشرات الطلبات في ثانية، وهي سلوك جهاز شرعي لا مهاجم. كانت
+    // تُحتسب «high» فتبلغ 15 إساءة وتحظر الجهاز نهائياً.
+    await noteAbuse(env, request, `burst:${bucket}`, 'low')
+    throw new HttpError(429, RATE_LIMIT_MSG)
+  }
+  try {
+    // ثانيتان تكفيان: المفتاح مُرقّم بالثانية ولا يُقرأ بعده.
+    await env.QUOTA.put(key, String(used + 1), { expirationTtl: 2 })
+  } catch { /* تعذّر العدّ لا يُسقط الطلب */ }
+}
+
+/**
+ * كشف السحب المنهجي: عدد عناصر مختلفة يطلبها المصدر نفسه في نافذة.
+ *
+ * حدّ المعدّل يقيس الطلبات، وهذا يقيس *تنوّعها*. الفرق جوهري: من يفتح
+ * مخططاً ويرجع إليه يكرّر العنوان نفسه فلا يُحتسب، أما من يدور على كل
+ * الشركات أو على كل معرّفات الملفات فيُحتسب ولو كان بطيئاً تحت الحدّ.
+ * ويُحتسب النجاح وحده — الطلبات الفاشلة ليست سحباً.
+ */
+async function detectSweep(
+  env: Env, request: Request, bucket: string, item: string, max: number, window = 600
+): Promise<void> {
+  const dev = deviceOf(request)
+  const who = dev || `ip:${ip(request)}`
+  const key = `sweep:${bucket}:${who}`
+  const seen = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
+  if (seen.includes(item)) return
+  seen.push(item)
+  if (seen.length > max) {
+    if (await hasOwnerSession(env, request)) return
+    await logSecurity(env, request, 'scraping_suspected',
+      `bucket=${bucket} distinct=${seen.length}/${max} dev=${dev || '-'}`)
+    await noteAbuse(env, request, `sweep:${bucket}`, 'low')
+    throw new HttpError(429, RATE_LIMIT_MSG)
+  }
+  try {
+    await env.QUOTA.put(key, JSON.stringify(seen.slice(-max * 2)), { expirationTtl: window })
+  } catch { /* ignore */ }
 }
 
 /**
@@ -505,15 +579,38 @@ async function hasOwnerSession(env: Env, request: Request): Promise<boolean> {
  *
  * العناوين بلا معرّف جهاز (أدوات آلية غالباً) تبقى على الحدّ بالعنوان.
  */
+/**
+ * رسالة تجاوز الحدّ.
+ *
+ * لا تقول «حظر» ولا «تم إيقافك»: من بلغ الحدّ في الغالب مستخدم يكتب بسرعة
+ * أو شبكته تتقطّع فتعيد الطلب، وقد يكون طفل بضغطة متكرّرة. الرسالة تطلب
+ * التمهّل ولا تتّهم.
+ */
+const RATE_LIMIT_MSG = 'طلبات كثيرة في وقت قصير — انتظر قليلاً ثم تابع'
+
 async function rateLimit(env: Env, request: Request, bucket: string, limit: number, window: number): Promise<void> {
   const dev = deviceOf(request)
   const key = dev ? `rl:${bucket}:d:${dev}` : `rl:${bucket}:ip:${ip(request)}`
   const used = Number(await kvGet(env, key)) || 0
   if (used + 1 > limit) {
+    // المالك لا يُحظر بحدّ تلقائي. جلسة المالك موقّعة بـX_JWT_SECRET فلا
+    // تُزوَّر، والفحص لا يُنفَّذ إلا عند بلوغ الحدّ — أي أنه لا يُكلّف شيئاً
+    // في المسار الطبيعي. هذا يمنع سيناريو أن يغلق المالك نفسه خارج تطبيقه
+    // باستعمال كثيف مشروع.
+    if (await hasOwnerSession(env, request)) return
     // لا يُحتسب تجاوز الحدّ في رصيد الإساءة: مستخدم شرعي على عنوان مشترك
     // قد يبلغه بسهولة، واحتسابه كان يحوّله إلى حظر كامل بعد 20 مرة.
     await logSecurity(env, request, 'rate_limited', `bucket=${bucket} limit=${limit}/${window}s`)
-    throw new HttpError(429, 'طلبات كثيرة جداً — تم الحظر مؤقتاً')
+    // تجاوز الحدّ مضاعفاً عدة مرات نمط آلي، ويُسجَّل ليراه المالك. لا
+    // يُحظر شيء هنا: التمييز بين إنسان سريع وسكربت يحتاج بيانات، ولوح
+    // المالك هي موضع القرار لا حظر تلقائي أعمى.
+    if (used + 1 > limit * 8) {
+      await logSecurity(env, request, 'rate_limited_hard',
+        `bucket=${bucket} used=${used + 1} limit=${limit}/${window}s`)
+    }
+    // صياغة إنسانية بلا كلمة «حظر»: من بلغ الحدّ غالباً مستخدم سريع أو
+    // شبكة تتقطّع، وإخباره أنه «محظور» يُشعره بأنه متّهم وهو لم يفعل شيئاً.
+    throw new HttpError(429, RATE_LIMIT_MSG)
   }
   try {
     await env.QUOTA.put(key, String(used + 1), { expirationTtl: window })
@@ -528,7 +625,7 @@ async function rateLimit(env: Env, request: Request, bucket: string, limit: numb
   const ipUsed = Number(await kvGet(env, ipKey)) || 0
   if (ipUsed + 1 > limit * 10) {
     await logSecurity(env, request, 'rate_limited_ip', `bucket=${bucket} limit=${limit * 10}/${window}s`)
-    throw new HttpError(429, 'طلبات كثيرة جداً — تم الحظر مؤقتاً')
+    throw new HttpError(429, RATE_LIMIT_MSG)
   }
   try {
     await env.QUOTA.put(ipKey, String(ipUsed + 1), { expirationTtl: window })
@@ -579,6 +676,7 @@ async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
   const dev = deviceOf(request)
   const addr = ip(request)
   if (!dev || addr === 'unknown') return
+  if (await kvGet(env, `devban:${dev}`)) return
   const key = `devs:${addr}`
   const list = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
   if (list.includes(dev)) return
@@ -589,7 +687,7 @@ async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
     await logSecurity(env, request, 'device_farm', `devices=${list.length} strikes=${strikes + 1}`)
     if (strikes + 1 >= 3) {
       await env.QUOTA.put(`hardban:${addr}`, 'device-farm', { expirationTtl: DAY })
-      throw new HttpError(403, 'تم حظر هذا العنوان — تواصل مع الدعم')
+      await logSecurity(env, request, 'ip_hardban', `device-farm strikes=${strikes + 1}`)
     }
   }
   await env.QUOTA.put(key, JSON.stringify(list.slice(-500)), { expirationTtl: DAY })
@@ -700,16 +798,62 @@ async function walletKey(env: Env, fp: string, dev: string): Promise<string> {
     'SELECT 1 AS x FROM x_guest_wallets WHERE device_id = ?1'
   ).bind(fp).first()
   if (mine) return fp
+  // تُنشأ محفظة فارغة ولا يُنقل رصيد أحد.
+  //
+  // كانت الترحيل تنسخ رصيد المحفظة القديمة كاملاً. وهي مسار سرقة: معرّف
+  // الجهاز ليس سراً (يظهر في الدردشة وفي تصدير اللوحة)، فمن قرأه يرسله مع
+  // بصمة جهازه فيمرّ الترحيل وينسخ رصيد الضحية إلى محفظته — بلا حاجة إلى
+  // بصمتها ولا إلى جلسة. رصيد الزوار لا يُرحَّل الآن إطلاقاً؛ من فقد
+  // بصمته يفقد المنحة اليومية فقط، وهي تُستعاد تلقائياً في اليوم التالي.
   await env.XDB.prepare(
     `INSERT OR IGNORE INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
-     SELECT ?1, balance, expires_at, created_at, updated_at FROM x_guest_wallets WHERE device_id = ?2`
-  ).bind(fp, dev).run()
+     VALUES (?1, 0, 0, ?2, ?2)`
+  ).bind(fp, new Date().toISOString()).run()
   return fp
 }
 
 /** مفتاح الهوية لهذا الطلب — يُحسب مرة ويُمرَّر لكل عمليات الخصم والعرض. */
 async function walletOf(env: Env, request: Request): Promise<string> {
   return walletKey(env, fingerprint(request), deviceOf(request))
+}
+
+/**
+ * هل بدّل المستخدم بصمة جهازه ليعيد الحصول على منحة جديدة؟
+ *
+ * البصمة تُقارن بعضوية موثوقة: لغير المسجّل معرّف الجهاز الموقّع في جلسته
+ * (يُتحقق منه في `authenticate`)، وللمسجّل معرّف حسابه. البصمة تُثبَّت على
+ * العضوية أول مرة تُرى، فتبديلها بعد ذلك لا يُنتج هوية جديدة.
+ *
+ * هذا هو الفرق بين إصلاح العلة وترقيعها: كان الخصم بمفتاح `fp` المُرسَل من
+ * العميل، وتبديله يمنح منحة يومية جديدة كل مرة، وعملات هديّة جديدة، وكل
+ * المخططات مجاناً بلا حد. ربط البصمة بالعضوية يجعل الهوية واحدة ولو بدّل
+ * الجهاز بصمته ألف مرة.
+ *
+ * لا نحظر صاحب البصمة المبدَّلة ولا نمنع صرفه عملاته المشتراة — نمنعه من
+ * المنحة المجانية والهديّة وحدهما، وهو ما كان يُستغَل. من غيّر بصمته
+ * لحادث جهاز حقيقي يتواصل مع المالك، والناس العاديون لا يبدّلونها أصلاً.
+ */
+async function fingerprintRotated(
+  env: Env, request: Request, caller: Caller
+): Promise<boolean> {
+  const fp = request.headers.get('x-device-fp')?.trim().toLowerCase() ?? ''
+  // نسخ قديمة لا ترسل بصمة — لا شيء نربطه ولا شيء نمنعه.
+  if (!/^[0-9a-f]{16,64}$/.test(fp)) return false
+  const who = caller.role === 'user' || caller.role === 'owner'
+    ? `u:${caller.uid}`
+    : `d:${deviceOf(request)}`
+  if (!deviceOf(request) && !who.startsWith('u:')) return false
+  const key = `fpb:${who}`
+  const bound = await kvGet(env, key)
+  if (!bound) {
+    try {
+      await env.QUOTA.put(key, fp, { expirationTtl: 90 * DAY })
+    } catch { /* تعذّر التثبيت لا يمنع الطلب */ }
+    return false
+  }
+  if (bound === fp) return false
+  await logSecurity(env, request, 'fingerprint_rotated', `who=${who}`)
+  return true
 }
 
 /**
@@ -765,12 +909,26 @@ async function emptyReason(env: Env, caller: Caller, fp: string): Promise<HttpEr
  * واحدة، فلا يفاجأ المستخدم بأن رصيده في الشريط لا يطابق ما يُخصم فعلاً.
  */
 async function chargeOne(
-  env: Env, caller: Caller, fp: string, settings: XSettings
+  env: Env, caller: Caller, fp: string, settings: XSettings,
+  addr = '', rotated = false
 ): Promise<{ freeLeft: number; balance: number; source: string }> {
   if (caller.role === 'owner') return { freeLeft: -1, balance: -1, source: 'owner' }
 
-  const freeLeft = await takeDailyFree(env.XDB, fp, settings.dailyFreeQuota)
-  if (freeLeft >= 0) return { freeLeft, balance: -1, source: 'free' }
+  // بصمة مبدَّلة: لا منحة مجانية. لا يُرفض الطلب كله — من دفع عملاته يجب
+  // أن يصرفها، والعقوبة على المُستغَل وحده (المنحة) لا على الرصيد المدفوع.
+  if (!rotated) {
+    // المنحة الشخصية أولاً، ثم سقف العنوان: لو سبق سقف العنوان لكانت
+    // الهوية الواحدة تُخصم منها منحة لم تُمنح أصلاً. فحص العنوان يقع بعد
+    // نجاح المنحة الشخصية فقط، فلا يُخصم من سقف العنوان طلب لم يُمنح.
+    const freeLeft = await takeDailyFree(env.XDB, fp, settings.dailyFreeQuota)
+    if (freeLeft >= 0) {
+      if (await takeDailyFreeByIp(env.XDB, addr, settings.dailyFreeQuota)) {
+        return { freeLeft, balance: -1, source: 'free' }
+      }
+      // بلغ العنوان سقفه: تبقى المنحة مستهلكة لهذه الهوية كي لا يستمر
+      // التفريخ، وينتقل الطلب للعملات إن وُجدت.
+    }
+  }
 
   const cost = Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
   const balance = await spendCoins(env, caller, fp, cost)
@@ -786,15 +944,16 @@ async function chargeOne(
  * واحد. المفاتيح في KV بصلاحية يومين كي لا تتراكم.
  */
 async function consumeFileOnce(
-  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
-  fp: string, fileKey: string
+  env: Env, ctx: ExecutionContext, request: Request, caller: Caller,
+  settings: XSettings, fp: string, fileKey: string
 ): Promise<number> {
   const digest = await hmacHex(settings.telegramLink || 'x-file', `${fp}|${fileKey}|${today()}`)
   const seenKey = `fo:${fp}:${digest.slice(0, 32)}`
   const cached = await kvGet(env, seenKey)
   if (cached) return Number(cached)
 
-  const r = await chargeOne(env, caller, fp, settings)
+  const r = await chargeOne(env, caller, fp, settings, ip(request),
+    await fingerprintRotated(env, request, caller))
   const left = r.source === 'free' ? r.freeLeft : r.balance
   ctx.waitUntil(env.QUOTA.put(seenKey, String(left), { expirationTtl: 2 * DAY })
     .catch(() => {}))
@@ -825,7 +984,10 @@ async function mirrorSearchCompat(
   if (opts.keyword) { binds.push(`%${opts.keyword.toLowerCase()}%`); clauses.push(`LOWER(data) LIKE ?${binds.length}`) }
   // كل كلمة شرط مستقل (AND): بحث «iphone 11» كان يرجع صفراً لأن المطابقة
   // كانت على النص كاملاً. سقف 4 كلمات يحدّ كلفة الاستعلام.
-  const tokens = opts.query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 4)
+  // ترتيب الكلمات لا يجوز أن يحجب النتيجة: «سمارت 7» و«7 سمارت» يبحثان عن
+  // الشيء نفسه، وكلاهما يُفرض عليه AND بترتيب مختلف — وهو ترتيب لا معنى له
+  // في قاعدة تحفظ النص مسلسلاً. لذلك تُرتَّب الكلمات في الاستعلام نفسه.
+  const tokens = opts.query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 4).sort()
   for (const t of tokens) {
     binds.push(`%${t}%`)
     clauses.push(`LOWER(data) LIKE ?${binds.length}`)
@@ -848,6 +1010,15 @@ async function mirrorSearchCompat(
 }
 
 /**
+ * تطبيع النص قبل المقارنة: حذف الفواصل والأشكال المتشابهة وعلامات التشكيل.
+ *
+ * مشترك بين الترتيب والبحث لأن كليهما يقارن نصّ المستخدم بنصّ البيانات،
+ * والاثنان يكتبان الشيء نفسه بصيغتين («smart7» و«smart 7»).
+ */
+const squash = (v: string) =>
+  v.replace(/[\s\u0640\-_\/\\.,+()]+/g, "").replace(/[\u064B-\u0652\u0670]/g, "")
+
+/**
  * درجة ملاءمة سجل لعبارة البحث — الأعلى أولاً.
  *
  * بنية سجل التوافقات: `compatibleModels` قائمة موديلات، و`subCategory` كائن
@@ -867,25 +1038,32 @@ function relevanceScore(fields: Record<string, unknown>, tokens: string[], q: st
   // الترتيب يُبنى على أفضل موديل في السجل لا على مجموع كل الموديلات:
   // سجل فيه عشرة موديلات كلها مطابقة جزئية كان يسبق سجلاً فيه الموديل
   // المطلوب حرفياً. المهم أن يوجد موديل واحد مطابق تماماً.
+  // المطابقة تُجرَّب على الصيغة المُطبَّعة لا الخام وحدها: المستخدم يكتب
+  // «smart7» بينما البيانات تحفظ «smart 7»، وبلا حذف الفاصل يخرج البحث
+  // فارغاً وهو يرى السطر أمامه.
+  const cq2 = squash(q)
+  const cTokens = tokens.map(t => squash(t)).filter(Boolean)
+  const cSub = squash(sub)
+  const cHay = squash(hay)
+
   let best = 0
   for (const m of models) {
-    const cm = m.replace(/[\s-]+/g, '')
-    const cq = q.replace(/[\s-]+/g, '')
+    const cm = squash(m)
     let s = 0
-    if (cq && cm === cq) s = 100
-    else if (cq && cm.startsWith(cq)) s = 80
+    if (cq2 && cm === cq2) s = 100
+    else if (cq2 && cm.startsWith(cq2)) s = 80
     // اسم الموديل يُكتب في البيانات مسبوقاً بالشركة («xiaomi redmi note 11»)،
     // فمطابقة الذيل تطابق الاسم الذي كتبه المستخدم.
-    else if (cq && cm.endsWith(cq)) s = 70
-    else if (cq && cq.length >= 3 && cm.includes(cq)) s = 60
-    else s = tokens.reduce((acc, t) =>
-      acc + (m === t ? 50 : m.startsWith(t) ? 30 : m.includes(t) ? 18 : 0), 0)
+    else if (cq2 && cm.endsWith(cq2)) s = 70
+    else if (cq2 && cq2.length >= 3 && cm.includes(cq2)) s = 60
+    else s = cTokens.reduce((acc, t) =>
+      acc + (cm === t ? 50 : cm.startsWith(t) ? 30 : cm.includes(t) ? 18 : 0), 0)
     if (s > best) best = s
   }
 
   // كسر التعادل: مطابقة النوع الفرعي، ثم أي مطابقة في السجل كله.
-  let tie = tokens.reduce((acc, t) => acc + (sub.includes(t) ? 4 : 0), 0)
-  for (const t of tokens) if (hay.includes(t)) tie += 1
+  let tie = cTokens.reduce((acc, t) => acc + (cSub.includes(t) ? 4 : 0), 0)
+  for (const t of cTokens) if (cHay.includes(t)) tie += 1
   return best * 1000 + tie
 }
 
@@ -933,6 +1111,33 @@ async function takeDailyFree(
   return row ? Math.max(0, limit - row.used) : -1
 }
 
+/**
+ * سقف المنحة اليومية على العنوان، لا على الهوية وحدها.
+ *
+ * الهوية (`fp`) يرسلها العميل ويمكن تبديلها بحرية، فمن يدوّرها يأخذ منحة
+ * جديدة كل مرة — كل المخططات مجاناً بلا حد. المنحة مربوطة بالمحفظة لا
+ * بالجهاز، فلا يكفي أن نعرف أن أجهزة هذا العنوان كثيرة؛ نمنع التفريخ من
+ * أصله: عنوان واحد لا يحصل على أكثر من ضعف ما تحصل عليه هوية واحدة، أي
+ * أن تبديل الهويات لم يعد يجدي لأن العنوان هو الحدّ الحقيقي.
+ *
+ * العدّاد في D1 لا KV: التحديث ذرّي، فلا سباق بين طلبات متزامنة.
+ * الطبيعيون لا يتأثرون: أسرة أو مقهى خلف عنوان واحد نادراً ما يبلغون
+ * هذا السقف، والعنوان المشترك الضخم (CGNAT) قد يبلغه — فيُمنح الفائض
+ * عندها حصته التالية في اليوم التالي بدل أن يُحجب.
+ */
+async function takeDailyFreeByIp(
+  db: D1Database, addr: string, limit: number
+): Promise<boolean> {
+  if (!addr || addr === 'unknown') return true
+  const cap = Math.max(limit * 2, 20)
+  const row = await db.prepare(
+    `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'ipfree', 1)
+     ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + 1 WHERE used < ?3
+     RETURNING used`
+  ).bind(`ip:${addr}`, today(), cap).first<{ used: number }>()
+  return !!row
+}
+
 /** ما استُهلك اليوم من المنحة — للعرض في /v1/me. */
 async function dailyFreeUsed(db: D1Database, fp: string): Promise<number> {
   const row = await db.prepare(
@@ -955,8 +1160,8 @@ async function dailyFreeUsed(db: D1Database, fp: string): Promise<number> {
  * تجاوزه باستعلام واحد واسع.
  */
 async function ensureCompatOpen(
-  env: Env, ctx: ExecutionContext, caller: Caller, settings: XSettings,
-  fp: string, brandRef: string
+  env: Env, ctx: ExecutionContext, request: Request, caller: Caller,
+  settings: XSettings, fp: string, brandRef: string
 ): Promise<{ freeLeft: number; balance: number; charged: boolean; source: string }> {
   if (caller.role === 'owner') {
     return { freeLeft: -1, balance: -1, charged: false, source: 'owner' }
@@ -970,7 +1175,8 @@ async function ensureCompatOpen(
     return { freeLeft: c.freeLeft, balance: c.balance, charged: false, source: c.source }
   }
 
-  const r = await chargeOne(env, caller, fp, settings)
+  const r = await chargeOne(env, caller, fp, settings, ip(request),
+    await fingerprintRotated(env, request, caller))
   const snap = { freeLeft: r.freeLeft, balance: r.balance, source: r.source }
   ctx.waitUntil(env.QUOTA.put(seenKey, JSON.stringify(snap), { expirationTtl: 2 * DAY })
     .catch(() => {}))
@@ -986,8 +1192,13 @@ const ATTACK_REASONS = [
   'missing_signature', 'bad_signature', 'stale_signature', 'ip_hardban',
   'device_farm', 'device_mismatch', 'banned_device_hit', 'banned_ip_hit',
   'device_banned', 'ip_banned', 'non_owner_admin_attempt',
-  'guest_token_device_mismatch', 'rate_limited',
-  'bad_owner_key', 'scraping_suspected'
+  'guest_token_device_mismatch',
+  'bad_owner_key', 'scraping_suspected',
+  // تجاوز الحدّ المضاعف عدة مرات يكفي للفت النظر، أما `rate_limited`
+  // العادي فلا: مستخدم لم يغلق الشاشة، أو شبكة تتقطّع، أو تصفّح سريع —
+  // كلها تبلغ الحدّ مرة أو مرتين ولا تعني هجوماً. كانت تظهر في اللوحة
+  // كـ«هجوم» فتُنذر المالك على نفسه.
+  'rate_limited_hard'
 ]
 
 /**
@@ -1625,6 +1836,8 @@ function chatMessageJson(
     id: string; room_id: string; user_id: string; kind: string
     body: string; media_key: string; media_mime: string; media_size: number
     created_at: number; waveform?: string; media_seconds?: number
+    reply_to?: string; reply_to_body?: string; reply_to_name?: string
+    reply_to_kind?: string
   },
   p: ChatProfile | undefined,
   meId: string,
@@ -1641,6 +1854,17 @@ function chatMessageJson(
     // الصيغة النصّية توفّر تحويلات JSON لعشرات الأرقام في كل رسالة صوتية.
     waveform: m.waveform ?? '',
     seconds: m.media_seconds ?? 0,
+    // الردّ: معرّف الرسالة المقتبسة ومقتطف منها. المقتطف مُضمَّن في الردّ
+    // نفسه كي لا يحتاج العميل نداءً آخر لجلب سياق ردّ قديم خارج الصفحة.
+    replyTo: m.reply_to ?? '',
+    replyPreview: m.reply_to
+      ? {
+          id: m.reply_to,
+          body: m.reply_to_body ?? '',
+          kind: m.reply_to_kind ?? 'text',
+          nickname: m.reply_to_name ?? '',
+        }
+      : null,
     at: m.created_at,
     mine: m.user_id === meId,
     author: {
@@ -1724,22 +1948,29 @@ async function chatPage(
   env: Env, roomId: string, opts: { since?: number; before?: number; limit: number },
 ): Promise<{ messages: any[]; hasMore: boolean }> {
   const { since = 0, before = 0, limit } = opts
+  // الردّ يُجلب في الاستعلام نفسه (LEFT JOIN بسيط): جلب سياق كل ردّ بنداء
+  // منفصل يعني عشرات النداءات في صفحة واحدة، وهذا ما يتجنّبه الترقيم أصلاً.
+  const cols = `m.id, m.room_id, m.user_id, m.kind, m.body, m.media_key,
+       m.media_mime, m.media_size, m.created_at, m.waveform, m.media_seconds,
+       m.reply_to, r.body AS reply_to_body, r.kind AS reply_to_kind,
+       COALESCE(p.nickname, '') AS reply_to_name`
+  const joins = `FROM x_chat_messages m
+     LEFT JOIN x_chat_messages r ON r.id = m.reply_to
+     LEFT JOIN x_chat_profiles p ON p.user_id = r.user_id`
   let rows: D1Result<any>
   if (since > 0) {
     // رسائل جديدة منذ آخر تحديث — تصاعدي لنعرضها بترتيبها الطبيعي
     rows = await env.XDB.prepare(
-      `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds
-       FROM x_chat_messages
-       WHERE room_id = ?1 AND deleted = 0 AND created_at > ?2
-       ORDER BY created_at ASC LIMIT ?3`
+      `SELECT ${cols} ${joins}
+       WHERE m.room_id = ?1 AND m.deleted = 0 AND m.created_at > ?2
+       ORDER BY m.created_at ASC LIMIT ?3`
     ).bind(roomId, since, limit).all<any>()
     return { messages: rows.results ?? [], hasMore: false }
   }
   rows = await env.XDB.prepare(
-    `SELECT id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds
-     FROM x_chat_messages
-     WHERE room_id = ?1 AND deleted = 0 ${before > 0 ? 'AND created_at < ?3' : ''}
-     ORDER BY created_at DESC LIMIT ?2`
+    `SELECT ${cols} ${joins}
+     WHERE m.room_id = ?1 AND m.deleted = 0 ${before > 0 ? 'AND m.created_at < ?3' : ''}
+     ORDER BY m.created_at DESC LIMIT ?2`
   ).bind(...(before > 0 ? [roomId, limit, before] : [roomId, limit])).all<any>()
   const list = rows.results ?? []
   // الأحدث أولاً في الاستعلام، ويُعرض تصاعدياً في التطبيق
@@ -1999,12 +2230,59 @@ function chatPreview(kind: string, body: string, seconds: number): string {
 }
 
 
+/**
+ * ترحيل خفيف يُنفَّذ مرة واحدة لكل نسخة من العامل.
+ *
+ * القاعدة أُنشئت قبل وجود عمود الردّ، و`CREATE TABLE IF NOT EXISTS` لا
+ * يضيف أعمدة إلى جدول قائم. نُضيفها هنا بـALTER محميّ: الأخطاء «العمود
+ * موجود» أو «الجدول موجود» تُبتلع، وأي خطأ آخر لا يُفشل الطلب.
+ *
+ * المفتاح نفسه يمنع تكرار التنفيذ: نُخزّن وعداً واحداً على مستوى الوحدة،
+ * فكل الطلبات المتزامنة تنتظره بدل أن تتسابق على ALTER.
+ */
+let chatSchemaReady: Promise<void> | null = null
+function ensureChatSchema(env: Env): Promise<void> {
+  if (chatSchemaReady) return chatSchemaReady
+  chatSchemaReady = (async () => {
+    const steps = [
+      "ALTER TABLE x_chat_messages ADD COLUMN reply_to TEXT NOT NULL DEFAULT ''",
+      `CREATE TABLE IF NOT EXISTS x_chat_uploads (
+         id           TEXT PRIMARY KEY,
+         room_id      TEXT NOT NULL,
+         user_id      TEXT NOT NULL,
+         object_key   TEXT NOT NULL,
+         r2_upload_id TEXT NOT NULL,
+         kind         TEXT NOT NULL DEFAULT 'video',
+         mime         TEXT NOT NULL DEFAULT 'video/mp4',
+         size_bytes   INTEGER NOT NULL DEFAULT 0,
+         seconds      INTEGER NOT NULL DEFAULT 0,
+         reply_to     TEXT NOT NULL DEFAULT '',
+         text         TEXT NOT NULL DEFAULT '',
+         parts_done   INTEGER NOT NULL DEFAULT 0,
+         created_at   TEXT NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS x_chat_uploads_user
+         ON x_chat_uploads (user_id, created_at)`,
+    ]
+    for (const sql of steps) {
+      try {
+        await env.XDB.prepare(sql).run()
+      } catch {
+        // العمود أو الجدول موجود مسبقاً — الحالة الطبيعية بعد أول ترحيل.
+      }
+    }
+  })().catch(() => { chatSchemaReady = null })
+  return chatSchemaReady
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     const path = url.pathname
 
     try {
+      // مسارات الدردشة وحدها تحتاج الترحيل؛ ننتظره قبل معالجتها.
+      if (path.startsWith('/v1/chat/')) await ensureChatSchema(env)
       if (!['GET', 'POST', 'PUT', 'DELETE'].includes(request.method)) throw new HttpError(405, 'method not allowed')
       if (path === '/health') return json({ ok: true, ts: Date.now() })
 
@@ -2024,12 +2302,32 @@ export default {
       // توقيع التطبيق إلزامي لكل /v1/* — السكريبتات الخارجية تموت هنا
       if (path.startsWith('/v1/')) await verifySignature(env, request)
 
+      // حدّ الانفجار على كل مسارات التطبيق: نافذة ثانية واحدة توقف الحلقات
+      // الآلية مهما كانت نافذة الحدّ الأخرى طويلة. مسارات المالك مستثناة
+      // لأن رفع الأفدية المقطّعة يرسل أجزاء متتابعة بسرعة مشروعة.
+      if (path.startsWith('/v1/') && !path.startsWith('/v1/owner')) {
+        // 40/ثانية كان قريباً من تحميل معرض صور على شبكة سريعة (عشرون
+        // صورة + استقصاءات في الثانية نفسها). 120 تبقى دون أي استعمال بشري
+        // وتمنع الحلقة الآلية التي تفعل آلافاً في الثانية.
+        await burstLimit(env, request, 'api', 120)
+      }
+
       const settings = await xSettings(env.XDB)
-      if (settings.appLocked && !path.startsWith('/v1/owner')) {
+      // المسارات التي تُخبر التطبيق *لماذا* هو محجوب لا يجوز أن تُحجب، وإلا
+      // صار الحجب صامتاً: التطبيق يرى خطأ اتصال لا رسالة المالك، فلا يفهم
+      // المستخدم شيئاً ولا يعرف كيف يحدّث. `/v1/bootstrap` هو القناة الوحيدة
+      // التي تحمل نصّ القفل ورابط التحديث، فيُستثنى من البوابة.
+      //
+      // واللوحة مستثناة كذلك كي لا يُقفل المالك خارج لوحته إن رفع الحدّ
+      // الأدنى فوق إصدار تطبيقه — وهذا خطأ لا يُصلَح من التطبيق أصلاً.
+      const gateExempt = path === '/v1/bootstrap' || path.startsWith('/v1/owner')
+      if (settings.appLocked && !gateExempt) {
         throw new HttpError(503, settings.lockMessage || 'التطبيق متوقف مؤقتاً للصيانة')
       }
-      const gate = versionGate(request, settings)
-      if (gate) return gate
+      if (!gateExempt) {
+        const gate = versionGate(request, settings)
+        if (gate) return gate
+      }
 
       // ---------- عام (موقّع، بدون جلسة) ----------
 
@@ -2047,6 +2345,14 @@ export default {
             videosHidden: settings.videosHidden,
             videosHiddenMessage: settings.videosHiddenMessage,
             minVersion: settings.minVersion,
+            // النسخ الموقوفة تُرسل للتطبيق صراحةً. غيابها هنا كان يجعل
+            // «إيقاف إصدار محدد» في اللوحة بلا أثر على الإطلاق: التطبيق
+            // يقارن بقائمة فارغة أبداً، فيمرّ الإصدار الموقوف.
+            blockedVersions: settings.blockedVersions,
+            // نص القفل ونص التحديث: يصلان في نفس الردّ الذي يحمل سبب
+            // الحجب، فتظهر رسالة المالك لا رسالة عامة.
+            appLocked: settings.appLocked,
+            lockMessage: settings.lockMessage,
             telegramLink: settings.telegramLink,
             schematicsLocked: settings.schematicsLocked,
             compatLocked: settings.compatLocked,
@@ -2230,7 +2536,7 @@ export default {
         const body = await request.json() as { brand?: string }
         const brandRef = String(body.brand ?? '').trim().slice(0, 80)
         const fp = await walletOf(env, request)
-        const r = await ensureCompatOpen(env, ctx, caller, settings, fp, brandRef || 'all')
+        const r = await ensureCompatOpen(env, ctx, request, caller, settings, fp, brandRef || 'all')
         return json({
           ok: true,
           charged: r.charged, source: r.source,
@@ -2244,7 +2550,8 @@ export default {
       if (path === '/v1/data/compat/search' && request.method === 'POST') {
         await Promise.all([
           rateLimit(env, request, 'compatsearch', 240, 600),
-          rateLimit(env, request, 'compatsearchhour', 120, 3600)
+          rateLimit(env, request, 'compatsearchhour', 120, 3600),
+          burstLimit(env, request, 'compatsearch', 10)
         ])
         if (caller.role === 'guest' && settings.compatLocked) {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
@@ -2281,13 +2588,18 @@ export default {
         // الخصم عند دخول الشركة أول مرة في اليوم — لا مع كل نص.
         const fp = await walletOf(env, request)
         const r = await ensureCompatOpen(
-          env, ctx, caller, settings, fp, brandRef || 'all')
+          env, ctx, request, caller, settings, fp, brandRef || 'all')
 
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
           limit: Math.max(1, Math.min(Number(body.limit) || 60, 120))
         })
+        // سحب قاعدة التوافقات: من يبحث بعبارات مختلفة كثيرة في نافذة واحدة
+        // يريد بناء نسخة كاملة، لا أن يجد قطعة. الإعفاء للمالك وحده.
+        if (caller.role !== 'owner') {
+          await detectSweep(env, request, 'compatq', `${brandRef}|${q}`, 120)
+        }
         return json({
           records: results.map(d => ({ id: d.id, ...d.fields })),
           types, charged: r.charged, source: r.source,
@@ -2328,7 +2640,7 @@ export default {
         }
         const fp = await walletOf(env, request)
         const r = await ensureCompatOpen(
-          env, ctx, caller, settings, fp, brandRef || 'all')
+          env, ctx, request, caller, settings, fp, brandRef || 'all')
         const results = await mirrorSearchCompat(env.MIRROR, {
           query: q, brandFile, keyword,
           type: type || undefined,
@@ -2460,7 +2772,8 @@ export default {
         const fileId = decodeURIComponent(fileMatch[1])
         await Promise.all([
           rateLimit(env, request, 'files', 200, 600),
-          rateLimit(env, request, 'fileshour', 120, 3600)
+          rateLimit(env, request, 'fileshour', 120, 3600),
+          burstLimit(env, request, 'files', 12)
         ])
         const r2Key = fileId.startsWith(LOCAL_PREFIX)
           ? LOCAL_R2 + fileId.slice(LOCAL_PREFIX.length)
@@ -2469,13 +2782,17 @@ export default {
         // لا تُستهلك الحصة إلا إذا كان الملف موجوداً فعلاً
         const headObj = await env.SCHEMATICS.head(r2Key)
         if (!headObj) throw new HttpError(404, 'file not found')
+        // السحب المنهجي: من يدور على معرّفات ملفات كثيرة في نافذة واحدة
+        // يحاول بناء مكتبة كاملة. عدّ المعرّفات المختلفة يكشفه ولو كان
+        // بطيئاً تحت حدّ المعدّل، بينما إعادة فتح الملف نفسه لا تُحتسب.
+        if (caller.role !== 'owner') await detectSweep(env, request, 'files', r2Key, 40)
         const fp = await walletOf(env, request)
         // إعادة فتح نفس الملف في اليوم نفسه لا تُخصم مرتين: المستخدم يغلق
         // المخطط ليعود إليه بعد دقيقة، والخصم في كل مرة كان يستنزف رصيده على
         // ملف واحد. لا يُمنع فتح ملفات أخرى — كل ملف جديد يُخصم مرة.
         const remaining = caller.role === 'owner'
           ? -1
-          : await consumeFileOnce(env, ctx, caller, settings, fp, r2Key)
+          : await consumeFileOnce(env, ctx, request, caller, settings, fp, r2Key)
 
         // كاش الحافة: النص المشفر ثابت لكل (ملف+إصدار) — فتح فوري في نفس المنطقة
         // حتى على إنترنت ضعيف. الفحص الأمني والحصة يسبقان الكاش دائماً.
@@ -2527,7 +2844,17 @@ export default {
       // حالة الدردشة: الأقسام، السمات، القيود على المستخدم الحالي.
       // متاحة لكل من يحمل جلسة صالحة (زائر أو مسجّل أو مشترك).
       if (path === '/v1/chat/state' && request.method === 'GET') {
-        await rateLimit(env, request, 'list', 300, 600)
+        // حدّ خاص بالدردشة لا يشارك حدّ تصفّح الشركات.
+        //
+        // كان الاثنان في دلو `list` نفسه. والدردشة تستدعي حالة القسم دورياً
+        // (كل ثوانٍ في الشاشة المفتوحة، وكل 20 ثانية في الغلاف للإشعارات)،
+        // فاستهلكت الدلو وحدها في دقائق — ثم يفتح المستخدم قائمة شركات
+        // فيُرفض بـ429 وهو لم يُكثر شيئاً. العلة كانت في تقاسم الدلو، لا في
+        // سرعة أحد.
+        // 4 ثوان بين الدورت = 900 طلب في النافذة، فسقف 1200 كان على حدّ
+        // الاستعمال الطبيعي — أي شبكة تتقطّع فتعيد الطلب تبلغه. 3000 تعني
+        // ثلاثة أضعاف الاستعمال البشري، وتبقى بعيدة جداً عن الأتمتة.
+        await rateLimit(env, request, 'chatstate', 3000, 600)
         const meId = chatUser?.id ?? `guest:${caller.uid}`
         const mine = await env.XDB.prepare(
           'SELECT nickname, avatar_key, notify FROM x_chat_profiles WHERE user_id = ?1'
@@ -2575,7 +2902,7 @@ export default {
        * لا تُحمَّل المحادثة كاملة في أي حال.
        */
       if (path === '/v1/chat/messages' && request.method === 'GET') {
-        await rateLimit(env, request, 'chatread', 1200, 600)
+        await rateLimit(env, request, 'chatread', 3000, 600)
         if (!settings.chatEnabled) throw new HttpError(403, 'الدردشة موقوفة حالياً')
         const roomId = url.searchParams.get('room') ?? ''
         const room = settings.chatRooms.find(r => r.id === roomId)
@@ -2648,7 +2975,7 @@ export default {
        * ولا يُحرَّك الختم للخلف أبداً، فطلب متأخر لا يمحو مشاهدة سابقة.
        */
       if (path === '/v1/chat/seen' && request.method === 'POST') {
-        await rateLimit(env, request, 'chatread', 1200, 600)
+        await rateLimit(env, request, 'chatread', 3000, 600)
         if (!chatUser) return json({ ok: true, skipped: true })
         const body = await request.json<{ room?: string; at?: number }>()
           .catch(() => ({} as { room?: string; at?: number }))
@@ -2702,9 +3029,11 @@ export default {
         const body = await request.json<{
           room?: string; text?: string; mediaB64?: string
           imageB64?: string; mediaSeconds?: number; waveform?: number[]
+          replyTo?: string
         }>().catch(() => ({} as {
           room?: string; text?: string; mediaB64?: string
           imageB64?: string; mediaSeconds?: number; waveform?: number[]
+          replyTo?: string
         }))
         const roomId = String(body.room ?? '')
         const room = settings.chatRooms.find(r => r.id === roomId)
@@ -2725,6 +3054,28 @@ export default {
         }
 
         const text = cleanText(body.text, settings.chatMaxLength)
+        // الردّ لا يُقبل إلا على رسالة موجودة **في القسم نفسه**: معرّف من
+        // قسم آخر كان يسرّب مقتطفاً من محادثة لا يراها المُرسل.
+        let replyTo = String(body.replyTo ?? '').trim().slice(0, 80)
+        let replyBody = ''
+        let replyKind = 'text'
+        let replyName = ''
+        if (replyTo) {
+          const target = await env.XDB.prepare(
+            `SELECT m.body, m.kind, COALESCE(p.nickname, '') AS nickname
+             FROM x_chat_messages m
+             LEFT JOIN x_chat_profiles p ON p.user_id = m.user_id
+             WHERE m.id = ?1 AND m.room_id = ?2 AND m.deleted = 0`
+          ).bind(replyTo, roomId)
+            .first<{ body: string; kind: string; nickname: string }>()
+          if (target) {
+            replyBody = (target.body ?? '').slice(0, 240)
+            replyKind = target.kind ?? 'text'
+            replyName = target.nickname ?? ''
+          } else {
+            replyTo = ''
+          }
+        }
         // نستقبل imageB64 القديم أيضاً كي لا تتعطل نسخة مثبّتة سابقة.
         const rawMedia = String(body.mediaB64 ?? body.imageB64 ?? '')
         let kind: ChatKind = 'text'
@@ -2792,10 +3143,10 @@ export default {
           const at = Date.now()
           await env.XDB.prepare(
             `INSERT INTO x_chat_messages
-               (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+               (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, waveform, media_seconds, reply_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`
           ).bind(
-            id, roomId, authorId, kind, text, mediaKey, mediaMime, mediaSize, at, waveform, mediaSeconds
+            id, roomId, authorId, kind, text, mediaKey, mediaMime, mediaSize, at, waveform, mediaSeconds, replyTo
           ).run()
           const profiles = await chatProfiles(env.XDB, [authorId])
           const authorName = profiles.get(authorId)?.nickname || 'عضو'
@@ -2809,7 +3160,9 @@ export default {
               id, room_id: roomId, user_id: authorId, kind,
               body: text, media_key: mediaKey, media_mime: mediaMime,
               media_size: mediaSize, created_at: at, waveform,
-              media_seconds: mediaSeconds,
+              media_seconds: mediaSeconds, reply_to: replyTo,
+              reply_to_body: replyBody, reply_to_kind: replyKind,
+              reply_to_name: replyName,
             }, profiles.get(authorId), authorId),
           })
         }
@@ -2819,9 +3172,9 @@ export default {
         const at = Date.now()
         await env.XDB.prepare(
           `INSERT INTO x_chat_messages
-             (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, '', '', 0, ?6)`
-        ).bind(id, roomId, authorId, kind, text, at).run()
+             (id, room_id, user_id, kind, body, media_key, media_mime, media_size, created_at, reply_to)
+           VALUES (?1, ?2, ?3, ?4, ?5, '', '', 0, ?6, ?7)`
+        ).bind(id, roomId, authorId, kind, text, at, replyTo).run()
         const profiles = await chatProfiles(env.XDB, [authorId])
         const authorName = profiles.get(authorId)?.nickname || 'عضو'
         ctx.waitUntil(pushRoomMessage(
@@ -2832,8 +3185,210 @@ export default {
           message: chatMessageJson({
             id, room_id: roomId, user_id: authorId, kind,
             body: text, media_key: '', media_mime: '', media_size: 0, created_at: at,
+            reply_to: replyTo, reply_to_body: replyBody, reply_to_kind: replyKind,
+            reply_to_name: replyName,
           }, profiles.get(authorId), authorId),
         })
+      }
+
+      /**
+       * ── رفع مقاطع الدردشة على أجزاء ──
+       *
+       * لماذا لا يمرّ المقطع الكبير في /v1/chat/send كما الصور؟ لأن الصوت
+       * والفيديو يُرسلان base64 داخل JSON، والحشو يضخّم الحجم 4/3 ويوضع
+       * كاملاً في ذاكرة العامل، فمقطع 50MB ينهي الطلب. هذا المسار يدفق
+       * البايتات إلى R2 جزءاً جزءاً بلا حشو وبلا تحميل كامل في الذاكرة.
+       *
+       * الصلاحية نفسها المطبَّقة على الإرسال: `chatWriteAllowed` ثم
+       * `chatMediaAllowed` — أي أن المالك مسموح دائماً، وغيره حسب الإعداد.
+       */
+      if (path === '/v1/chat/upload/init' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 40, 60)
+        if (!settings.chatEnabled) throw new HttpError(403, 'الدردشة موقوفة حالياً')
+        const write = chatWriteAllowed(settings, caller, chatUser)
+        if (!write.ok) throw new HttpError(403, write.reason)
+        const media = chatMediaAllowed(settings, caller, chatUser)
+        if (!media.ok) throw new HttpError(403, media.reason)
+
+        const b = await request.json<any>().catch(() => ({}))
+        const roomId = String(b.room ?? '')
+        if (!settings.chatRooms.some(r => r.id === roomId)) {
+          throw new HttpError(404, 'القسم غير موجود')
+        }
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+        const size = Math.max(0, Math.floor(Number(b.size) || 0))
+        const cap = settings.chatMaxMediaMb * 1024 * 1024
+        if (size > cap) {
+          throw new HttpError(413, `الملف كبير (أقصى ${settings.chatMaxMediaMb}MB)`)
+        }
+        const seconds = Math.max(0, Math.floor(Number(b.seconds) || 0))
+        if (seconds > settings.chatMediaSeconds) {
+          throw new HttpError(413, `المقطع أطول من ${settings.chatMediaSeconds} ثانية`)
+        }
+        const audio = String(b.kind ?? '') === 'audio'
+        const name = String(b.name ?? '').toLowerCase()
+        const extMatch = name.match(/\.(mp4|m4v|mov|webm|mkv|m4a|aac|mp3|ogg|opus|wav)$/)
+        const ext = extMatch ? extMatch[1] : (audio ? 'm4a' : 'mp4')
+        const declared = String(b.mime ?? '').slice(0, 60)
+        const mime = declared.startsWith(audio ? 'audio/' : 'video/')
+          ? declared
+          : (audio ? 'audio/mp4' : 'video/mp4')
+
+        const uploadId = `cu_${uid()}`
+        const objectKey = `chat/${roomId}/${uploadId}.${ext}`
+        const mp = await env.XMEDIA.createMultipartUpload(objectKey, {
+          httpMetadata: { contentType: mime },
+        })
+        // الرسالة المُقتبَسة تُتحقق هنا أيضاً كي لا تكتمل جلسة ثم يُرفض الردّ.
+        const replyTo = String(b.replyTo ?? '').trim().slice(0, 80)
+        if (replyTo) {
+          const target = await env.XDB.prepare(
+            'SELECT id FROM x_chat_messages WHERE id = ?1 AND room_id = ?2 AND deleted = 0'
+          ).bind(replyTo, roomId).first<{ id: string }>()
+          if (!target) throw new HttpError(404, 'الرسالة المقتبَسة غير موجودة')
+        }
+        await env.XDB.prepare(
+          `INSERT INTO x_chat_uploads (id, room_id, user_id, object_key, r2_upload_id,
+             kind, mime, size_bytes, seconds, reply_to, text, parts_done, created_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12)`
+        ).bind(uploadId, roomId, authorId, objectKey, mp.uploadId,
+               audio ? 'audio' : 'video', mime, size, seconds, replyTo,
+               cleanText(b.text, settings.chatMaxLength),
+               new Date().toISOString()).run()
+        return json({ ok: true, uploadId, objectKey, chunk: CHAT_UPLOAD_CHUNK })
+      }
+
+      const chatPart = path.match(/^\/v1\/chat\/upload\/(cu_[\w]+)\/part\/(\d{1,5})$/)
+      if (chatPart && request.method === 'PUT') {
+        await rateLimit(env, request, 'chatwrite', 600, 60)
+        const upload = await env.XDB.prepare(
+          'SELECT * FROM x_chat_uploads WHERE id = ?1'
+        ).bind(chatPart[1]).first<any>()
+        if (!upload) throw new HttpError(404, 'جلسة الرفع غير موجودة')
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+        if (upload.user_id !== authorId) {
+          throw new HttpError(403, 'جلسة رفع تخصّ غيرك')
+        }
+        const partNo = Number(chatPart[2])
+        if (partNo < 1 || partNo > 10000) throw new HttpError(400, 'رقم الجزء غير صالح')
+        if (!request.body) throw new HttpError(400, 'لا يوجد جزء')
+        const mp = env.XMEDIA.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+        const uploaded = await mp.uploadPart(partNo, request.body)
+        await env.XDB.prepare(
+          'UPDATE x_chat_uploads SET parts_done = MAX(parts_done, ?1) WHERE id = ?2'
+        ).bind(partNo, chatPart[1]).run()
+        return json({ ok: true, part: partNo, etag: uploaded.etag })
+      }
+
+      if (path === '/v1/chat/upload/complete' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 40, 60)
+        const b = await request.json<any>().catch(() => ({}))
+        const upId = String(b.uploadId ?? '')
+        const upload = await env.XDB.prepare(
+          'SELECT * FROM x_chat_uploads WHERE id = ?1'
+        ).bind(upId).first<any>()
+        if (!upload) throw new HttpError(404, 'جلسة الرفع غير موجودة')
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+        if (upload.user_id !== authorId) {
+          throw new HttpError(403, 'جلسة رفع تخصّ غيرك')
+        }
+        const parts = Array.isArray(b.parts)
+          ? b.parts
+              .map((p: any) => ({ partNumber: Number(p.partNumber), etag: String(p.etag) }))
+              .filter((p: any) => p.partNumber >= 1 && p.etag)
+              .sort((a: any, c: any) => a.partNumber - c.partNumber)
+          : []
+        if (!parts.length) throw new HttpError(400, 'لا توجد أجزاء للإكمال')
+
+        const mp = env.XMEDIA.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+        const obj = await mp.complete(parts)
+        const size = (obj as any)?.size ?? upload.size_bytes
+        // تحقق نهائي من النوع على أول بايتات الكائن: الترويسة التي أعلنها
+        // العميل ليست دليلاً، وقبول أي شيء يحوّل الدلو إلى مزبلة ملفات.
+        try {
+          const head = await env.XMEDIA.get(upload.object_key, { range: { offset: 0, length: 32 } })
+          const sig = head ? sniffMedia(new Uint8Array(await head.arrayBuffer())) : null
+          if (!sig || sig.kind !== upload.kind) {
+            await env.XMEDIA.delete(upload.object_key)
+            await env.XDB.prepare('DELETE FROM x_chat_uploads WHERE id = ?1').bind(upId).run()
+            throw new HttpError(400, 'نوع الملف غير مدعوم')
+          }
+        } catch (e) {
+          if (e instanceof HttpError) throw e
+          // فشل قراءة الترويسة لا يُسقط الرفع: الملف قد يكون سليماً وتعذّر
+          // الفحص فقط. نُكمل ونعتمد إعلان العميل بدل إتلاف مقطع صحيح.
+        }
+
+        const id = `chat_${uid()}`
+        const at = Date.now()
+        // المقتطف يُبنى الآن من الرسالة المقتبَسة كما في مسار الإرسال المباشر.
+        let replyBody = ''
+        let replyKind = 'text'
+        let replyName = ''
+        let replyTo = upload.reply_to ?? ''
+        if (replyTo) {
+          const target = await env.XDB.prepare(
+            `SELECT m.body, m.kind, COALESCE(p.nickname, '') AS nickname
+             FROM x_chat_messages m
+             LEFT JOIN x_chat_profiles p ON p.user_id = m.user_id
+             WHERE m.id = ?1 AND m.room_id = ?2 AND m.deleted = 0`
+          ).bind(replyTo, upload.room_id)
+            .first<{ body: string; kind: string; nickname: string }>()
+          if (target) {
+            replyBody = (target.body ?? '').slice(0, 240)
+            replyKind = target.kind ?? 'text'
+            replyName = target.nickname ?? ''
+          } else {
+            replyTo = ''
+          }
+        }
+        await env.XDB.prepare(
+          `INSERT INTO x_chat_messages
+             (id, room_id, user_id, kind, body, media_key, media_mime, media_size,
+              created_at, media_seconds, reply_to)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`
+        ).bind(id, upload.room_id, authorId, upload.kind, upload.text ?? '',
+               upload.object_key, upload.mime, size, at,
+               upload.seconds ?? 0, replyTo).run()
+        await env.XDB.prepare('DELETE FROM x_chat_uploads WHERE id = ?1').bind(upId).run()
+
+        const profiles = await chatProfiles(env.XDB, [authorId])
+        const authorName = profiles.get(authorId)?.nickname || 'عضو'
+        ctx.waitUntil(pushRoomMessage(
+          env, upload.room_id, authorId, authorName,
+          chatPreview(upload.kind, upload.text ?? '', upload.seconds ?? 0),
+        ).catch(() => 0))
+        return json({
+          ok: true,
+          message: chatMessageJson({
+            id, room_id: upload.room_id, user_id: authorId, kind: upload.kind,
+            body: upload.text ?? '', media_key: upload.object_key,
+            media_mime: upload.mime, media_size: size, created_at: at,
+            media_seconds: upload.seconds ?? 0, reply_to: replyTo,
+            reply_to_body: replyBody, reply_to_kind: replyKind,
+            reply_to_name: replyName,
+          }, profiles.get(authorId), authorId),
+        })
+      }
+
+      if (path === '/v1/chat/upload/abort' && request.method === 'POST') {
+        await rateLimit(env, request, 'chatwrite', 60, 60)
+        const b = await request.json<any>().catch(() => ({}))
+        const upId = String(b.uploadId ?? '')
+        const upload = await env.XDB.prepare(
+          'SELECT * FROM x_chat_uploads WHERE id = ?1'
+        ).bind(upId).first<any>()
+        if (!upload) return json({ ok: true, skipped: true })
+        const authorId = chatUser?.id ?? `guest:${caller.uid}`
+        if (upload.user_id !== authorId) {
+          throw new HttpError(403, 'جلسة رفع تخصّ غيرك')
+        }
+        try {
+          const mp = env.XMEDIA.resumeMultipartUpload(upload.object_key, upload.r2_upload_id)
+          await mp.abort()
+        } catch { /* الرفع قد أُكمل أو أُبطل سابقاً */ }
+        await env.XDB.prepare('DELETE FROM x_chat_uploads WHERE id = ?1').bind(upId).run()
+        return json({ ok: true })
       }
 
       /**
@@ -3104,20 +3659,28 @@ export default {
         if (!already) {
           // المفتاح لدورة واحدة: الربط بمفتاح واحد يمنع استخدام الكود نفسه
           // على عدة دورات، وmax_uses يحدّ عدد الأجهزة (1 افتراضياً).
-          if (key.used_count >= key.max_uses) {
+          //
+          // الحجز والزيادة في جملة UPDATE واحدة مشروطة بـ`used_count <
+          // max_uses`. الفحص المنفصل السابق كان سباقاً: جهازان يفكّان نفس
+          // الكود في اللحظة نفسها يقرآن `used_count = 0` كلاهما فيمرّان،
+          // فيُفتح الكود على عدد أجهزة بلا حد. الآن من يخسر السباق لا
+          // يُحدَّث صفّه ولا يحصل على منحة.
+          const claimed = await env.XDB.prepare(
+            `UPDATE x_course_keys
+                SET used_count = used_count + 1, device_id = ?1, used_at = ?2
+              WHERE id = ?3 AND used_count < max_uses
+              RETURNING used_count`
+          ).bind(dev, new Date().toISOString(), key.id)
+            .first<{ used_count: number }>()
+          if (!claimed) {
             await logSecurity(env, request, 'learn_key_exhausted', `key=${key.id}`)
             throw new HttpError(409, 'الكود مستخدم على جهاز آخر')
           }
-          await env.XDB.batch([
-            env.XDB.prepare(
-              'UPDATE x_course_keys SET used_count = used_count + 1, device_id = ?1, used_at = ?2 WHERE id = ?3'
-            ).bind(dev, new Date().toISOString(), key.id),
-            env.XDB.prepare(
-              `INSERT INTO x_course_grants (device_id, course_id, key_id, user_id, at)
-               VALUES (?1, ?2, ?3, ?4, ?5)
-               ON CONFLICT(device_id, course_id) DO NOTHING`
-            ).bind(dev, key.course_id, key.id, caller.uid, Date.now()),
-          ])
+          await env.XDB.prepare(
+            `INSERT INTO x_course_grants (device_id, course_id, key_id, user_id, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_id, course_id) DO NOTHING`
+          ).bind(dev, key.course_id, key.id, caller.uid, Date.now()).run()
         }
         const course = await env.XDB
           .prepare('SELECT title FROM x_courses WHERE id = ?1')
@@ -3135,7 +3698,10 @@ export default {
       // عديمة الفائدة بلا مفتاح التطبيق.
       const streamMatch = path.match(/^\/v1\/learn\/stream\/([\w-]{1,64})$/)
       if (streamMatch && request.method === 'GET') {
-        await rateLimit(env, request, 'learn_stream', 120, 600)
+        await Promise.all([
+          rateLimit(env, request, 'learn_stream', 120, 600),
+          burstLimit(env, request, 'learn_stream', 15)
+        ])
         const video = await env.XDB
           .prepare(`SELECT id, course_id, object_key, mime, mode
                     FROM x_course_videos WHERE id = ?1 AND published = 1`)
@@ -3401,7 +3967,7 @@ export default {
               ? String(body.chatWriteScope) : settings.chatWriteScope,
             chatMediaScope: ['subscribers', 'none'].includes(String(body.chatMediaScope))
               ? String(body.chatMediaScope) : settings.chatMediaScope,
-            chatMaxMediaMb: Math.max(1, Math.min(25,
+            chatMaxMediaMb: Math.max(1, Math.min(200,
               Math.floor(Number(body.chatMaxMediaMb ?? settings.chatMaxMediaMb) || 12))),
             chatMediaSeconds: Math.max(5, Math.min(300,
               Math.floor(Number(body.chatMediaSeconds ?? settings.chatMediaSeconds) || 120))),
@@ -3964,8 +4530,11 @@ export default {
             `SELECT id, title, subtitle, description, cover_key, locked, sort, published, created_at
              FROM x_courses ORDER BY sort, created_at DESC`
           ).all<any>()
+          // object_key مطلوب هنا: اللوحة تُرسله مع كل تعديل وصفّي، وبلا
+          // إعادته كان تعديل العنوان أو القفل يرسل مفتاحاً فارغاً فيرفضه
+          // الخادم — «مفتاح مطلوب» على عملية لا تخصّ المفتاح أصلاً.
           const videos = await env.XDB.prepare(
-            `SELECT id, course_id, title, description, mode, sort, duration_s, size_bytes, published
+            `SELECT id, course_id, title, description, mode, sort, duration_s, size_bytes, published, object_key
              FROM x_course_videos ORDER BY sort, created_at`
           ).all<any>()
           const keys = await env.XDB.prepare(
@@ -4014,6 +4583,7 @@ export default {
                 id: v.id, title: v.title, description: v.description,
                 mode: v.mode, sort: v.sort, durationS: v.duration_s,
                 sizeBytes: v.size_bytes, published: !!v.published,
+                objectKey: v.object_key,
                 // روابط الصور تُعاد للمالك ليرى غلافه ومصغّراته ويستبدلها من
                 // اللوحة مباشرة. بلا هذه الحقول كانت اللوحة عمياء عن الصور
                 // التي رفعها، فلا يعرف المالك أين رفعها ولا كيف تبدو.
@@ -4088,7 +4658,7 @@ export default {
           const courseId = String(b.courseId ?? '')
           const objKey = String(b.objectKey ?? '').trim()
           if (!/^[\w-]{1,64}$/.test(courseId)) throw new HttpError(400, 'courseId مطلوب')
-          if (!objKey || objKey.includes('..')) throw new HttpError(400, 'objectKey مطلوب')
+          if (objKey.includes('..')) throw new HttpError(400, 'objectKey غير صالح')
           const course = await env.XDB
             .prepare('SELECT id FROM x_courses WHERE id = ?1').bind(courseId).first()
           if (!course) throw new HttpError(404, 'الدورة غير موجودة')
@@ -4107,12 +4677,16 @@ export default {
           const exists = await env.XDB
             .prepare('SELECT id FROM x_course_videos WHERE id = ?1').bind(id).first()
           if (exists) {
+            // كائن R2 لا يُلمس في التعديل: الوصف والقفل لا علاقة لهما بالملف.
+            // تمرير مفتاح فارغ كان يمحو الرابط الأصلي فيصير الفيديو بلا ملف.
             await env.XDB.prepare(
-              `UPDATE x_course_videos SET course_id=?1, title=?2, description=?3, object_key=?4,
+              `UPDATE x_course_videos SET course_id=?1, title=?2, description=?3,
+               object_key=COALESCE(NULLIF(?4,''), object_key),
                mime=?5, duration_s=?6, size_bytes=?7, mode=?8, sort=?9, published=?10 WHERE id=?11`
             ).bind(courseId, vals.title, vals.description, objKey, vals.mime,
                    vals.duration, vals.size, mode, vals.sort, vals.published, id).run()
           } else {
+            if (!objKey) throw new HttpError(400, 'objectKey مطلوب لفيديو جديد')
             await env.XDB.prepare(
               `INSERT INTO x_course_videos (id, course_id, title, description, object_key, mime,
                duration_s, size_bytes, mode, sort, published, created_at)
@@ -4418,6 +4992,10 @@ export default {
       if (err instanceof HttpError) {
         return json({ ok: false, error: err.message, status: err.status }, err.status)
       }
+      // خطأ غير متوقّع يُسجَّل مع نصّه. كان يُبتلع ويُعاد «server error»
+      // بلا أثر، فيستحيل على المالك معرفة سبب عطل يراه المستخدم.
+      await logSecurity(env, request, 'server_error',
+        err instanceof Error ? `${err.name}: ${err.message}` : String(err))
       return json({ ok: false, error: 'server error' }, 500)
     }
   }

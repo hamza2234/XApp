@@ -63,12 +63,39 @@ class _GiftScreenState extends State<GiftScreen>
   /// استقرّت بدل أن تقفز إلى الصفر فتبدو كأنها ارتدّت.
   double _angle = 0;
 
+  /// بداية الدوران ونهايته. النهاية محسوبة كي يستقرّ المؤشّر على قطاع
+  /// القيمة، فلا يظهر الرقم في موضع بعيد عن السهم فيبدو وكأنه قرعة.
+  double _from = 0;
+  double _to = 0;
+
+  /// أرقام القطاعات. العجلة **شكل** لا قرعة: القيمة الفعلية يأتي بها الخادم
+  /// وحده، وهذه الأرقام تُرسم كي لا تظهر قطاعاتٍ فارغة. تُعرض أرقام كثيرة
+  /// مختلفة ليبدو الدور حقيقياً، والقطاع الذي يتوقف عليه السهم يُوضع عليه
+  /// الرقم النهائي. لا تُذكر هذه الآلية في أي نصّ على الشاشة.
+  static const _labels = <int>[
+    5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 150, 200, 250,
+  ];
+
+  /// الموضع الذي يستقرّ عليه السهم — وسط القائمة، لا أولها ولا آخرها.
+  int get _winIndex => _labels.length ~/ 2;
+
+  /// قيم القطاعات المعروضة: أرقام كثيرة، وأحدها يحمل قيمة اليوم.
+  List<int> get _segLabels {
+    final out = List<int>.from(_labels);
+    if (_amount > 0) out[_winIndex] = _amount;
+    return out;
+  }
+
   /// الحالة الظاهرة الآن، منفصلة عن الوسائط: بعد نجاح الاستلام تبقى الهديّة
   /// معلّمة كمستلمة ولو لم يصل تحديث الأب بعد.
   late bool _claimed = widget.claimed;
   late int _amount = widget.amount;
   late int _balance = widget.balance;
   bool _busy = false;
+
+  /// هل انكشف المبلغ؟ يبقى مخفياً حتى تستقرّ العجلة على نتيجة اليوم.
+  /// الهديّة المستلمة سابقاً تُعرض مكشوفة لأن صاحبها يعرفها بالفعل.
+  bool get _revealed => _claimed;
 
   Timer? _tick;
   Duration _left = Duration.zero;
@@ -129,35 +156,67 @@ class _GiftScreenState extends State<GiftScreen>
 
   bool get _disabled => _busy || _amount <= 0;
 
+  /// زاوية القطاع `i` بحيث يقف وسطه تحت المؤشّر بعد الزاوية `a`.
+  ///
+  /// القطاع `i` يمتد من `i*sweep` إلى `(i+1)*sweep`، ووسطه عند
+  /// `i*sweep + sweep/2`. المؤشّر ثابت عند أعلى العجلة، أي زاوية `-π/2`.
+  double _restFor(double a, int i, int n) {
+    final sweep = 2 * math.pi / n;
+    final mid = i * sweep + sweep / 2;
+    // الزيادة اللازمة فوق `a` كي يستقرّ وسط القطاع تحت المؤشّر، في [0,2π).
+    var d = ((-math.pi / 2 - mid) - a) % (2 * math.pi);
+    if (d < 0) d += 2 * math.pi;
+    // دورتان على الأقل حتى لا تبدو الحركة ارتداداً قصيراً.
+    return a + d + 2 * 2 * math.pi;
+  }
+
+  /// يُدير العجلة من موضعها الحالي إلى `target` خلال `d`.
+  Future<void> _spinTo(double target, Duration d) async {
+    _from = _angle;
+    _to = target;
+    _spin.duration = d;
+    await _spin.forward(from: 0);
+    if (mounted) setState(() => _angle = _to);
+  }
+
   /// الضغط: ندير العجلة ونطلب المنح في التوازي.
   ///
-  /// العجلة تدور مدة ثابتة بينما يصل ردّ الخادم، ثم تستقرّ على المبلغ الذي
-  /// قرّره الخادم — لا مبلغ اختاره العميل. لو رفض الخادم (استُلمت اليوم مثلاً)
-  /// تتوقف العجلة في مكانها ولا يُعلن أي ربح.
+  /// الدور على مرحلتين: مرحلة حرّة تكفي لأن يصل ردّ الخادم، ثم مرحلة
+  /// استقرار تُنهي الحركة على القطاع الذي يحمل قيمة اليوم بالضبط. الدوران
+  /// لا يعرف النتيجة مقدماً، والقيمة قرار الخادم لا العميل. لو رفض الخادم
+  /// (استُلمت اليوم مثلاً) تتوقف العجلة بلا إعلان أي ربح.
   Future<void> _spinAndClaim() async {
     if (_disabled || _claimed) return;
     setState(() => _busy = true);
 
-    // دورتان كاملتان + ربع: وقفة أخيرة واضحة بدل توقّف مفاجئ في منتصف دورة.
-    final turns = 2 * 2 * math.pi + math.pi / 2;
     final future = widget.onClaim();
-    final animation = _spin.forward(from: 0);
+    // مرحلة حرّة: تستمر حتى يصل الردّ أو تنقضي مدتها، فأي منهما أبطأ.
+    await Future.wait<void>([
+      _spinTo(_angle + 3 * 2 * math.pi, const Duration(milliseconds: 1400)),
+      future.then((_) {}),
+    ]);
 
-    // ننتظر الاثنين معاً: لا نُعلن نتيجة قبل أن تستقرّ العجلة، ولا نُطيل
-    // الدوران لو ردّ الخادم فوراً.
-    final results = await Future.wait<Object?>([future, animation.then((_) => null)]);
-    final r = results.first as GiftClaimResult;
+    final r = await future;
     if (!mounted) return;
 
-    setState(() {
-      _busy = false;
-      _angle += turns;
-      if (r.ok) {
+    final labels = _segLabels;
+    if (r.ok) {
+      // الاستقرار على القطاع الحامل للقيمة: يُحسب الآن لأن قيمة اليوم
+      // معروفة، ولم يكن ممكناً حسابه قبل ردّ الخادم.
+      await _spinTo(
+          _restFor(_angle, _winIndex, labels.length),
+          const Duration(milliseconds: 1200));
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
         _claimed = true;
         _balance += r.amount;
         _amount = widget.amount;
-      }
-    });
+      });
+    } else {
+      // رُفض الطلب: العجلة تتوقف بلا توجيه إلى أي قطاع.
+      setState(() => _busy = false);
+    }
 
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
@@ -200,15 +259,16 @@ class _GiftScreenState extends State<GiftScreen>
             style: TextStyle(
                 fontSize: 21, fontWeight: FontWeight.w900, color: XTheme.text)),
         const SizedBox(height: 6),
-        Text('دور واحد كل يوم — القيمة يحدّدها المالك مسبقاً',
+        Text('دور واحد كل يوم — جرّب حظّك',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12.5, color: XTheme.textDim)),
       ]);
 
-  /// العجلة المرسومة. القطاعات متساوية بصرياً لأن العجلة شكل لا قرعة: لا
-  /// يوجد قطاع «أفضل» من غيره، فلا يُضلّل الشكل المستخدم.
+  /// العجلة المرسومة. القطاعات تحمل أرقاماً مختلفة لأنها شكل لا قرعة،
+  /// والمؤشّر يستقرّ على القطاع الذي يحمل قيمة اليوم.
   Widget _wheel() {
     const size = 240.0;
+    final labels = _segLabels;
     return SizedBox(
       width: size,
       height: size,
@@ -218,13 +278,12 @@ class _GiftScreenState extends State<GiftScreen>
           builder: (_, __) {
             // `Curves.easeOutCubic` يعطي تباطؤاً طبيعياً في آخر الدوران.
             final t = Curves.easeOutCubic.transform(_spin.value);
-            final turns = 2 * 2 * math.pi + math.pi / 2;
-            final a = _angle + turns * t;
+            final a = _from + (_to - _from) * t;
             return Transform.rotate(
               angle: a,
               child: CustomPaint(
                 size: const Size(size, size),
-                painter: _WheelPainter(segments: 8),
+                painter: _WheelPainter(labels: labels),
               ),
             );
           },
@@ -235,7 +294,9 @@ class _GiftScreenState extends State<GiftScreen>
           child: Icon(Icons.arrow_drop_down,
               size: 40, color: XTheme.gold.withOpacity(.95)),
         ),
-        // القرص المركزي: يحمل المبلغ، فهو معلوم ومكتوب — لا مفاجأة.
+        // القرص المركزي: يعرض الحالة لا المبلغ. المبلغ قرار المالك على
+        // الخادم، وإظهاره قبل الدور يقتل الإحساس بالحظ — والمستخدم لا
+        // يجوز أن يعرف المبلغ سلفاً. يظهر «؟» حتى يستقرّ الدور، ثم يُكشف.
         Container(
           width: 88,
           height: 88,
@@ -247,10 +308,10 @@ class _GiftScreenState extends State<GiftScreen>
           ),
           alignment: Alignment.center,
           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Text('$_amount',
+            Text(_revealed ? '$_amount' : '؟',
                 style: const TextStyle(
                     fontSize: 25, fontWeight: FontWeight.w900, color: XTheme.gold)),
-            Text('عملة',
+            Text(_revealed ? 'عملة' : 'حظّك',
                 style: TextStyle(fontSize: 11, color: XTheme.textDim)),
           ]),
         ),
@@ -402,8 +463,6 @@ class _GiftScreenState extends State<GiftScreen>
           borderRadius: BorderRadius.circular(XTheme.rMd),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _note(Icons.lock_outline, 'القيمة يحدّدها المالك ولا يمكن تغييرها من هنا'),
-          const SizedBox(height: 7),
           _note(Icons.event_available_outlined, 'مرة واحدة فقط كل يوم لكل جهاز'),
           const SizedBox(height: 7),
           _note(Icons.savings_outlined, 'العملات تُضاف لرصيدك وتُخصم من حدّك اليومي'),
@@ -424,11 +483,12 @@ class _GiftScreenState extends State<GiftScreen>
       );
 }
 
-/// يرسم قطاعات العجلة بألوان هوية التطبيق.
+/// يرسم قطاعات العجلة بأرقامها وبألوان هوية التطبيق.
 class _WheelPainter extends CustomPainter {
-  _WheelPainter({required this.segments});
+  _WheelPainter({required this.labels});
 
-  final int segments;
+  /// الرقم المرسوم في كل قطاع. القطاع الذي يحمل قيمة اليوم واحد منها.
+  final List<int> labels;
 
   /// الألوان تتناوب بين درجات الهوية، فلا يوجد قطاع مميّز يوهم بجائزة.
   static const _colors = [
@@ -440,12 +500,52 @@ class _WheelPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
-    final sweep = 2 * math.pi / segments;
-    final paint = Paint()..style = PaintingStyle.fill;
-    for (var i = 0; i < segments; i++) {
-      paint.color = _colors[i % _colors.length];
-      canvas.drawArc(rect, i * sweep, sweep, true, paint);
+    final n = labels.length;
+    if (n == 0) return;
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final sweep = 2 * math.pi / n;
+    final fill = Paint()..style = PaintingStyle.fill;
+
+    for (var i = 0; i < n; i++) {
+      fill.color = _colors[i % _colors.length];
+      canvas.drawArc(rect, i * sweep, sweep, true, fill);
+
+      // الرقم في وسط القطاع، عند 70% من نصف القطر كي لا يزاحم القرص
+      // المركزي ولا الحلقة الخارجية.
+      final mid = i * sweep + sweep / 2;
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '${labels[i]}',
+          style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: Colors.white),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final p = center +
+          Offset(math.cos(mid), math.sin(mid)) * (radius * .68) -
+          Offset(tp.width / 2, tp.height / 2);
+      // الحدّ الأسود حول الرقم يبقيه مقروءاً فوق أي لون قطاع.
+      TextPainter(
+        text: TextSpan(
+          text: '${labels[i]}',
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w800,
+            foreground: Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.4
+              ..color = Colors.black54,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )
+        ..layout()
+        ..paint(canvas, p);
+      tp.paint(canvas, p);
     }
     // حلقة خارجية تفصل العجلة عن الخلفية وتشدّ الشكل.
     canvas.drawArc(
@@ -462,5 +562,14 @@ class _WheelPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _WheelPainter old) =>
-      old.segments != segments;
+      old.labels.length != labels.length ||
+      !_sameLabels(old.labels, labels);
+
+  static bool _sameLabels(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }

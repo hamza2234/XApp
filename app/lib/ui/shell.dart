@@ -19,6 +19,7 @@ import 'schem_screen.dart';
 import 'owner_gate.dart';
 import 'splash.dart';
 import 'external_link.dart';
+import 'update_screen.dart';
 
 /// الهيكل الرئيسي: شريط تنقل سفلي + قائمة جانبية
 class Shell extends StatefulWidget {
@@ -39,21 +40,39 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// بين المخططات والدردشة، فيبدو الرجوع كأنه نقلة عشوائية.
   int _lastNonChatTab = 0;
 
-  /// تبويبات الشريط الظاهرة الآن، بترتيبها.
+  /// تبويبات الشريط الظاهرة الآن، بترتيبها. **وهي مصدر الحقيقة الوحيد**:
+  /// عناصر الشريط في `build` تُبنى منها عبر [_tabItems]، فلا ينفصل عددهما.
   ///
-  /// الدورات تُحذف من الشريط كلياً حين يوقف المالك عرض الفيديوهات: المطلوب
-  /// إخفاء شاشات العرض لا إيقاف التشغيل فقط، فلا يبقى تبويب يفتح على فراغ.
-  /// والهديّة تظهر فقط حين يضبط المالك مبلغاً أكبر من صفر.
-  List<int> get _navTabs {
-    final t = <int>[0, 1];
-    if (!_cfg.videosHidden) t.add(2);
-    if (_giftEnabled) t.add(4);
-    t.add(3);
-    return t;
-  }
+  /// كان هذا الانفصال عطلاً حقيقياً: حُذف تبويب الهديّة من هنا وبقي عنصرها
+  /// في الشريط، فصار عدد العناصر خمسة والتبويبات أربعة — أيقونة الدردشة في
+  /// الموضع الخامس تقرأ `_navTabs[4]` فينفتح `RangeError` عند كل ضغطة.
+  ///
+  /// الدورات تُحذف كلياً حين يوقف المالك عرض الفيديوهات: المطلوب إخفاء
+  /// شاشات العرض لا إيقاف التشغيل فقط، فلا يبقى تبويب يفتح على فراغ.
+  /// الهديّة ليست تبويباً: تُفتح من أيقونتها في الشريط العلوي وحدها، فالشريط
+  /// السفلي يبقى للتنقّل الأساسي ولا يزدحم بزرّ يوميّ.
+  List<int> get _navTabs =>
+      _cfg.videosHidden ? const [0, 1, 3] : const [0, 1, 2, 3];
 
-  /// تبويب الهديّة — خارج أرقام التنقّل الأساسية كي لا يزاحف موضعها.
-  static const int _giftTab = 4;
+  /// عنصر شريط لكل تبويب في [_navTabs] — نفس الطول ونفس الترتيب بالبناء.
+  /// إضافة تبويب أو حذفه تُحدّث الاثنين معاً بلا خطوة ثانية تُنسى.
+  List<NavItem> get _tabItems => [
+        const NavItem(
+            icon: Icons.hub_outlined, activeIcon: Icons.hub, label: 'التوافقات'),
+        const NavItem(
+            icon: Icons.schema_outlined,
+            activeIcon: Icons.schema,
+            label: 'المخططات'),
+        if (!_cfg.videosHidden)
+          const NavItem(
+              icon: Icons.play_lesson_outlined,
+              activeIcon: Icons.play_lesson,
+              label: 'الدورات'),
+        const NavItem(
+            icon: Icons.forum_outlined,
+            activeIcon: Icons.forum,
+            label: 'الدردشة'),
+      ];
 
   /// موضع التبويب الحالي داخل الشريط الظاهر، مع الرجوع للأول إن غاب تبويبه.
   int get _navIndex {
@@ -149,6 +168,9 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // إعادة البناء فوراً إن وصل تحديث للرابط أو الباقات.
     _cfg.addListener(_onConfigChanged);
+    // قفل الإصدار أثناء الاستعمال: المالك قد يوقف إصداراً والتطبيق مفتوح،
+    // وبدون هذا المستمع يبقى يعمل بشاشات تفشل طلباتها بلا سبب مفهوم.
+    VersionLock.instance.addListener(_onVersionLocked);
     _refresh();
     // طلب إذن الإشعارات بعد استقرار الشاشة الأولى، لا أثناءها: نافذة
     // النظام فوق شاشة التهيئة تبدو خللاً، وتُرفض بلا قراءة.
@@ -159,8 +181,10 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     Notifications.listen(_route);
     _annTimer = Timer.periodic(
         const Duration(minutes: 5), (_) => _pollAnnouncements());
+    // 30 ثانية لا 20: الدورة تجلب الرسائل لكل قسم، ورقم أصغر يضاعف
+    // الطلبات بلا فائدة — الإشعار لا يحتاج دقة الثواني هذه.
     _chatTimer = Timer.periodic(
-        const Duration(seconds: 20), (_) => _pollChatMessages());
+        const Duration(seconds: 30), (_) => _pollChatMessages());
     // الإعدادات والحصة معاً: تغيير المالك للحصص أو رابط التواصل يظهر
     // خلال دقيقة بلا إغلاق التطبيق.
     _settingsTimer = Timer.periodic(
@@ -223,6 +247,9 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   /// أما القسم المفتوح أمام المستخدم فلا يُنبَّه عنه: هو يراه بعينه.
   Future<void> _pollChatMessages() async {
     if (!mounted) return;
+    // الدردشة المفتوحة تستطلع بنفسها (شاشة الدردشة)، فاستقصاء الغلاف فوقها
+    // لا يضيف شيئاً ويسحب طلبات مضاعفة على القسم نفسه.
+    if (_chatOpen) return;
     try {
       final state = await widget.api.chatState();
       if (!mounted) return;
@@ -305,7 +332,26 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     _settingsTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _cfg.removeListener(_onConfigChanged);
+    VersionLock.instance.removeListener(_onVersionLocked);
     super.dispose();
+  }
+
+  /// الإصدار أُوقف والتطبيق مفتوح: ننتقل لشاشة التحديث فوراً.
+  void _onVersionLocked() {
+    if (!mounted) return;
+    final msg = VersionLock.instance.message;
+    if (msg == null) return;
+    final u = AppConfig.instance;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+          builder: (_) => UpdateScreen(
+                message: msg,
+                url: u.updateUrl,
+                imageUrl: u.updateImageUrl,
+                apiBase: kApiBase,
+              )),
+      (r) => false,
+    );
   }
 
   void _onConfigChanged() {
@@ -385,6 +431,78 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
 
   void refreshQuota() => _refresh();
 
+  /// الهديّة كنافذة منبثقة لا كتبويب.
+  ///
+  /// الرصيد المعروض هنا هو محفظة المستخدم نفسها التي يعرضها الشريط العلوي:
+  /// الحصّة المجانية المتبقية + العملات المشحونة. المالك قد يفتح رصيداً
+  /// باشتراك أو بالعدد، وفي الحالتين نعرض المجموع المتاح الآن بدل رقم
+  /// قديم محفوظ داخل الشاشة.
+  Future<void> _openGift() {
+    return showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (sheetCtx, setSheet) => Container(
+          decoration: BoxDecoration(
+            color: XTheme.surface,
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(26)),
+          ),
+          padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: XTheme.surface2,
+                    borderRadius: BorderRadius.circular(2)),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Row(children: [
+                  const Icon(Icons.card_giftcard,
+                      color: XTheme.gold, size: 20),
+                  const SizedBox(width: 8),
+                  const Text('هديّة اليوم',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800)),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => Navigator.pop(sheetCtx),
+                    icon: const Icon(Icons.close,
+                        color: Colors.white70, size: 20),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 4),
+              GiftScreen(
+                amount: _cfg.dailyGift,
+                claimed: _giftClaimed,
+                nextAt: _giftNextAt,
+                balance: _totalLeft,
+                onClaim: () async {
+                  final r = await _claimGiftForWheel();
+                  // الرصيد الجديد يصل للشريط العلوي وللنافذة معاً: استلام
+                  // الهديّة في تكرار مشابه كان يُظهر الرصيد قديماً حتى إغلاق
+                  // الشاشة وإعادة فتحها.
+                  await _refresh();
+                  if (mounted) setSheet(() {});
+                  return r;
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = widget.store.user;
@@ -436,9 +554,8 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          // زر الهديّة: بجانب عدّاد العملات لأنه يزيده. ينقل إلى تبويب
-          // العجلة بدل أن يستلم فوراً — الاستلام صار تجربة مرئية هناك،
-          // وزرّان يستلمان الهديّة نفسها يعنيان احتمال استلام مزدوج.
+          // زر الهديّة: بجانب عدّاد العملات لأنه يزيده، ويفتح شاشة العجلة
+          // مباشرة. الهديّة بلا تبويب في الشريط السفلي، فهذا هو مدخلها الوحيد.
           // مخفي عن المالك (رصيده مفتوح أصلاً) ويظهر لغيره.
           if (!isOwner && _giftEnabled)
             IconButton(
@@ -454,11 +571,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                   size: 18,
                 ),
               ),
-              // وسم أحمر صغير حين تكون الهديّة متاحة ولم تُستلم بعد.
-              onPressed: () => setState(() {
-                if (_tab != _chatTab) _lastNonChatTab = _giftTab;
-                _tab = _giftTab;
-              }),
+              onPressed: _openGift,
             ),
           // زر + لشراء باقة — متاح للجميع (الزائر يُوجَّه لطلب حساب أولاً)
           IconButton(
@@ -505,15 +618,6 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 _chatUnread[id] = 0;
               },
             ),
-            // الهديّة في الفهرس 4، بعد الدردشة (3): الفهرس هو رقم التبويب
-            // نفسه، فأي إدراج في غير موضعه يفتح شاشةً خاطئة.
-            GiftScreen(
-              amount: _cfg.dailyGift,
-              claimed: _giftClaimed,
-              nextAt: _giftNextAt,
-              balance: _coins,
-              onClaim: _claimGiftForWheel,
-            ),
           ],
         ),
       ),
@@ -530,30 +634,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                   _tab = t;
                 });
               },
-              items: [
-          const NavItem(
-              icon: Icons.hub_outlined,
-              activeIcon: Icons.hub,
-              label: 'التوافقات'),
-          const NavItem(
-              icon: Icons.schema_outlined,
-              activeIcon: Icons.schema,
-              label: 'المخططات'),
-          if (!_cfg.videosHidden)
-            const NavItem(
-                icon: Icons.play_lesson_outlined,
-                activeIcon: Icons.play_lesson,
-                label: 'الدورات'),
-          if (_giftEnabled)
-            const NavItem(
-                icon: Icons.casino_outlined,
-                activeIcon: Icons.casino,
-                label: 'الهديّة'),
-          const NavItem(
-              icon: Icons.forum_outlined,
-              activeIcon: Icons.forum,
-              label: 'الدردشة'),
-              ],
+              items: _tabItems,
             ),
       ),
     );

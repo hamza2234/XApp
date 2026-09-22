@@ -104,10 +104,39 @@ CREATE TABLE IF NOT EXISTS x_chat_messages (
   media_mime TEXT NOT NULL DEFAULT '',
   media_size INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  deleted    INTEGER NOT NULL DEFAULT 0
+  deleted    INTEGER NOT NULL DEFAULT 0,
+  -- مخطط الموجة ومدة الصوت/الفيديو (أُضيفا لاحقاً بـALTER على القواعد القائمة).
+  waveform   TEXT NOT NULL DEFAULT '',
+  media_seconds INTEGER NOT NULL DEFAULT 0,
+  -- معرّف الرسالة المقتبَسة. لا مفتاح أجنبي: الرسالة المقتبَسة قد تُحذف
+  -- حذفاً ناعماً، والردّ يبقى مقروءاً بمقتطف محفوظ في العرض.
+  reply_to   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS x_chat_room_time ON x_chat_messages (room_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS x_chat_user ON x_chat_messages (user_id, created_at DESC);
+
+-- رفع مقاطع الدردشة متعدّد الأجزاء.
+--
+-- الفيديو العادي يصل عشرات الميغابايت، وحشوه base64 داخل JSON يضخّمه 4/3
+-- ويمرّ كاملاً في ذاكرة العامل فينهيه (نفس سبب وجود x_course_uploads).
+-- هنا نجلسة رفع قصيرة العمر: صفّ يُحذف لحظة الإكمال أو الإلغاء، وليس
+-- سجلاً دائماً — الرسالة في x_chat_messages تبقى المرجع الوحيد بعد ذلك.
+CREATE TABLE IF NOT EXISTS x_chat_uploads (
+  id           TEXT PRIMARY KEY,
+  room_id      TEXT NOT NULL,
+  user_id      TEXT NOT NULL,
+  object_key   TEXT NOT NULL,
+  r2_upload_id TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'video',
+  mime         TEXT NOT NULL DEFAULT 'video/mp4',
+  size_bytes   INTEGER NOT NULL DEFAULT 0,
+  seconds      INTEGER NOT NULL DEFAULT 0,
+  reply_to     TEXT NOT NULL DEFAULT '',
+  text         TEXT NOT NULL DEFAULT '',
+  parts_done   INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_chat_uploads_user ON x_chat_uploads (user_id, created_at);
 
 -- إجراءات المالك: كتم دائم (mute) وطرد (kick). room_id فارغ = كل الأقسام.
 CREATE TABLE IF NOT EXISTS x_chat_actions (
@@ -236,3 +265,25 @@ CREATE TABLE IF NOT EXISTS x_devices (
   last_seen    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS x_devices_owner ON x_devices (owner_marked);
+
+-- ==============================================================
+-- تعديلات المالك على التوافقات (طبقة فوق المصدر المشترك)
+-- ==============================================================
+-- لماذا جدول تعديلات لا كتابة مباشرة؟ مصدر التوافقات قاعدة مشتركة
+-- (phonex-mirror) يقرأ منها تطبيق آخر، وأي كتابة فيها تغيّر بياناته.
+-- فالتعديل يبقى هنا ملكاً لتطبيق X، ويُدمج مع المصدر عند العرض: الحذف
+-- والإضافة يُريان هنا فقط، والمصدر لا يُمسّ.
+
+-- doc_key = معرّف السجل في المصدر. kind: patch تعديل سجل قائم،
+-- new عنصر أنشأه المالك من الصفر، cat صفة/نوع فرعي جديد.
+CREATE TABLE IF NOT EXISTS x_compat_edits (
+  id         TEXT PRIMARY KEY,
+  doc_key    TEXT NOT NULL,
+  brand_file TEXT NOT NULL DEFAULT '',
+  kind       TEXT NOT NULL DEFAULT 'patch',
+  data       TEXT NOT NULL,
+  deleted    INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_compat_edits_doc ON x_compat_edits (doc_key);
+CREATE INDEX IF NOT EXISTS x_compat_edits_brand ON x_compat_edits (brand_file);

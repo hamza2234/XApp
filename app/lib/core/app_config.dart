@@ -22,6 +22,9 @@ class AppConfig extends ChangeNotifier {
   static const _kVideoHiddenMsg = 'cfg_video_hidden_msg';
   static const _kChatWriteScope = 'cfg_chat_write_scope';
   static const _kChatReadOnly = 'cfg_chat_read_only';
+  static const _kUpdMsg = 'cfg_update_msg';
+  static const _kUpdUrl = 'cfg_update_url';
+  static const _kUpdImg = 'cfg_update_img';
 
   // لا رابط مثبت في الكود: الوجهة يحددها المالك من لوحته فقط. رابط مثبت
   // سابقاً كان يوجّه المستخدمين لحساب آخر عند تعطّل الشبكة أو نسيان الضبط.
@@ -35,6 +38,12 @@ class AppConfig extends ChangeNotifier {
   bool _chatReadOnly = false;
   String _privacy = '';
   bool _loadedFromCache = false;
+
+  // بيانات شاشة التحديث الإجباري. تُحفظ محلياً لأن القفل قد يصل أثناء
+  // الاستعمال وبلا شبكة جيدة، ولأن شاشة «حدّث التطبيق» بلا رابط لا تنفع.
+  String _updateMessage = '';
+  String _updateUrl = '';
+  String _updateImageUrl = '';
 
   /// رابط تواصل المالك. فارغ يعني أن المالك لم يضبطه بعد.
   String get telegram => _telegram;
@@ -63,6 +72,11 @@ class AppConfig extends ChangeNotifier {
   bool get chatReadOnly => _chatReadOnly;
   bool get loadedFromCache => _loadedFromCache;
 
+  /// نص ورابط وصورة شاشة التحديث الإجباري — من لوحة المالك.
+  String get updateMessage => _updateMessage;
+  String get updateUrl => _updateUrl;
+  String get updateImageUrl => _updateImageUrl;
+
   /// سياسة الخصوصية كما كتبها المالك. نص فارغ يعني لم يضبطها بعد.
   String get privacyPolicy => _privacy;
   bool get hasPrivacy => _privacy.trim().isNotEmpty;
@@ -78,6 +92,9 @@ class AppConfig extends ChangeNotifier {
     _videosHiddenMessage = p.getString(_kVideoHiddenMsg) ?? '';
     _chatWriteScope = p.getString(_kChatWriteScope) ?? 'registered';
     _chatReadOnly = p.getBool(_kChatReadOnly) ?? false;
+    _updateMessage = p.getString(_kUpdMsg) ?? '';
+    _updateUrl = p.getString(_kUpdUrl) ?? '';
+    _updateImageUrl = p.getString(_kUpdImg) ?? '';
     final raw = p.getString(_kPackages);
     if (raw != null) {
       try {
@@ -114,6 +131,11 @@ class AppConfig extends ChangeNotifier {
     final hiddenMsg = (s['videosHiddenMessage'] ?? '').toString();
     // إعداد الدردشة يأتي من الخادم؛ وإن غاب نُبقي آخر قيمة معروفة كي لا
     // يرتد الزائر عن الكتابة بسبب ردّ قديم أو شبكة عابرة.
+    // بيانات شاشة التحديث تُحفظ لتُعرض عند القفل أثناء الاستعمال، حيث لا
+    // يكون ردّ bootstrap في اليد.
+    _updateMessage = (s['updateMessage'] ?? _updateMessage).toString();
+    _updateUrl = (s['updateUrl'] ?? _updateUrl).toString();
+    _updateImageUrl = (s['updateImageUrl'] ?? _updateImageUrl).toString();
     final scope = (s['chatWriteScope'] ?? '').toString();
     final readOnly = s.containsKey('chatReadOnly')
         ? s['chatReadOnly'] == true : _chatReadOnly;
@@ -195,6 +217,9 @@ class AppConfig extends ChangeNotifier {
     await p.setString(_kPrivacy, _privacy);
     await p.setString(_kChatWriteScope, _chatWriteScope);
     await p.setBool(_kChatReadOnly, _chatReadOnly);
+    await p.setString(_kUpdMsg, _updateMessage);
+    await p.setString(_kUpdUrl, _updateUrl);
+    await p.setString(_kUpdImg, _updateImageUrl);
 
     if (changed) notifyListeners();
   }

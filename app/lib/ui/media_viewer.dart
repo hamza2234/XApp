@@ -5,7 +5,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../core/api.dart';
+import '../core/avatar_cache.dart';
 import '../core/config.dart';
+import 'cached_image.dart';
 import 'theme.dart';
 
 /// عارض وسائط الدردشة — صورة بملء الشاشة أو مقطع فيديو بمشغّل مدمج.
@@ -34,6 +36,7 @@ class _MediaViewerState extends State<MediaViewer> {
   VideoPlayerController? _video;
   bool _preparing = false;
   String? _error;
+  double? _progress;
 
   @override
   void initState() {
@@ -43,6 +46,8 @@ class _MediaViewerState extends State<MediaViewer> {
 
   @override
   void dispose() {
+    // لا نحذف ملف الفيديو عند الإغلاق: بقاؤه في المخزن المؤقت هو ما يجعل
+    // إعادة الفتح فورية بدل إعادة تنزيل عشرات الميغابايت.
     _video?.dispose();
     super.dispose();
   }
@@ -51,16 +56,27 @@ class _MediaViewerState extends State<MediaViewer> {
     setState(() {
       _preparing = true;
       _error = null;
+      _progress = null;
     });
     try {
-      final bytes = await widget.api
-          .getBytes(widget.url)
-          .then((r) => r.bytes)
-          .timeout(const Duration(minutes: 3));
       final dir = await getTemporaryDirectory();
       final ext = widget.url.split('.').last;
       final f = File('${dir.path}/x_video_${widget.url.hashCode.abs()}.$ext');
-      await f.writeAsBytes(bytes);
+
+      // مقطع محفوظ من فتح سابق: يُشغَّل فوراً بلا شبكة.
+      final ready = await f.exists() && await f.length() > 0;
+      if (!ready) {
+        // التحميل مع تقدّم مرئي: المقطع قد يبلغ عشرات الميغابايت، وشاشة
+        // «جاري التحضير» بلا رقم توهم بأن التطبيق معلّق.
+        await widget.api
+            .downloadCourseVideoToFile(widget.url, f,
+                onProgress: (got, total) {
+              if (!mounted || total <= 0) return;
+              setState(() => _progress = (got / total).clamp(0.0, 1.0));
+            })
+            .timeout(const Duration(minutes: 5));
+      }
+
       final c = VideoPlayerController.file(f);
       await c.initialize();
       await c.setLooping(false);
@@ -107,13 +123,22 @@ class _MediaViewerState extends State<MediaViewer> {
   Widget _body() {
     if (widget.isVideo) {
       if (_preparing) {
-        return const Column(
+        final p = _progress;
+        return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(color: XTheme.accent),
-            SizedBox(height: 14),
-            Text('جاري تحضير المقطع…',
-                style: TextStyle(color: Colors.white70)),
+            SizedBox(
+              width: 72, height: 72,
+              child: CircularProgressIndicator(
+                  value: p, color: XTheme.accent),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              p == null
+                  ? 'جاري تحضير المقطع…'
+                  : 'جاري التحميل ${(p * 100).round()}٪',
+              style: const TextStyle(color: Colors.white70),
+            ),
           ],
         );
       }
@@ -168,24 +193,16 @@ class _MediaViewerState extends State<MediaViewer> {
 
     return InteractiveViewer(
       maxScale: 5,
-      child: Image.network(
-        widget.url.startsWith('/') ? '$kApiBase${widget.url}' : widget.url,
+      // الكاش بدل `Image.network`: الرابط الموقّع يتجدّد فتتغيّر ترويساته،
+      // و`Image.network` يعتبر ذلك صورة جديدة فيعيد التنزيل ويومض العرض عند
+      // كل فتح. البايتات المحفوظة تُرسم فوراً وبلا شبكة.
+      child: CachedImage(
+        url: widget.url.startsWith('/') ? '$kApiBase${widget.url}' : widget.url,
         headers: widget.url.startsWith('/')
             ? widget.api.signFor('GET', widget.url)
             : null,
+        cache: AvatarCache.media,
         fit: BoxFit.contain,
-        loadingBuilder: (_, child, p) => p == null
-            ? child
-            : const CircularProgressIndicator(color: XTheme.accent),
-        errorBuilder: (context, error, stack) => const Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.broken_image_outlined, color: Colors.white54, size: 46),
-            SizedBox(height: 12),
-            Text('تعذر عرض الصورة',
-                style: TextStyle(color: Colors.white70)),
-          ],
-        ),
       ),
     );
   }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -13,9 +14,11 @@ import 'package:record/record.dart';
 
 import '../core/api.dart';
 import '../core/app_config.dart';
+import '../core/avatar_cache.dart';
 import '../core/config.dart';
 import '../core/models.dart';
 import '../core/store.dart';
+import 'cached_image.dart';
 import 'chat_bridge.dart';
 import 'chat_theme_x.dart';
 import 'external_link.dart';
@@ -252,10 +255,19 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   /// التحديث الدوري: يحمل الجديد وحده بعد آخر ختم، وليس المحادثة كلها.
+  ///
+  /// جدولة واحدة تُعاد كل دورة لا مؤقّت دوري: الفاصل يتّسع عند الفشل
+  /// (تراجع تدريجي) فيتوقّف التطبيق عن إغراق الخادم حين يرفضه، ويعود إلى
+  /// الإيقاع الطبيعي فور أول نجاح. مؤقّت دوري بفاصل ثابت كان يضرب الخادم
+  /// كل ثوان حتى أثناء الحظر، وهو ما يجعل الحظر المؤقت يبدو دائماً.
   void _startPolling() {
     _poll?.cancel();
-    final ms = _state.pollMs.clamp(2000, 30000);
-    _poll = Timer.periodic(Duration(milliseconds: ms), (_) => _pollNew());
+    _schedulePoll(_state.pollMs);
+  }
+
+  void _schedulePoll(int ms) {
+    _poll?.cancel();
+    _poll = Timer(Duration(milliseconds: ms.clamp(3000, 60000)), _pollNew);
   }
 
   Future<void> _pollNew() async {
@@ -291,10 +303,18 @@ class _ChatScreenState extends State<ChatScreen>
       // الدردشة أو تغيير أقسامها أو كتم المستخدم كلها تُطبَّق في اللوحة،
       // وبدون ذلك يبقى المستخدم على حالة قديمة حتى يخرج من التطبيق.
       await _refreshState();
+      _pollFails = 0;
     } catch (_) {
-      // فشل دورة واحدة لا يُظهر خطأ: الشبكة تتقطع لحظياً كثيراً.
+      // فشل دورة واحدة لا يُظهر خطأ: الشبكة تتقطع لحظياً كثيراً. لكنه
+      // يُبطئ الإيقاع، فنقصّ الطلبات بدل تكرارها.
+      _pollFails++;
     } finally {
       _polling = false;
+      // التراجع التدريجي: 4s، 8s، 16s، 32s، ثم سقف 60s. دورة تفشل مرة
+      // تعود إلى الإيقاع الطبيعي مباشرة، وأما خادم يرفض باستمرار فيُترك
+      // حاله بدل أن يُغرق بالطلبات.
+      final backoff = _state.pollMs * (1 << _pollFails.clamp(0, 4));
+      _schedulePoll(backoff);
     }
   }
 
@@ -436,7 +456,9 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     if (!mounted) return;
-    await _send(room.id, text: body);
+    final r = _replyTo?.id;
+    _clearReply();
+    await _send(room.id, text: body, replyTo: r ?? '');
   }
 
   /// يعيد نصّاً لم يُرسل إلى الحقل بعد فشل شرط الإرسال.
@@ -477,7 +499,9 @@ class _ChatScreenState extends State<ChatScreen>
       {String text = '',
       String? mediaB64,
       int seconds = 0,
-      List<double> waveform = const []}) async {
+      List<double> waveform = const [],
+      String replyTo = '',
+      ChatMessage? replyTarget}) async {
     final tempId = 'local_${DateTime.now().microsecondsSinceEpoch}';
     final optimistic = ChatMessage(
       id: tempId,
@@ -496,6 +520,17 @@ class _ChatScreenState extends State<ChatScreen>
       ),
       waveform: waveform,
       pending: true,
+      replyTo: replyTo,
+      // نعرض مقتطفاً محلياً فوراً بدل انتظار ردّ الخادم: الردّ يظهر كاملاً
+      // بسياقه من اللحظة الأولى، ثم يُستبدل بمقتطف الخادم عند التأكيد.
+      replyPreview: replyTarget == null
+          ? null
+          : ChatReplyPreview(
+              id: replyTarget.id,
+              body: replyTarget.body,
+              kind: replyTarget.kind,
+              nickname: replyTarget.author.label,
+            ),
     );
     setState(() {
       _messages.add(optimistic);
@@ -509,7 +544,8 @@ class _ChatScreenState extends State<ChatScreen>
           text: text,
           mediaB64: mediaB64,
           mediaSeconds: seconds,
-          waveform: waveform);
+          waveform: waveform,
+          replyTo: replyTo);
       if (!mounted) return;
       setState(() {
         final i = _messages.indexWhere((m) => m.id == tempId);
@@ -537,8 +573,41 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  /// عدد دورات الاستقصاء الفاشلة المتتالية — يقود التراجع التدريجي.
+  int _pollFails = 0;
+
   /// نوع الوسيط قيد الإرسال — يضبطه المنتقي قبل نداء `_send`.
   String _pendingKind = 'image';
+
+  /// معرّف الرسالة المحلية الجاري رفعها الآن، مع تقدّمها بالبايت.
+  String _uploadingId = '';
+  int _uploadDone = 0;
+  int _uploadTotal = 0;
+
+  /// الرسالة التي يجري الردّ عليها الآن، أو null إن كان الإرسال عادياً.
+  ///
+  /// يُحفظ الحرف نفسه لا معرّفه فقط: عرض شريط «تردّ على…» يحتاج الاسم
+  /// والمقتطف فوراً، وطلب الرسالة الأصلية من الخادم لأجل ذلك زيادة بلا داع.
+  ChatMessage? _replyTo;
+
+  /// لمسة على رسالة: تُثبّت الردّ عليها، ولمسة أخرى على الرسالة نفسها تلغيه.
+  void _onMessageTap(BuildContext context, fc.Message message,
+      {required int index, required TapUpDetails details}) {
+    final m = ChatBridge.unwrap(message);
+    if (m == null || m.pending || m.id.isEmpty) return;
+    setState(() => _replyTo = _replyTo?.id == m.id ? null : m);
+    if (_replyTo != null) _focus.requestFocus();
+  }
+
+  /// يُفرّغ الردّ المعلّق — بعد الإرسال أو عند الإلغاء.
+  void _clearReply() {
+    if (_replyTo == null) return;
+    if (mounted) {
+      setState(() => _replyTo = null);
+    } else {
+      _replyTo = null;
+    }
+  }
 
   Future<void> _pickImage() async {
     if (!_state.imagesEnabled) {
@@ -565,9 +634,14 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
     _pendingKind = 'image';
+    final target = _replyTo;
+    _clearReply();
     // التعليق المكتوب في الحقل يُرفق بالصورة ثم يُفرّغ، كما كان.
     await _send(_room!.id,
-        text: _input.text.trim(), mediaB64: base64Encode(bytes));
+        text: _input.text.trim(),
+        mediaB64: base64Encode(bytes),
+        replyTo: target?.id ?? '',
+        replyTarget: target);
     _input.clear();
   }
 
@@ -578,18 +652,105 @@ class _ChatScreenState extends State<ChatScreen>
           : _state.mediaBlockedReason);
       return;
     }
+    // الحدّ الأقصى قد يكون كبيراً (200MB)، وقراءة المقطع كاملاً في الذاكرة
+    // تُسقط التطبيق على أجهزة الجوال قبل أن يُرفض أصلاً. الطول يُقرأ من
+    // الملف بلا تحميل، والرفع نفسه يقرأ على أجزاء.
     final x = await _picker.pickVideo(
       source: ImageSource.gallery,
       maxDuration: Duration(seconds: _state.mediaSeconds),
     );
     if (x == null) return;
-    final bytes = await x.readAsBytes();
-    if (bytes.length > _state.maxMediaMb * 1024 * 1024) {
+    final size = await File(x.path).length();
+    if (size > _state.maxMediaMb * 1024 * 1024) {
       _toast('المقطع كبير (أقصى ${_state.maxMediaMb}MB)');
       return;
     }
-    _pendingKind = 'video';
-    await _send(_room!.id, mediaB64: base64Encode(bytes));
+    // الفيديو يذهب على أجزاء لا كـbase64: حشو base64 يضخّم الحجم 4/3 ويضع
+    // الملف كاملاً في ذاكرة العامل، وهو ما ينهي الطلب على مقاطع الجوال.
+    await _sendVideo(x.path, size);
+  }
+
+  /// يرفع مقطع فيديو على أجزاء مع شريط تقدّم، ثم يعرض الرسالة.
+  Future<void> _sendVideo(String path, int total) async {
+    final room = _room;
+    if (room == null) return;
+    final target = _replyTo;
+    _clearReply();
+    final tempId = 'local_${DateTime.now().microsecondsSinceEpoch}';
+    final optimistic = ChatMessage(
+      id: tempId,
+      roomId: room.id,
+      kind: 'video',
+      body: '',
+      mediaUrl: '',
+      mediaMime: '',
+      mediaSize: total,
+      at: DateTime.now().millisecondsSinceEpoch,
+      mine: true,
+      author: ChatAuthor(
+          id: '', nickname: _state.myNickname, avatarUrl: _state.myAvatarUrl),
+      pending: true,
+      replyTo: target?.id ?? '',
+      replyPreview: target == null
+          ? null
+          : ChatReplyPreview(
+              id: target.id,
+              body: target.body,
+              kind: target.kind,
+              nickname: target.author.label,
+            ),
+    );
+    setState(() {
+      _messages.add(optimistic);
+      _lastAt = optimistic.at;
+      _uploadingId = tempId;
+      _uploadDone = 0;
+      _uploadTotal = total;
+    });
+    _syncChatList();
+    _jumpToBottom();
+    try {
+      final saved = await widget.api.chatUploadVideo(
+        room: room.id,
+        filePath: path,
+        kind: 'video',
+        seconds: 0,
+        replyTo: target?.id ?? '',
+        onProgress: (sent, all) {
+          if (!mounted) return;
+          setState(() {
+            _uploadDone = sent;
+            _uploadTotal = all;
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        final i = _messages.indexWhere((m) => m.id == tempId);
+        if (i >= 0) _messages[i] = saved;
+        if (saved.at > _lastAt) _lastAt = saved.at;
+        _uploadingId = '';
+      });
+      _syncChatList();
+      _reportSeen();
+    } on ApiException catch (e) {
+      _failUpload(tempId, e.message);
+    } catch (_) {
+      _failUpload(tempId, 'تعذر إرسال المقطع — تحقق من الإنترنت');
+    }
+  }
+
+  void _failUpload(String tempId, String message) {
+    if (!mounted) return;
+    setState(() {
+      final i = _messages.indexWhere((m) => m.id == tempId);
+      if (i >= 0) {
+        _messages[i] = _messages[i].copyWith(pending: false, failed: true);
+      }
+      _uploadingId = '';
+    });
+    _syncChatList();
+    _toast(message);
   }
 
   Future<void> _toggleRecording() async {
@@ -692,8 +853,14 @@ class _ChatScreenState extends State<ChatScreen>
         return;
       }
       _pendingKind = 'audio';
+      final target = _replyTo;
+      _clearReply();
       await _send(_room!.id,
-          mediaB64: base64Encode(bytes), seconds: secs, waveform: wave);
+          mediaB64: base64Encode(bytes),
+          seconds: secs,
+          waveform: wave,
+          replyTo: target?.id ?? '',
+          replyTarget: target);
     } catch (_) {
       if (mounted) setState(() => _recording = false);
       _toast('تعذر إيقاف التسجيل');
@@ -911,10 +1078,12 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       );
 
-  /// شريط الأقسام وحده — الإشعارات والملف انتقلا إلى الرأس.
+  /// شريط الأقسام وحده — الاسم والإعدادات في الرأس.
   ///
-  /// كان الشريط يحمل ثلاثة أدوار في سطر: تنقّل + كتم + ملف. حصرُه في التنقّل
-  /// يعطي كل قرص عرضاً أكبر ويمنع اللمس الخاطئ بين التنقّل والإعداد.
+  /// كان الشريط يحمل ثلاثة أدوار في سطر: تنقّل + كتم + ملف. ثم بقي الاسم
+  /// مكرّراً في كل قرص، فيأخذ الشريط سطراً كاملاً لعرض معلومة معروضة أصلاً
+  /// في الرأس. الآن الأقراص أيقونات فقط: الاسم في الرأس مرة واحدة، والشريط
+  /// يعود لمساحة صغيرة لا تزاحم الرسائل.
   Widget _roomBar() {
     return Container(
       decoration: BoxDecoration(
@@ -924,9 +1093,9 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
         child: SizedBox(
-          height: 36,
+          height: 34,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             reverse: true,
@@ -939,36 +1108,29 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  /// قرص القسم — النشط متدرّج بحلقة فاتحة، والخامل زجاج شفّاف بلا حدّ.
+  /// قرص القسم — أيقونة فقط، والاسم في التلميح والرأس. النشط متدرّج بحلقة
+  /// فاتحة، والخامل زجاج شفّاف بلا حدّ.
   Widget _roomChip(ChatRoom r) {
     final active = _room?.id == r.id;
-    return GestureDetector(
-      onTap: () => _switchRoom(r),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 13),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          gradient: active ? XTheme.gradient : null,
-          color: active ? null : XTheme.surface2,
-          borderRadius: BorderRadius.circular(30),
-          border: active
-              ? null
-              : Border.all(color: XTheme.textDim.withOpacity(.16)),
-          boxShadow: active ? XTheme.glow(XTheme.accent, strength: .45) : null,
-        ),
-        child: Row(
-          children: [
-            Icon(_roomIcon(r.icon),
-                size: 15, color: active ? Colors.white : XTheme.textDim),
-            const SizedBox(width: 6),
-            Text(r.name,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w800,
-                  color: active ? Colors.white : XTheme.text,
-                )),
-          ],
+    return Tooltip(
+      message: r.name,
+      child: GestureDetector(
+        onTap: () => _switchRoom(r),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 48,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            gradient: active ? XTheme.gradient : null,
+            color: active ? null : XTheme.surface2,
+            borderRadius: BorderRadius.circular(30),
+            border: active
+                ? null
+                : Border.all(color: XTheme.textDim.withOpacity(.16)),
+            boxShadow: active ? XTheme.glow(XTheme.accent, strength: .45) : null,
+          ),
+          child: Icon(_roomIcon(r.icon),
+              size: 18, color: active ? Colors.white : XTheme.textDim),
         ),
       ),
     );
@@ -1034,9 +1196,12 @@ class _ChatScreenState extends State<ChatScreen>
         return null;
       },
       onMessageSend: _onMessageSend,
-      // أزرار الإرفاق تبقى أزرارنا الثلاثة أسفل الشاشة: الصوت تسجيل حيّ لا
-      // ملف، والفيديو يُلتقط بالكاميرا مباشرة، ولا يدخلان في قائمة مرفقات
-      // الحزمة القياسية (ملف/صورة/فيديو من المعرض).
+      // ضغطة زر المرفقات تفتح قائمتنا (صورة/فيديو/صوت) بدل منتقي الملفات
+      // الافتراضي: الصوت تسجيل حيّ لا ملف، واختيار النوع يبقى بيد المستخدم.
+      onAttachmentTap: _openAttachSheet,
+      // لمسة واحدة تبدأ الردّ: أسرع من الضغط المطوّل المستخدم للحذف، وأقل
+      // عرضة للخطأ من قائمة منبثقة لكل رسالة.
+      onMessageTap: _onMessageTap,
       onMessageLongPress: _onMessageLongPress,
       builders: fc.Builders(
         composerBuilder: (context) => _composer(),
@@ -1096,6 +1261,9 @@ class _ChatScreenState extends State<ChatScreen>
     // `groupStatus` يقول هل هذه أول رسالة في مجموعة متتالية؛ نُخفي الاسم
     // والصورة عند التكرار كما اعتاد المستخدم في النسخة السابقة.
     final first = groupStatus?.isFirst ?? true;
+    // الصورة الشخصية على الطرف المقابل للفقاعة دائماً: رسائلي على اليمين
+    // فصورتي على يمينها، ورسائل الطرف الآخر على اليسار فصورته على يساره.
+    // كانت الصورة ملتصقة باليسار في الحالتين، فتبدو رسائلي وكأنها لغيري.
     return fchat.ChatMessage(
       message: message,
       index: index,
@@ -1103,6 +1271,7 @@ class _ChatScreenState extends State<ChatScreen>
       child: child,
       headerWidget: !isSentByMe && first ? _senderName(message) : null,
       leadingWidget: !isSentByMe ? _authorAvatar(message) : null,
+      trailingWidget: isSentByMe && first ? _myAvatar(message) : null,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
     );
   }
@@ -1126,6 +1295,20 @@ class _ChatScreenState extends State<ChatScreen>
     return Padding(
       padding: const EdgeInsets.only(left: 6),
       child: _avatar(m.author, size: 34),
+    );
+  }
+
+  /// صورتي بجانب رسائلي. تُرسم من بيانات جلسة المستخدم لا من الرسالة:
+  /// الرسالة تحمل صورة اللحظة التي أُرسلت فيها، وقد تغيّرت منذ ذلك الحين.
+  Widget? _myAvatar(fc.Message message) {
+    final url = _state.myAvatarUrl;
+    if (url.isEmpty) return null;
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: _avatar(
+        ChatAuthor(id: '', nickname: _state.myNickname, avatarUrl: url),
+        size: 34,
+      ),
     );
   }
 
@@ -1243,6 +1426,10 @@ class _ChatScreenState extends State<ChatScreen>
       crossAxisAlignment:
           mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
+        // الاقتباس أعلى الفقاعة كي يُقرأ الردّ في سياقه: الفقاعة وحدها لا
+        // تقول على ماذا تردّ، والتمرير للرسالة الأصلية قد يكون مستحيلاً
+        // إن خرجت من الصفحة أو حُذفت.
+        if (m.replyPreview != null) _replyQuote(m.replyPreview!, mine),
         if (m.body.trim().isNotEmpty)
           Padding(
             padding: EdgeInsets.fromLTRB(
@@ -1331,6 +1518,45 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
+  /// شريط الاقتباس داخل الفقاعة: اسم صاحب الرسالة ومقتطف منها.
+  Widget _replyQuote(ChatReplyPreview r, bool mine) {
+    final accent = mine ? chatOnAccent : XTheme.accent;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      decoration: BoxDecoration(
+        color: (mine ? Colors.black : Colors.black).withOpacity(mine ? .12 : .06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border(
+          right: BorderSide(color: accent.withOpacity(.85), width: 3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (r.nickname.isNotEmpty)
+            Text(r.nickname,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900,
+                    color: accent)),
+          Text(r.label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12,
+                  height: 1.3,
+                  color: mine
+                      ? chatOnAccent.withOpacity(.85)
+                      : XTheme.textDim)),
+        ],
+      ),
+    );
+  }
+
   Widget _imageContent(ChatMessage m, bool mine) {
     final url = m.mediaUrl;
     if (url.isEmpty) {
@@ -1358,50 +1584,15 @@ class _ChatScreenState extends State<ChatScreen>
             // اللحظة الأولى، والصورة تملؤه بلا تحرّك.
             width: _imageWidth,
             height: _imageHeight,
-            child: Image.network(
-              _mediaUrl(url),
+            // الكاش لا `Image.network`: القائمة تُبنى من جديد كل دورة تحديث،
+            // و`Image.network` يحتفظ بمخزونه بحسب الرابط **والترويسات**؛ توقيع
+            // متجدد يعني رابطاً يُعتبر جديداً فيُعاد التنزيل ويومض العرض. هنا
+            // البايتات تُرسم فوراً من الذاكرة.
+            child: CachedImage(
+              url: _mediaUrl(url),
               headers: _mediaHeaders(url),
+              cache: AvatarCache.media,
               fit: BoxFit.cover,
-              gaplessPlayback: true,
-              loadingBuilder: (context, child, p) {
-                if (p == null) return child;
-                // شريط تقدّم رقيق فوق الإطار بدل استبدال الصورة بمربع رمادي:
-                // الصورة تظهر تدريجياً فلا تبدو الشاشة فارغة ثم ممتلئة.
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Container(color: XTheme.surface2),
-                    Align(
-                      alignment: Alignment.bottomCenter,
-                      child: LinearProgressIndicator(
-                        value: p.expectedTotalBytes != null
-                            ? p.cumulativeBytesLoaded /
-                                p.expectedTotalBytes!
-                            : null,
-                        minHeight: 3,
-                        backgroundColor: Colors.transparent,
-                        valueColor: const AlwaysStoppedAnimation(
-                            XTheme.accent),
-                      ),
-                    ),
-                  ],
-                );
-              },
-              errorBuilder: (context, error, stack) => Container(
-                color: XTheme.surface2,
-                alignment: Alignment.center,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.broken_image_outlined,
-                        color: XTheme.textDim, size: 26),
-                    const SizedBox(height: 6),
-                    Text('تعذر تحميل الصورة',
-                        style: TextStyle(
-                            fontSize: 10.5, color: XTheme.textDim)),
-                  ],
-                ),
-              ),
             ),
           ),
         ),
@@ -1437,6 +1628,32 @@ class _ChatScreenState extends State<ChatScreen>
 
   Widget _videoContent(ChatMessage m, bool mine) {
     if (m.mediaUrl.isEmpty) {
+      // رفعي الجاري: نسبة مئوية حقيقية بدل «جاري رفع المقطع» الغامضة.
+      // مقطع الجوال يبلغ عشرات الميغابايت، ومؤشّر بلا رقم يوهم بالتعليق.
+      if (mine && m.id == _uploadingId && _uploadTotal > 0) {
+        final p = (_uploadDone / _uploadTotal).clamp(0.0, 1.0);
+        return Container(
+          width: 230, height: 150,
+          margin: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: XTheme.surface2,
+            borderRadius: BorderRadius.circular(XTheme.rSm),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 44, height: 44,
+                child: CircularProgressIndicator(
+                    value: p, strokeWidth: 3, color: XTheme.accent),
+              ),
+              const SizedBox(height: 10),
+              Text('جاري الرفع ${(p * 100).round()}٪',
+                  style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+            ],
+          ),
+        );
+      }
       return _mediaPlaceholder(
           Icons.videocam_outlined, mine ? 'جاري رفع المقطع…' : 'مقطع');
     }
@@ -1545,16 +1762,14 @@ class _ChatScreenState extends State<ChatScreen>
                           color: Colors.white))
                   : Icon(Icons.person, size: size * .6, color: Colors.white),
             )
-          : Image.network(
-              url.startsWith('/') ? '$kApiBase$url' : url,
+          : CachedAvatar(
+              url: url.startsWith('/') ? '$kApiBase$url' : url,
               headers: url.startsWith('/')
                   ? widget.api.signFor('GET', url)
                   : null,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Center(
-                child: Icon(Icons.person,
-                    size: size * .6, color: XTheme.textDim),
-              ),
+              size: size,
+              showInitials: showInitials,
+              initials: initial,
             ),
     );
   }
@@ -1697,54 +1912,186 @@ class _ChatScreenState extends State<ChatScreen>
       textEditingController: _input,
       focusNode: _focus,
       hintText: 'اكتب رسالة…',
-      maxLines: 4,
+      // الحقل يبدأ بسطر واحد ويتوسّع حتى ستّة: النموّ التدريجي يترك مساحة
+      // للرسائل، والحدّ الأعلى يمنع الحقل من ابتلاع الشاشة في رسالة طويلة.
+      minLines: 1,
+      maxLines: 6,
       maxLength: _state.maxLength,
       textColor: XTheme.text,
       hintColor: XTheme.textDim,
       backgroundColor: XTheme.surface,
       inputFillColor: XTheme.surface2,
-      sendIconColor: chatOnAccent,
-      emptyFieldSendIconColor: XTheme.textDim,
+      // زر الإرسال دائرة ممتلئة بلون التمييز، ورمادي خافت حين لا نصّ:
+      // اللون وحده يقول «اضغطني» أو «لا شيء لإرساله» بلا شرح.
+      sendIcon: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: XTheme.accent,
+          boxShadow: const [
+            BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2)),
+          ],
+        ),
+        child: const Icon(Icons.send_rounded, size: 20, color: chatOnAccent),
+      ),
+      sendIconColor: XTheme.accent,
+      emptyFieldSendIconColor: XTheme.textDim.withOpacity(.45),
       sendButtonVisibilityMode: fchat.SendButtonVisibilityMode.hidden,
-      padding: const EdgeInsets.fromLTRB(8, 9, 8, 8),
-      topWidget: _attachBar(),
+      padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
+      gap: 4,
+      // زر المرفقات داخل صفّ الحقل نفسه — **جانبه** لا فوقه. الحزمة تضع
+      // هذا الزرّ في طرف الصفّ، وضغطة واحدة تفتح قائمة اختيار النوع،
+      // فيبقى ارتفاع الكومبوزر سطراً واحداً حتى تُفتح القائمة.
+      attachmentIcon: const Icon(Icons.add_circle_outline, size: 26),
+      attachmentIconColor: XTheme.accent,
+      // شريط الردّ فوق الحقل: جزء من الكومبوزر نفسه لا طبقة عائمة، فلا
+      // يتقاطع مع لوحة المفاتيح ولا يغطي آخر رسالة.
+      topWidget: _replyTo == null ? null : _replyBar(),
     );
   }
+
+  /// شريط «تردّ على …» أعلى حقل الكتابة، مع زر إلغاء صريح.
+  ///
+  /// الإلغاء لازم: بدون زر واضح يبقى المستخدم عالقاً في وضع الردّ ويرسل
+  /// ردّاً على رسالة قديمة بغير قصد.
+  Widget _replyBar() {
+    final r = _replyTo!;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
+      decoration: BoxDecoration(
+        color: XTheme.surface2,
+        borderRadius: BorderRadius.circular(XTheme.rSm),
+        border: const Border(
+          right: BorderSide(color: XTheme.accent, width: 3),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('تردّ على ${r.author.label}',
+                    style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w900,
+                        color: XTheme.accent)),
+                Text(
+                  () {
+                    final t = r.body.trim();
+                    if (t.isNotEmpty) return t;
+                    if (r.isImage) return 'صورة';
+                    if (r.isVideo) return 'مقطع فيديو';
+                    if (r.isAudio) return 'رسالة صوتية';
+                    return 'رسالة';
+                  }(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      TextStyle(fontSize: 12, color: XTheme.textDim),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            color: XTheme.textDim,
+            tooltip: 'إلغاء الردّ',
+            onPressed: _clearReply,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// قائمة نوع المرفق: صورة، فيديو، رسالة صوتية.
+  ///
+  /// الخيارات تظهر فقط ما تسمح به حالة القسم — عرض زر يرفضه الخادم أسوأ من
+  /// غيابه. واختيار النوع يبقى صريحاً للمستخدم، فلا يُخمَّن من الجهاز.
+  Future<void> _openAttachSheet() async {
+    if (!_state.canWrite) {
+      _toast(_state.writeBlockedReason.isEmpty
+          ? 'لا يمكنك الكتابة حالياً'
+          : _state.writeBlockedReason);
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: XTheme.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(XTheme.rXl))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              if (_state.imagesEnabled)
+                _attachChoice(Icons.add_photo_alternate_outlined, 'صورة',
+                    XTheme.accent, () {
+                  Navigator.of(ctx).pop();
+                  _pickImage();
+                }),
+              if (_state.mediaScope != 'none')
+                _attachChoice(Icons.videocam_outlined, 'فيديو', XTheme.cyan,
+                    () {
+                  Navigator.of(ctx).pop();
+                  _pickVideo();
+                }),
+              _attachChoice(
+                _recording ? Icons.stop_circle_outlined : Icons.mic_none,
+                _recording ? 'إيقاف التسجيل' : 'صوت',
+                _recording ? XTheme.danger : XTheme.gold,
+                () {
+                  Navigator.of(ctx).pop();
+                  _toggleRecording();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _attachChoice(
+          IconData icon, String label, Color tint, VoidCallback onTap) =>
+      InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(XTheme.rMd),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 50,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: tint.withOpacity(.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, size: 24, color: tint),
+              ),
+              const SizedBox(height: 7),
+              Text(label,
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w800)),
+            ],
+          ),
+        ),
+      );
 
   /// شريط الإرفاق فوق حقل الكتابة.
   ///
   /// كان إلى جانب الحقل قبل أن نكتشف أن الكومبوزر عنصر مكدّس لا صفّي. وضعه
   /// في `topWidget` يحفظ الأزرار الثلاثة (صورة، فيديو، صوت) كما كان المستخدم
   /// يعرفها بلا مصادمة تخطيط.
-  Widget _attachBar() => Row(
-        children: [
-          _composerIcon(
-              Icons.add_photo_alternate_outlined, 'صورة', _pickImage),
-          if (_state.mediaScope != 'none')
-            _composerIcon(Icons.videocam_outlined, 'فيديو', _pickVideo),
-          _composerIcon(
-            _recording ? Icons.stop_circle_outlined : Icons.mic_none,
-            'رسالة صوتية',
-            _toggleRecording,
-            tint: _recording ? XTheme.danger : null,
-          ),
-        ],
-      );
 
-  Widget _composerIcon(IconData icon, String tip, VoidCallback onTap,
-      {Color? tint}) {
-    return Tooltip(
-      message: tip,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(24),
-        child: Padding(
-          padding: const EdgeInsets.all(9),
-          child: Icon(icon, size: 21, color: tint ?? XTheme.textDim),
-        ),
-      ),
-    );
-  }
 
   // ───────────────────────── الملف الشخصي ─────────────────────────
 
@@ -2304,3 +2651,4 @@ class _WavePainter extends CustomPainter {
       old.dim != dim ||
       old.active != active;
 }
+
