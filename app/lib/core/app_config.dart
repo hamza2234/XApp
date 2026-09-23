@@ -16,6 +16,7 @@ class AppConfig extends ChangeNotifier {
   static const _kTelegram = 'cfg_telegram';
   static const _kPackages = 'cfg_packages';
   static const _kDailyFree = 'cfg_daily_free';
+  static const _kSchemPrice = 'cfg_schem_price';
   static const _kPrivacy = 'cfg_privacy';
   static const _kGift = 'cfg_daily_gift';
   static const _kVideoHidden = 'cfg_video_hidden';
@@ -31,6 +32,7 @@ class AppConfig extends ChangeNotifier {
   String _telegram = '';
   List<dynamic> _packages = const [];
   int _dailyFree = 5;
+  int _schemPrice = 1;
   int _dailyGift = 0;
   bool _videosHidden = false;
   String _videosHiddenMessage = '';
@@ -53,6 +55,9 @@ class AppConfig extends ChangeNotifier {
   /// المنحة اليومية الواحدة — تُطبَّق على المخططات والتوافقات معاً، ولكل
   /// الأدوار (زائر ومسجّل ومشترك). لا عدّاد ثانٍ ولا عملة ثانية.
   int get dailyFreeQuota => _dailyFree;
+
+  /// ثمن فتح ملف مخطط بالعملات كما ضبطه المالك. صفر يعني بلا خصم عملات.
+  int get schemFilePrice => _schemPrice;
 
   /// عملات هديّة اليوم كما ضبطها المالك. صفر يعني أن الزر لا يظهر أصلاً —
   /// الخادم يرفض المطالبة بهذه القيمة، فلا معنى لإظهاره معطّلاً.
@@ -87,6 +92,7 @@ class AppConfig extends ChangeNotifier {
     _telegram = p.getString(_kTelegram) ?? '';
     _privacy = p.getString(_kPrivacy) ?? '';
     _dailyFree = p.getInt(_kDailyFree) ?? 5;
+    _schemPrice = p.getInt(_kSchemPrice) ?? 1;
     _dailyGift = p.getInt(_kGift) ?? 0;
     _videosHidden = p.getBool(_kVideoHidden) ?? false;
     _videosHiddenMessage = p.getString(_kVideoHiddenMsg) ?? '';
@@ -124,6 +130,7 @@ class AppConfig extends ChangeNotifier {
         (legacy.isEmpty ? _dailyFree : legacy.reduce((a, b) => a > b ? a : b));
     final privacy = (s['privacyPolicy'] ?? '').toString();
     final gift = (s['dailyGiftAmount'] as num?)?.toInt() ?? _dailyGift;
+    final schem = (s['schemFilePrice'] as num?)?.toInt() ?? _schemPrice;
     // القيمة القادمة من الخادم هي المرجع؛ إن غابت نُبقي آخر قيمة معروفة كي
     // لا يعود الفيديو للظهور بخطأ شبكة عابر أثناء الإيقاف.
     final hidden = s.containsKey('videosHidden')
@@ -140,6 +147,7 @@ class AppConfig extends ChangeNotifier {
     final readOnly = s.containsKey('chatReadOnly')
         ? s['chatReadOnly'] == true : _chatReadOnly;
     await _apply(tg: tg, packages: pk, dailyFree: quota, privacy: privacy,
+        schemPrice: schem,
         dailyGift: gift, videosHidden: hidden, videosHiddenMessage: hiddenMsg,
         chatWriteScope: scope.isEmpty ? _chatWriteScope : scope,
         chatReadOnly: readOnly);
@@ -150,6 +158,7 @@ class AppConfig extends ChangeNotifier {
     String? telegram,
     List<dynamic>? packages,
     int? dailyFree,
+    int? schemPrice,
     int? dailyGift,
     bool? videosHidden,
     String? videosHiddenMessage,
@@ -161,6 +170,7 @@ class AppConfig extends ChangeNotifier {
           tg: telegram ?? _telegram,
           packages: packages ?? _packages,
           dailyFree: dailyFree ?? _dailyFree,
+          schemPrice: schemPrice ?? _schemPrice,
           dailyGift: dailyGift ?? _dailyGift,
           videosHidden: videosHidden ?? _videosHidden,
           videosHiddenMessage: videosHiddenMessage ?? _videosHiddenMessage,
@@ -172,6 +182,7 @@ class AppConfig extends ChangeNotifier {
     required String tg,
     required List<dynamic> packages,
     required int dailyFree,
+    required int schemPrice,
     required int dailyGift,
     required bool videosHidden,
     required String videosHiddenMessage,
@@ -194,12 +205,14 @@ class AppConfig extends ChangeNotifier {
         nextPrivacy != _privacy ||
         !listEquals(_pkgKeys(packages), _pkgKeys(_packages)) ||
         dailyFree != _dailyFree ||
+        schemPrice != _schemPrice ||
         dailyGift != _dailyGift ||
         videosHidden != _videosHidden ||
         nextHiddenMsg != _videosHiddenMessage;
     _telegram = nextTg;
     _packages = packages;
     _dailyFree = dailyFree;
+    _schemPrice = schemPrice;
     _dailyGift = dailyGift;
     _videosHidden = videosHidden;
     _videosHiddenMessage = nextHiddenMsg;
@@ -210,6 +223,7 @@ class AppConfig extends ChangeNotifier {
     final p = await SharedPreferences.getInstance();
     await p.setString(_kTelegram, _telegram);
     await p.setInt(_kDailyFree, _dailyFree);
+    await p.setInt(_kSchemPrice, _schemPrice);
     await p.setInt(_kGift, _dailyGift);
     await p.setBool(_kVideoHidden, _videosHidden);
     await p.setString(_kVideoHiddenMsg, _videosHiddenMessage);

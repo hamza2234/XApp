@@ -234,6 +234,7 @@ interface XSettings {
   schematicsLocked: boolean       // قفل المخططات كلياً عن الزوار
   compatLocked: boolean           // قفل التوافقات عن الزوار
   compatSearchCost: number        // ثمن دخول الشركة في التوافقات بالعملات (0 = مجاني)
+  schemFilePrice: number          // ثمن فتح ملف مخطط بالعملات (0 = يعتمد المنحة فقط)
   dailyGiftAmount: number         // عملات الهديّة اليومية التي يمنحها زر الهديّة (0 = معطّل)
   videosHidden: boolean           // إيقاف عرض الفيديوهات فوراً للجميع (مفتاح المالك)
   videosHiddenMessage: string     // ما يُعرض للمستخدم حين يكون العرض موقوفاً
@@ -269,6 +270,7 @@ const DEFAULT_SETTINGS: XSettings = {
   schematicsLocked: false,
   compatLocked: false,
   compatSearchCost: 1,
+  schemFilePrice: 1,
   dailyGiftAmount: 5,
   videosHidden: false,
   videosHiddenMessage: 'الفيديوهات متوقفة مؤقتاً — سنعاود قريباً',
@@ -1095,7 +1097,7 @@ async function emptyReason(env: Env, caller: Caller, fp: string): Promise<HttpEr
  */
 async function chargeOne(
   env: Env, caller: Caller, fp: string, settings: XSettings,
-  addr = '', rotated = false
+  addr = '', rotated = false, price: number | null = null
 ): Promise<{ freeLeft: number; balance: number; source: string }> {
   if (caller.role === 'owner') return { freeLeft: -1, balance: -1, source: 'owner' }
 
@@ -1115,7 +1117,13 @@ async function chargeOne(
     }
   }
 
-  const cost = Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+  // إن مُرِّر سعر صريح فهو المعتمد، ولو كان صفراً: المالك قد يجعل المخططات
+  // مجانية (بالمنحة فقط) بينما التوافقات مدفوعة. غياب السعر (null) يعني
+  // مساراً لم يُحدَّد له ثمن فيرجع لسعر التوافقات كي لا يصير مجانياً بالخطأ.
+  const cost = price === null
+    ? Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+    : Math.max(0, Math.floor(price) || 0)
+  if (cost <= 0) return { freeLeft: 0, balance: -1, source: 'free' }
   const balance = await spendCoins(env, caller, fp, cost)
   if (balance === null) throw await emptyReason(env, caller, fp)
   return { freeLeft: 0, balance, source: 'coins' }
@@ -1138,7 +1146,7 @@ async function consumeFileOnce(
   if (cached) return Number(cached)
 
   const r = await chargeOne(env, caller, fp, settings, ip(request),
-    await fingerprintRotated(env, request, caller))
+    await fingerprintRotated(env, request, caller), settings.schemFilePrice)
   const left = r.source === 'free' ? r.freeLeft : r.balance
   ctx.waitUntil(env.QUOTA.put(seenKey, String(left), { expirationTtl: 2 * DAY })
     .catch(() => {}))
@@ -1202,12 +1210,14 @@ async function mirrorSearchCompat(
  * التحرير محبوساً في اللوحة ويرى المستخدم البيانات الأصلية وحدها.
  */
 async function compatEditsFor(env: Env, brandFile?: string): Promise<Map<string, any>> {
+  // `kind` لازم للدمج: بدون معرفة أن الصفّ `patch` على المرآة أو `new` من
+  // المالك، لا يمكن جلب صفوف المرآة التي غيّرها المالك حين لا يعيدها البحث.
   const rows = brandFile
     ? await env.XDB.prepare(
-        'SELECT doc_key, data, deleted FROM x_compat_edits WHERE brand_file = ?1'
+        'SELECT doc_key, data, kind, deleted FROM x_compat_edits WHERE brand_file = ?1'
       ).bind(brandFile).all<any>()
     : await env.XDB.prepare(
-        'SELECT doc_key, data, deleted FROM x_compat_edits'
+        'SELECT doc_key, data, kind, deleted FROM x_compat_edits'
       ).all<any>()
   const m = new Map<string, any>()
   for (const r of rows.results ?? []) m.set(r.doc_key, r)
@@ -1242,6 +1252,7 @@ async function mergeCompatEdits(
 ): Promise<MirrorDoc[]> {
   const edits = await compatEditsFor(env, brandFile)
   const out: MirrorDoc[] = []
+  const seen = new Set<string>()
   for (const d of results) {
     const e = edits.get(d.id)
     if (e?.deleted) continue
@@ -1252,21 +1263,62 @@ async function mergeCompatEdits(
       } catch { /* تعديل تالف لا يُسقط الصفّ */ }
     }
     out.push({ id: d.id, fields })
+    seen.add(d.id)
   }
-  if (brandFile) {
-    const newRows = await env.XDB.prepare(
-      `SELECT doc_key, data FROM x_compat_edits
-       WHERE brand_file = ?1 AND kind = 'new' AND deleted = 0`
-    ).bind(brandFile).all<any>()
-    for (const r of newRows.results ?? []) {
-      let f: Record<string, any>
-      try {
-        f = JSON.parse(r.data)
-      } catch { continue }
-      if (!compatRowMatches(f, tokens, keyword, type)) continue
-      out.push({ id: r.doc_key, fields: f })
+  if (!brandFile) return out.slice(0, limit)
+
+  // صفّ المرآة لا يعود من البحث إلا إذا طابق نصّه **الأصلي**؛ فلو أضاف المالك
+  // موديلاً جديداً وبحث عنه، لم يجده المرآة أصلاً ولم يصل الدمج. نجلب صفوف
+  // المرآة المُعدَّلة بالمعرّف ونطابقها على النسخة النهائية بعد الدمج، فيرى
+  // المالك ما كتبه في البحث نفسه الذي يراه به المستخدمون.
+  const patchedIds: string[] = []
+  for (const [docKey, e] of edits) {
+    if (e?.deleted || seen.has(docKey)) continue
+    if (!e?.kind || e.kind !== 'patch') continue
+    patchedIds.push(docKey)
+  }
+  if (patchedIds.length) {
+    // على دفعات: قائمة `IN` بآلاف المعرّفات تتجاوز حدّ معاملات الاستعلام
+    // الواحد في D1، فيسقط البحث كله بسبب عدد التعديلات لا بسبب البحث نفسه.
+    const chunk = 80
+    for (let i = 0; i < patchedIds.length; i += chunk) {
+      const part = patchedIds.slice(i, i + chunk)
+      const placeholders = part.map((_, n) => `?${n + 1}`).join(',')
+      const src = await env.MIRROR.prepare(
+        `SELECT id, data FROM docs
+         WHERE collection = 'compatibility' AND id IN (${placeholders})`
+      ).bind(...part).all<{ id: string; data: string }>()
+      for (const d of mrows(src)) {
+        if (seen.has(d.id)) continue
+        const e = edits.get(d.id)
+        if (e?.deleted) continue
+        let fields = d.fields
+        try {
+          fields = { ...fields, ...JSON.parse(e.data) }
+        } catch { continue }
+        if (!compatRowMatches(fields, tokens, keyword, type)) continue
+        out.push({ id: d.id, fields })
+        seen.add(d.id)
+      }
     }
   }
+
+  const newRows = await env.XDB.prepare(
+    `SELECT doc_key, data FROM x_compat_edits
+     WHERE brand_file = ?1 AND kind = 'new' AND deleted = 0`
+  ).bind(brandFile).all<any>()
+  for (const r of newRows.results ?? []) {
+    if (seen.has(r.doc_key)) continue
+    let f: Record<string, any>
+    try {
+      f = JSON.parse(r.data)
+    } catch { continue }
+    if (!compatRowMatches(f, tokens, keyword, type)) continue
+    out.push({ id: r.doc_key, fields: f })
+  }
+
+  // الترتيب: نتائج المرآة أولاً كما رتّبها المرآة، ثم الصفوف المضافة إليها
+  // من التعديلات. لا نعيد الترتيب هنا حتى لا ننافس ترتيب البحث الأصلي.
   return out.slice(0, limit)
 }
 
@@ -2697,6 +2749,7 @@ export default {
             guestFileQuota: settings.guestFileQuota,
             guestCompatQuota: settings.guestCompatQuota,
             compatSearchCost: settings.compatSearchCost,
+            schemFilePrice: settings.schemFilePrice,
             dailyGiftAmount: settings.dailyGiftAmount,
             videosHidden: settings.videosHidden,
             videosHiddenMessage: settings.videosHiddenMessage,
@@ -4361,6 +4414,8 @@ export default {
             schematicsLocked: body.schematicsLocked ?? settings.schematicsLocked,
             compatLocked: body.compatLocked ?? settings.compatLocked,
             compatSearchCost: Math.max(0, Math.min(1000, Math.floor(Number(body.compatSearchCost ?? settings.compatSearchCost) || 0))),
+            schemFilePrice: Math.max(0, Math.min(1000, Math.floor(
+              Number(body.schemFilePrice ?? settings.schemFilePrice) || 0))),
             dailyGiftAmount: Math.max(0, Math.min(1000, Math.floor(Number(body.dailyGiftAmount ?? settings.dailyGiftAmount) || 0))),
             videosHidden: body.videosHidden ?? settings.videosHidden,
             videosHiddenMessage: typeof body.videosHiddenMessage === 'string'
@@ -5266,16 +5321,20 @@ export default {
                    JSON.stringify(data), deleted ? 1 : 0, now).run()
 
           if (op === 'patch') {
-            const id = String(body.id ?? '').trim().slice(0, 64)
+            const id = String(body.id ?? '').trim()
             const fields = body.fields
             if (!id || !fields || typeof fields !== 'object') {
               throw new HttpError(400, 'id و fields مطلوبان')
             }
-            // الطبقة تُبنى على أي تعديل سابق لنفس الصف: المالك يعدّل حقلين
-            // تباعاً، ولو استُبدل الصف لضاع الأول.
+            // الطبقة تُبنى على أي تعديل سابق لنفس الصفّ: صفّ أنشأه المالك
+            // (`new`) أو تعديل سابق على صفّ المرآة (`patch`). حصر البحث في
+            // `new` كان يجعل تعديل صفّ المرآة يُبنى على أساس فارغ، فيُستبدل
+            // الصفّ بدل أن يُدمج ويضيع الحقل المحفوظ قبله — والإضافة على صفّ
+            // جديد تنجح لأن مسارها `new`، فيبدو الفشل خاصاً بالصفوف القائمة.
             const prev = await env.XDB.prepare(
-              'SELECT data FROM x_compat_edits WHERE doc_key = ?1 AND kind = ?2'
-            ).bind(id, 'new').first<{ data: string }>()
+              `SELECT data, kind FROM x_compat_edits
+               WHERE doc_key = ?1 AND kind IN ('new', 'patch')`
+            ).bind(id).first<{ data: string; kind: string }>()
             let merged: Record<string, unknown> = {}
             if (prev) { try { merged = JSON.parse(prev.data) } catch { /* تجاهل */ } }
             merged = { ...merged, ...(fields as Record<string, unknown>) }
@@ -5300,16 +5359,16 @@ export default {
               // أي مفتاح آخر يُهمَل بصمت — لا يصل إلى قاعدة البيانات.
             }
             merged = { ...merged, ...safe }
-            // صف موجود في المرآة → patch، وصف أنشأه المالك → يُحدَّث كـ new
-            // حتى لا ينقلب حذفه وهمياً في المصدر الذي لا وجود له فيه.
-            const kind = prev ? 'new' : 'patch'
+            // صفّ أنشأه المالك يبقى `new` حتى لا ينقلب حذفه وهمياً في مصدر
+            // لا وجود له فيه؛ وما عداه `patch` على صفّ المرآة.
+            const kind = prev?.kind === 'new' ? 'new' : 'patch'
             await put(id, kind, merged, false)
             await logSecurity(env, request, 'owner_compat_patch', `id=${id} brand=${brandFile}`)
             return sealed({ ok: true, id, kind })
           }
 
           if (op === 'delete') {
-            const id = String(body.id ?? '').trim().slice(0, 64)
+            const id = String(body.id ?? '').trim()
             if (!id) throw new HttpError(400, 'id مطلوب')
             // صف أنشأه المالك يُحذف فعلياً: لا مصدر تحته ليُعلَّم عليه.
             const isNew = await env.XDB.prepare(
@@ -5319,8 +5378,13 @@ export default {
               await env.XDB.prepare('DELETE FROM x_compat_edits WHERE doc_key = ?1')
                 .bind(id).run()
             } else {
+              // الحذف لا يمسح الطبقة: يُعلَّم `deleted` فوق محتواها القائم
+              // ليبقى قابلاً للاسترجاع. البحث بـ`kind='patch'` وحده كان
+              // يُسقط التعديل قبل الحذف (صفّ مُعدَّل سابقاً) فيُمحى ما كتبه
+              // المالك، وهو السلوك الذي يظهر كـ«الحذف لا ينجح» على صفّ قائم.
               const prev = await env.XDB.prepare(
-                `SELECT data FROM x_compat_edits WHERE doc_key = ?1 AND kind = 'patch'`
+                `SELECT data FROM x_compat_edits
+                 WHERE doc_key = ?1 AND kind IN ('patch', 'new')`
               ).bind(id).first<{ data: string }>()
               await put(id, 'patch', prev ? JSON.parse(prev.data) : {}, true)
             }
@@ -5329,7 +5393,7 @@ export default {
           }
 
           if (op === 'restore') {
-            const id = String(body.id ?? '').trim().slice(0, 64)
+            const id = String(body.id ?? '').trim()
             if (!id) throw new HttpError(400, 'id مطلوب')
             const prev = await env.XDB.prepare(
               'SELECT data, kind FROM x_compat_edits WHERE doc_key = ?1'

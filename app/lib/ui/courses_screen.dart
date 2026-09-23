@@ -785,6 +785,13 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   String? _error;
   bool _killed = false;
 
+  /// مؤقّت إظهار مؤشر التحميل. راجع `_preparingView` لسبب وجوده.
+  Timer? _spinnerTimer;
+  bool _showSpinner = false;
+
+  /// كم مرة انتهت التهيئة بلا إطار؟ يمنع تشغيل فيديو لن يعرض شيئاً.
+  int _blankFrames = 0;
+
   @override
   void initState() {
     super.initState();
@@ -798,6 +805,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   @override
   void dispose() {
     SecureScreen.off();
+    _spinnerTimer?.cancel();
     AppConfig.instance.removeListener(_onCfg);
     final u = _proxyUrl;
     if (u != null) MediaProxy.instance.release(u);
@@ -817,6 +825,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     setState(() {
       _preparing = true;
       _error = null;
+      _showSpinner = false;
     });
     // حرس أخير: الخادم لا يرسل رابطاً لغير المستحق. الوصول إلى هنا برابط
     // فارغ كان يحاول تشغيل مسار باطل فيُظهر سواداً ثم «فشل». الرسالة الصريحة
@@ -828,8 +837,8 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
       });
       return;
     }
+    _armSpinner();
     try {
-      // الطريق المباشر أولاً: الوكيل لا يضيف شيئاً إن قبل المشغّل الرابط.
       final url = await MediaProxy.instance
           .urlFor(widget.api, widget.video.streamUrl);
       _proxyUrl = url;
@@ -840,28 +849,66 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
         // مهلة صريحة: بلا سقف، تعليق الاتصال يُبقي التهيئة معلّقة للأبد على
         // صورة سوداء بلا رسالة — وهو ما ظهر شاشة سوداء لا تنتهي.
         await c.initialize().timeout(const Duration(seconds: 25));
+      } on TimeoutException {
+        await c.dispose();
+        // مهلة التهيئة ليست فشلاً نهائياً: أول طلب يعبر الوكيل يوقظ الجلسة
+        // ويفتح الاتصال، والمحاولة الثانية تمرّ في العادة. نحاول قبل إظهار
+        // خطأ يدفع المستخدم لإعادة المحاولة يدوياً بلا داعٍ.
+        if (_blankFrames++ == 0 && mounted) {
+          await _prepare();
+          return;
+        }
+        rethrow;
       } catch (_) {
         await c.dispose();
         rethrow;
+      }
+      // تهيئة «ناجحة» بنسبة صفر معناها أن المشغّل لم يقرأ إطاراً بعد، وتشغيلها
+      // يعرض مساحة سوداء صامتة. نعيد المحاولة مرة، ثم نُعلن الفشل بدل أن
+      // يبقى المستخدم أمام سواد لا ينتهي.
+      if (c.value.aspectRatio <= 0) {
+        await c.dispose();
+        if (_blankFrames++ == 0 && mounted) {
+          await _prepare();
+          return;
+        }
+        throw StateError('blank frame');
       }
       await c.setLooping(false);
       if (!mounted) {
         await c.dispose();
         return;
       }
+      _spinnerTimer?.cancel();
       setState(() {
         _player = c;
         _preparing = false;
+        _showSpinner = false;
       });
       await c.play();
     } catch (e) {
+      _spinnerTimer?.cancel();
       if (mounted) {
         setState(() {
           _preparing = false;
+          _showSpinner = false;
           _error = 'تعذر تشغيل الفيديو — حاول مرة أخرى';
         });
       }
     }
+  }
+
+  /// يبدأ مؤقّت إظهار مؤشر التحميل بعد 600 مللي ثانية.
+  ///
+  /// السبب: الطفرة الشبكية السريعة لا تحتاج مؤشراً — إظهاره ثم إخفاؤه في
+  /// أقل من نصف ثانية وميض مزعج. لكن الانتظار الطويل بلا أي إشارة هو بالضبط
+  /// «الشاشة السوداء» التي شكا منها المستخدمون. فالأسود لا يُعرض أصلاً،
+  /// ويظهر المؤشر فقط إن طال الانتظار فعلاً.
+  void _armSpinner() {
+    _spinnerTimer?.cancel();
+    _spinnerTimer = Timer(const Duration(milliseconds: 600), () {
+      if (mounted && _preparing) setState(() => _showSpinner = true);
+    });
   }
 
   /// يسجّل الشاشة كمراقبة لمفتاح المالك: إن أوقف الفيديوهات أثناء المشاهدة
@@ -936,14 +983,21 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
 
   Widget _body() {
     if (_preparing) {
-      // لا نصّ «جاري التحميل» ولا دوّار في المنتصف: المصغّرة التي رفعها المالك
-      // تُعرض كملصق، ويبدأ التشغيل فوقها. هذا يجعل الانتقال من القائمة إلى
-      // المشغّل متصلاً بصرياً بدل شاشة انتظار تُوحي بأن شيئاً يتعطّل.
-      // لا شريط تقدّم هنا: لا تنزيل كاملاً ليقاس تقدّمه — التشغيل بثٌّ مباشر
-      // يبدأ من أول قطعة يجلبها المشغّل.
-      return Stack(alignment: Alignment.center, children: [
-        Positioned.fill(child: _poster()),
-      ]);
+      // لا صورة سوداء في المنتصف: كان يظهر مسطّح أسود (أو مصغّرة لا تُحمَّل)
+      // فيبدو المشغّل «عاطلاً» ثم يشتغل فجأة. الآن لا يظهر إلا مؤشر حقيقي،
+      // ولا يظهر أصلاً إن كان الاتصال سريعاً.
+      return Center(
+        child: AnimatedOpacity(
+          opacity: _showSpinner ? 1 : 0,
+          duration: const Duration(milliseconds: 180),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            CircularProgressIndicator(color: XTheme.accent),
+            const SizedBox(height: 14),
+            const Text('جاري تجهيز الفيديو…',
+                style: TextStyle(color: Colors.white70, fontSize: 13)),
+          ]),
+        ),
+      );
     }
     if (_error != null) {
       return Padding(
@@ -1036,16 +1090,6 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     );
   }
 
-  /// ملصق المشغّل: مصغّرة الدرس إن رفعها المالك، وإلا خلفية داكنة هادئة.
-  /// لا يظهر أي نصّ انتظار فوقه.
-  Widget _poster() {
-    final url = widget.video.thumbUrl;
-    final bg = Container(color: const Color(0xFF0E1116));
-    if (url.isEmpty) return bg;
-    return SizedBox.expand(
-      child: _SignedImage(api: widget.api, url: url, fallback: bg),
-    );
-  }
 
   static String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');

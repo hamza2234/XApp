@@ -309,6 +309,20 @@ CREATE TABLE IF NOT EXISTS x_compat_edits (
 CREATE INDEX IF NOT EXISTS x_compat_edits_doc ON x_compat_edits (doc_key);
 CREATE INDEX IF NOT EXISTS x_compat_edits_brand ON x_compat_edits (brand_file);
 
+-- المنحة اليومية: عدّاد ذرّي لكل (هوية/عنوان + يوم + نوع).
+--
+-- العدّاد في D1 لا KV لأن `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
+-- يفحص الحدّ ويستهلك في UPDATE واحد، فلا سباق ولا تجاوز حتى مع الطلبات
+-- المتزامنة. المفتاح المركّب يحمل الأنواع الثلاثة معاً: 'all' لمنحة الهوية،
+-- و'ipfree' لسقف العنوان الذي يمنع تفريخ الهويات، و'gift' لهديّة اليوم.
+CREATE TABLE IF NOT EXISTS x_quota_daily (
+  uid  TEXT NOT NULL,
+  day  TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'all',
+  used INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (uid, day, kind)
+);
+
 -- استلام الهديّة اليوميّة: صفّ واحد لكل محفظة يحمل لحظة الاستلام ولحظة
 -- الفتح التالية. المفتاح هو المحفظة لا اليوم التقويمي: بلحظة الفتح المحفوظة
 -- هنا تُمنح الهديّة بعد 24 ساعة تماماً من الاستلام، فلا تضيع هديّة من استلم

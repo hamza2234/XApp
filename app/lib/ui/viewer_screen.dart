@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 import '../core/api.dart';
+import '../core/app_config.dart';
 import '../core/models.dart';
 import 'theme.dart';
 import 'subscribe_dialog.dart';
@@ -29,6 +30,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
   String? _error;
   bool _quotaOut = false;
 
+  /// هل وافق المستخدم على خصم العملات؟ الحوار يظهر مرة واحدة لكل فتح،
+  /// وإلا عاد يظهر مع كل إعادة محاولة أو إعادة بناء.
+  bool _confirmed = false;
+
   /// عامل التكبير للصور — يُدار بأنفسنا لندعم الزوم اللانهائي فعلاً:
   /// إن دفع المستخدم إصبعيه إلى أقصى الحدّ نرفع السقف بدل أن يتوقّف.
   final TransformationController _imgCtrl = TransformationController();
@@ -40,7 +45,51 @@ class _ViewerScreenState extends State<ViewerScreen> {
     // حجب التقاط الشاشة طوال بقاء المخطط مفتوحاً، ويُرفع عند الخروج.
     SecureScreen.on();
     _imgCtrl.addListener(_growZoomIfNeeded);
-    _load();
+    // بعد أول إطار: `showDialog` من `initState` يبني الحوار على شجرة لم
+    // تُدرج بعد، فيسقط بـ`_debugLifecycleState`. الانتظار إطاراً واحداً
+    // يُبقي النداء داخل دورة حياة الـState نفسها بلا `mounted` زائفة.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _confirmThenLoad();
+    });
+  }
+
+  /// يسأل المستخدم قبل الخصم ثم يفتح.
+  ///
+  /// الخصم يقع على الخادم عند نجاح الطلب، فإظهار السؤال بعد الفتح لا معنى
+  /// له — السؤال قبل الطلب هو الفرصة الوحيدة للمستخدم كي يتراجع. المجاني
+  /// (سعر صفر، أو ملف أُعيد فتحه اليوم) لا يُسأل عنه أصلاً.
+  Future<void> _confirmThenLoad() async {
+    if (_confirmed) return;
+    final price = AppConfig.instance.schemFilePrice;
+    // لا حوار بلا سبب: من يفتح ملفاً مجانياً لا يُخصم منه شيء، ولا داعي
+    // لإزعاجه بسؤال عن خصم لن يقع.
+    if (price <= 0) {
+      return _load();
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('فتح المخطط'),
+        content: Text(
+            'سيُخصم $price من رصيدك عند فتح «${widget.entry.cleanName}».\n'
+            'إعادة فتح الملف نفسه اليوم لا تُخصم مرة أخرى.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('فتح')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (ok != true) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    _confirmed = true;
+    await _load();
   }
 
   @override

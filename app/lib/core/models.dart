@@ -120,6 +120,7 @@ class XSettings {
     this.schematicsLocked = false,
     this.compatLocked = false,
     this.compatSearchCost = 1,
+    this.schemFilePrice = 1,
     this.dailyGiftAmount = 0,
     this.videosHidden = false,
     this.videosHiddenMessage = '',
@@ -154,6 +155,9 @@ class XSettings {
 
   /// ثمن دخول الشركة في التوافقات بالعملات.
   int compatSearchCost;
+
+  /// ثمن فتح ملف مخطط بالعملات. صفر يعني أن الفتح يعتمد المنحة اليومية فقط.
+  int schemFilePrice;
 
   /// عملات الهديّة اليومية. صفر يعني أن زر الهديّة لا يظهر.
   int dailyGiftAmount;
@@ -200,6 +204,9 @@ class XSettings {
         schematicsLocked: j['schematicsLocked'] == true,
         compatLocked: j['compatLocked'] == true,
         compatSearchCost: (j['compatSearchCost'] as num?)?.toInt() ?? 1,
+        schemFilePrice: (j['schemFilePrice'] as num?)?.toInt() ??
+            (j['compatSearchCost'] as num?)?.toInt() ??
+            1,
         dailyGiftAmount: (j['dailyGiftAmount'] as num?)?.toInt() ?? 0,
         videosHidden: j['videosHidden'] == true,
         videosHiddenMessage: j['videosHiddenMessage']?.toString() ?? '',
@@ -242,6 +249,7 @@ class XSettings {
         'schematicsLocked': schematicsLocked,
         'compatLocked': compatLocked,
         'compatSearchCost': compatSearchCost,
+        'schemFilePrice': schemFilePrice,
         'dailyGiftAmount': dailyGiftAmount,
         'videosHidden': videosHidden,
         'videosHiddenMessage': videosHiddenMessage,
