@@ -1590,7 +1590,7 @@ class _ChatScreenState extends State<ChatScreen>
             // البايتات تُرسم فوراً من الذاكرة.
             child: CachedImage(
               url: _mediaUrl(url),
-              headers: _mediaHeaders(url),
+              signedHeaders: _mediaHeaders(url),
               cache: AvatarCache.media,
               fit: BoxFit.cover,
             ),
@@ -1615,7 +1615,7 @@ class _ChatScreenState extends State<ChatScreen>
   ///
   /// التوقيع ثابت داخل نافذة صلاحيته (انظر Api.signFor) لأن توليده في كل
   /// بناء يجعل Flutter يعتبر الصورة جديدة فيعيد تنزيلها ويرتجّ العرض.
-  Map<String, String>? _mediaHeaders(String url) =>
+  Future<Map<String, String>>? _mediaHeaders(String url) =>
       url.startsWith('/') ? widget.api.signFor('GET', url) : null;
 
   Widget _audioContent(ChatMessage m, bool mine) => _VoicePlayer(
@@ -1764,7 +1764,7 @@ class _ChatScreenState extends State<ChatScreen>
             )
           : CachedAvatar(
               url: url.startsWith('/') ? '$kApiBase$url' : url,
-              headers: url.startsWith('/')
+              signedHeaders: url.startsWith('/')
                   ? widget.api.signFor('GET', url)
                   : null,
               size: size,
@@ -2456,15 +2456,11 @@ class _ChatProfileSheetState extends State<ChatProfileSheet> {
                 child: Icon(Icons.person,
                     size: 34, color: XTheme.textDim),
               )
-            : Image.network(
-                _avatarUrl.startsWith('/')
-                    ? '$kApiBase$_avatarUrl'
-                    : _avatarUrl,
-                headers: _avatarUrl.startsWith('/')
-                    ? widget.api.signFor('GET', _avatarUrl)
-                    : null,
+            : SignedImage(
+                api: widget.api,
+                path: _avatarUrl,
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stack) => Center(
+                errorBuilder: () => Center(
                   child: Icon(Icons.person,
                       size: 34, color: XTheme.textDim),
                 ),

@@ -39,6 +39,95 @@ class Store {
   static const _kOwnerToken = 'x_owner_token';
   static const _kOwnerTokenAt = 'x_owner_token_at';
 
+  /// ── هوية التثبيت ومفتاح التوقيع ──
+  ///
+  /// لماذا مفتاح لكل تثبيت بدل سرّ مضمّن في الحزمة: السرّ المضمّن واحد
+  /// لكل النسخ، فمن استخرجه من الحزمة وقّع أي طلب من أي مكان، ولا سبيل
+  /// لإبطاله إلا بتحديث الجميع. هنا يولّد التطبيق زوج مفاتيح Ed25519 محلياً،
+  /// يبقى الخاص على الجهاز ولا يُرسل أبداً، ويرسل العام مرة واحدة. تسريب
+  /// الحزمة كلها لا يمنح أحداً مفتاح تثبيت غيره، والإبطال صار لكل تثبيت.
+  static const _kInstallId = 'x_install_id';
+  static const _kSignSeed = 'x_sign_seed';
+  static const _kSignPub = 'x_sign_pub';
+
+  /// معرّف التثبيت — عشوائي ومحلي، لا يُشتق من الجهاز.
+  ///
+  /// لماذا لا البصمة: إعادة تثبيت التطبيق تولّد مفتاحاً جديداً، فلو كان
+  /// المعرّف ثابتاً لاصطدم المفتاح الجديد بالمسجَّل ورُفض التسجيل. معرّف
+  /// عشوائي لكل تثبيت يجعل كل تثبيت وحدة مستقلة بمفتاحها — وربط الجهاز
+  /// يبقى على `deviceId` كما هو، فلا يفقد المالك قدرته على حظر جهاز.
+  String get installId {
+    var id = _p.getString(_kInstallId);
+    if (id == null) {
+      id = const Uuid().v4().replaceAll('-', '').substring(0, 24);
+      _p.setString(_kInstallId, id);
+    }
+    return id;
+  }
+
+  /// البذرة المفكوكة — في الذاكرة بعد `warmSignKey`، ولا تُقرأ من التخزين
+  /// في كل توقيع (فكّ Keystore عملية ثقيلة).
+  String? get signSeed => _seedCache;
+
+  /// بادئة تدلّ أن القيمة لم تُغلَّف — تُستعمل في الاختبارات وسطح المكتب
+  /// حيث لا Keystore. على أندرويد لا تُكتب هذه البادئة أبداً.
+  static const _plainPrefix = 'plain:';
+
+  /// المفتاح العام المسجَّل — سداسي عشري، أو null إن لم يُولَّد بعد.
+  String? get signPublicKey => _p.getString(_kSignPub);
+
+  bool get installKeySent => _p.getBool(_kInstallSent) ?? false;
+  Future<void> markInstallKeySent() => _p.setBool(_kInstallSent, true);
+
+  /// يضمن وجود زوج مفاتيح ويعيد (البذرة، المفتاح العام).
+  ///
+  /// التوليد مرة واحدة: وجود البذرة يعني زوجاً قائماً، فلا يُولَّد غيره —
+  /// وإلا تغيّر المفتاح العام وصار كل توقيع سابق باطلاً.
+  Future<({String seed, String publicKey})> ensureSignKey(
+      Future<({String seed, String publicKey})> Function() generate) async {
+    final existingSeed = _seedCache;
+    final existingPub = signPublicKey;
+    if (existingSeed != null && existingPub != null) {
+      return (seed: existingSeed, publicKey: existingPub);
+    }
+    final made = await generate();
+    _seedCache = made.seed;
+    await _p.setString(_kSignSeed, await _seal(made.seed));
+    await _p.setString(_kSignPub, made.publicKey);
+    return made;
+  }
+
+  /// التغليف يُنفَّذ على المنصة: المفتاح الرئيسي لا يغادر Keystore.
+  Future<String> _seal(String value) async {
+    try {
+      final out = await _channel.invokeMethod<String>('sealSecret', {'value': value});
+      if (out != null && out.isNotEmpty) return out;
+    } catch (_) {
+      // لا قناة أصلية (اختبارات) — نكتب نصّاً بادئته تدلّ عليه.
+    }
+    return '$_plainPrefix$value';
+  }
+
+  String? _seedCache;
+
+  /// يفكّ البذرة مرة واحدة عند الإقلاع ويحفظها في الذاكرة.
+  Future<void> warmSignKey() async {
+    final sealed = _p.getString(_kSignSeed);
+    if (sealed == null) return;
+    if (sealed.startsWith(_plainPrefix)) {
+      _seedCache = sealed.substring(_plainPrefix.length);
+      return;
+    }
+    try {
+      final plain = await _channel
+          .invokeMethod<String>('unsealSecret', {'value': sealed});
+      if (plain != null && plain.isNotEmpty) _seedCache = plain;
+    } catch (_) {
+      // فشل الفكّ يعني مفتاحاً تالفاً أو Keystore مُصفَّراً: يُعاد التوليد
+      // عند الطلب التالي، فلا يبقى التطبيق عالقاً بلا توقيع.
+    }
+  }
+
   /// بصمة الجهاز للتوقيع وربط المنحة — فارغة إن لم تتوفر.
   String get fingerprint => _fingerprint ?? '';
 

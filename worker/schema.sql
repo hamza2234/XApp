@@ -199,7 +199,11 @@ CREATE TABLE IF NOT EXISTS x_course_videos (
   mode        TEXT NOT NULL DEFAULT 'locked',
   sort        INTEGER NOT NULL DEFAULT 0,
   published   INTEGER NOT NULL DEFAULT 1,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- مفتاح المصغّرة داخل XLEARN. كان يُقرأ في `coursesFor` وفي مسار
+  -- `/v1/learn/thumb` دون أن يُعرَّف هنا، فقاعدة تُبنى من هذا الملف وحده
+  -- كانت تفشل في جلب قائمة الدورات كلياً.
+  thumb_key   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS x_course_videos_order ON x_course_videos (course_id, published, sort);
 
@@ -221,16 +225,21 @@ CREATE TABLE IF NOT EXISTS x_course_keys (
 );
 CREATE INDEX IF NOT EXISTS x_course_keys_course ON x_course_keys (course_id, revoked);
 
--- سجل الاستحقاق: أي جهاز يملك أي دورة. الربط بالجهاز لا بالحساب، فيصمد
--- حتى لو أنشأ المستخدم حساباً جديداً على الجهاز نفسه، ويمنع إعادة استخدام
--- المفتاح على جهاز ثانٍ.
+-- سجل الاستحقاق: أي تثبيت يملك أي دورة. الربط بالتثبيت الموثّق لا بالحساب،
+-- فيصمد حتى لو أنشأ المستخدم حساباً جديداً على الجهاز نفسه، ويمنع إعادة
+-- استخدام المفتاح على تثبيت ثانٍ.
 CREATE TABLE IF NOT EXISTS x_course_grants (
-  device_id  TEXT NOT NULL,
+  install_id TEXT NOT NULL DEFAULT '',
+  device_id  TEXT NOT NULL DEFAULT '',
   course_id  TEXT NOT NULL,
   key_id     TEXT NOT NULL DEFAULT '',
   user_id    TEXT NOT NULL DEFAULT '',
   at         INTEGER NOT NULL,
-  PRIMARY KEY (device_id, course_id)
+  -- الاستحقاق يُنسب إلى التثبيت الموثّق لا إلى معرّف جهاز يرسله العميل.
+  -- كان فتح دورة يعتمد على `x-device-id` وحده، ومن قرأ معرّف جهاز مشترك
+  -- (يظهر في الدردشة وفي تصدير اللوحة) يضعه في طلبه فيُفتح المقفل بلا كود
+  -- أصلاً — أي أن كود المالك كان يمكن تجاوزه كلياً.
+  PRIMARY KEY (install_id, course_id)
 );
 CREATE INDEX IF NOT EXISTS x_course_grants_course ON x_course_grants (course_id);
 
@@ -258,13 +267,25 @@ CREATE TABLE IF NOT EXISTS x_course_uploads (
 CREATE INDEX IF NOT EXISTS x_course_uploads_owner ON x_course_uploads (owner_id, created_at);
 
 CREATE TABLE IF NOT EXISTS x_devices (
-  device_id    TEXT PRIMARY KEY,
+  -- المفتاح هو التثبيت الموثّق، لا معرّف الجهاز الذي يرسله العميل.
+  --
+  -- لماذا: `x-device-id` يرسله العميل ولا يدخل في نصّ التوقيع
+  -- (`installId|ts|nonce|method|path|bodyHash`). فمن سجّل مفتاح تثبيت لنفسه
+  -- — مجاناً وبلا كلمة مرور — وقّع طلباً صحيحاً ثم وضع معرّف جهاز المالك فيه،
+  -- فيمرّ التوقيع ويُفتح كل مقفل بلا كلمة مرور. `install_id` هو القيمة
+  -- الوحيدة التي يثبتها التوقيع بمفتاح خاص لا يغادر الجهاز.
+  --
+  -- `device_id` يبقى للعرض والسجل (المالك يتعرّف على هواتفه في اللوحة)،
+  -- ولا يُشتقّ منه أي استحقاق.
+  install_id   TEXT PRIMARY KEY,
+  device_id    TEXT NOT NULL DEFAULT '',
   owner_marked INTEGER NOT NULL DEFAULT 0,
   owner_bound  INTEGER NOT NULL DEFAULT 0,
   first_seen   TEXT NOT NULL,
   last_seen    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS x_devices_owner ON x_devices (owner_marked);
+CREATE INDEX IF NOT EXISTS x_devices_install ON x_devices (install_id, owner_marked);
 
 -- ==============================================================
 -- تعديلات المالك على التوافقات (طبقة فوق المصدر المشترك)
@@ -299,3 +320,55 @@ CREATE TABLE IF NOT EXISTS x_gift_claims (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS x_gift_claims_next ON x_gift_claims (next_at);
+
+-- ── مفاتيح التثبيت (Ed25519) — بديل السرّ المضمّن في التطبيق ──
+--
+-- لماذا: التطبيق المصدَّر كان يحمل سرّاً واحداً مشتركاً بين كل النسخ. من
+-- استخرجه من الحزمة يستطيع توقيع أي طلب بلا حد، ولا سبيل لإبطال ما سرّبه
+-- إلا بتحديث كل الأجهزة. هنا يولّد كل تثبيت زوج مفاتيح محلياً ويرسل المفتاح
+-- العام وحده. المفتاح الخاص لا يغادر الجهاز أبداً، والخادم لا يملك ما
+-- ينتحل به أي تثبيت ولو سُرّبت قاعدة البيانات كاملة. الإبطال صار لكل
+-- تثبيت على حدة (revoked) بدل إبطال الجميع.
+CREATE TABLE IF NOT EXISTS x_install_keys (
+  install_id  TEXT PRIMARY KEY,
+  public_key  TEXT NOT NULL,
+  device_id   TEXT NOT NULL DEFAULT '',
+  app_version TEXT NOT NULL DEFAULT '',
+  -- آخر طابع زمني مقبول: يمنع إعادة تشغيل طلب قديم مُعترَض داخل نافذة
+  -- الصلاحية. أي طلب أقدم من آخر ما رُئي يُرفض.
+  last_ts     INTEGER NOT NULL DEFAULT 0,
+  revoked     INTEGER NOT NULL DEFAULT 0,
+  first_seen  TEXT NOT NULL,
+  last_seen   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_install_keys_dev ON x_install_keys (device_id);
+
+-- ==============================================================
+-- ربط محفظة الزائر بالتثبيت الموثّق (بدل بصمة يرسلها العميل)
+-- ==============================================================
+-- لماذا: مفتاح محفظة الزائر كان `x-device-fp` المُرسَل من العميل. ومعرّف
+-- الجهاز ليس سراً — يظهر في الدردشة وفي تصدير اللوحة — فمن قرأه أرسله مع
+-- بصمته وصرف رصيد الضحية بلا جلسته ولا بصمته. الربط يُخزَّن هنا مرة واحدة،
+-- وبعدها المفتاح يُقرأ من هذا الجدول لا من الطلب: تغيير الترويسة لا يُنتج
+-- هوية جديدة ولا يصل إلى محفظة أحد.
+--
+-- البصمة المملوكة لتثبيت آخر لا تُتبنّى (فريد)، فلا تُسرق محفظة قائمة؛
+-- ومن كان مفتاحه بصمة حرّة يحتفظ بها وبرصيده عند أول طلب بعد الترقية.
+CREATE TABLE IF NOT EXISTS x_wallet_bindings (
+  install_id TEXT PRIMARY KEY,
+  wallet_key TEXT NOT NULL,
+  bound_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS x_wallet_bindings_key ON x_wallet_bindings (wallet_key);
+
+-- منع إعادة إرسال الطلبات الحسّاسة بعينها (nonce فريد لكل طلب).
+-- يُطبَّق على المسارات التي تغيّر حالة أو تستهلك رصيداً، لا على كل قراءة:
+-- كتابة صفّ لكل طلب قراءة كان سيرفع الكلفة بلا مقابل أمني حقيقي، فحرس
+-- القراءات يبقى الطابع الزمني والحدود على المعدّل.
+CREATE TABLE IF NOT EXISTS x_req_nonces (
+  install_id TEXT NOT NULL,
+  nonce      TEXT NOT NULL,
+  at         INTEGER NOT NULL,
+  PRIMARY KEY (install_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS x_req_nonces_at ON x_req_nonces (at);

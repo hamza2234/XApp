@@ -6,8 +6,9 @@
 // الاختبار يمرّ على المسار الحقيقي الموقّع لا على محاكاة.
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
-import 'package:crypto/crypto.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:x_app/core/api.dart';
@@ -24,6 +25,8 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = await Store.init();
     final api = Api(store);
+    // التوقيع إلزامي على /v1/*، والمفتاح يُبنى ويسجَّل قبل أي طلب موقّع.
+    await api.initSigningKey();
 
     final boot = await api.bootstrap();
     final raw = boot['settings'] as Map;
@@ -44,6 +47,8 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = await Store.init();
     final api = Api(store);
+    // التوقيع إلزامي على /v1/*؛ بلا مفتاح مسجَّل يُرفض الطلب قبل أن يُقرأ.
+    await api.initSigningKey();
 
     final boot = await api.bootstrap();
     final u = boot['update'];
@@ -71,6 +76,8 @@ void main() {
   test('إصدار قديم يُقفل فعلاً بـ426 ويحمل رسالة التحديث', () async {
     SharedPreferences.setMockInitialValues({});
     final store = await Store.init();
+    // المفتاح يُبنى ويسجَّل قبل أي توقيع يدوي في _signedPost.
+    await Api(store).initSigningKey();
 
     // نُوقّع الطلب بأنفسنا برقم بناء قديم. هذا هو المسار الذي كان معطلاً:
     // المالك يرفع الحد الأدنى فيظل التطبيق القديم يعمل كأن شيئاً لم يحدث.
@@ -91,6 +98,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final store = await Store.init();
     final api = Api(store);
+    await api.initSigningKey();
 
     // أي قفل للنسخة الحالية يعني تعطيل التطبيق على مستخدميه كلهم، وهو
     // أخطر من العطل الأصلي.
@@ -105,27 +113,50 @@ void main() {
 }
 
 /// طلب موقّع يدوياً كي نتحكّم برقم البناء المُعلن — وهو ما تحكم به البوابة.
-/// يُحاكي بالضبط ما يفعله `Api._sign` لكن برقم بناء مُمرَّر.
+///
+/// يُحاكي بالضبط ما يفعله `RequestSigner.headers` لكن برقم بناء مُمرَّر:
+/// Ed25519 بمفتاح خاص بهذا التثبيت على
+/// `installId|ts|nonce|method|path|bodyHash`. لا سرّ مشترك هنا — كان الاختبار
+/// يوقّع بـHMAC بسرّ مضمّن، وذلك السرّ أُزيل من التطبيق، فبقاء الاختبار عليه
+/// كان يعيد إدخال ما أُخرج.
 Future<({int status, Map<String, dynamic> body})> _signedPost(
     Store store, String path, {int? build}) async {
   final client = HttpClient();
+  final ed = Ed25519();
+  final rnd = Random.secure();
   final ts = DateTime.now().millisecondsSinceEpoch.toString();
+  final nonce = List<int>.generate(16, (_) => rnd.nextInt(256))
+      .map((e) => e.toRadixString(16).padLeft(2, '0'))
+      .join();
+  final installId = store.installId;
+  final reqBody = utf8.encode('{}');
+  final bodyHash = Sha256().hash(reqBody).then(
+      (h) => h.bytes.map((e) => e.toRadixString(16).padLeft(2, '0')).join());
+  final payload =
+      '$installId|$ts|$nonce|POST|$path|${await bodyHash}';
+
+  final seed = base64Decode(store.signSeed ?? '');
+  final kp = await ed.newKeyPairFromSeed(seed);
+  final sig = await ed.sign(utf8.encode(payload), keyPair: kp);
+
   final dev = store.deviceId;
   final fp = store.fingerprint;
-  final payload = fp.isEmpty
-      ? '$dev|$ts|POST|$path'
-      : '$dev|$fp|$ts|POST|$path';
-  final sig = Hmac(sha256, utf8.encode(SigKey.secret))
-      .convert(utf8.encode(payload))
-      .toString();
   final req = await client.postUrl(Uri.parse('$kApiBase$path'));
+  req.headers.set('x-install-id', installId);
   req.headers.set('x-device-id', dev);
   if (fp.isNotEmpty) req.headers.set('x-device-fp', fp);
   req.headers.set('x-app-ts', ts);
-  req.headers.set('x-app-sig', sig);
+  req.headers.set('x-app-nonce', nonce);
+  req.headers.set('x-app-sig', sig.bytes
+      .map((e) => e.toRadixString(16).padLeft(2, '0'))
+      .join());
   req.headers.set('x-app-version', '${build ?? kAppVersion}');
   req.headers.set('User-Agent', 'X-App/${kAppVersionName}');
   req.headers.set('Content-Type', 'application/json');
+  // التوقيع يشمل بصمة الجسم؛ بلا كتابته يُوقَّع sha256('{}') بينما يُرسل
+  // جسم فارغ، فيُرفض الطلب بـ«توقيع غير صالح» (403) قبل أن تصل البوابة
+  // إلى فحص الإصدار — أي أن الاختبار كان يقيس توقيعاً لا وصولاً.
+  req.write('{}');
   final res = await req.close();
   final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
   client.close();

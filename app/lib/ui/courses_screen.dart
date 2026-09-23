@@ -16,6 +16,7 @@ import '../core/app_config.dart';
 import '../core/config.dart';
 import '../core/media_proxy.dart';
 import '../core/models.dart';
+import 'cached_image.dart';
 import 'external_link.dart';
 import 'secure_screen.dart';
 import 'theme.dart';
@@ -403,12 +404,27 @@ class _CoursesScreenState extends State<CoursesScreen>
                 ),
               ),
               // شارة القفل: أوضح ما يراه المستخدم قبل الدخول.
-              if (c.locked && !c.unlocked)
+              if (c.locked && !c.unlocked) ...[
+                // تعتيم الغلاف كاملاً: اللون الباهت وحده لا يُقرأ «مقفل» على
+                // شاشة صغيرة. القفل يجب أن يُرى قبل النقر لا بعده.
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: const BorderRadius.vertical(
+                          top: Radius.circular(XTheme.rLg)),
+                      color: Colors.black.withOpacity(.45),
+                    ),
+                  ),
+                ),
                 const Positioned(
                   top: 10,
                   right: 10,
-                  child: _LockBadge(text: 'مقفلة'),
+                  child: _LockBadge(text: 'مقفلة — تحتاج مفتاحاً'),
                 ),
+                const Center(
+                  child: Icon(Icons.lock, color: Colors.white, size: 40),
+                ),
+              ],
               if (c.locked && c.unlocked)
                 const Positioned(
                   top: 10,
@@ -1044,9 +1060,9 @@ extension _FirstOrNull<T> on Iterable<T> {
 }
 /// صورة موقّعة تُجلب من الخادم.
 ///
-/// الخادم يفحص توقيع HMAC على كل مسار `/v1/*`، فـ`Image.network` بلا ترويسات
-/// يرجع 403 دائماً. هذا الغلاف يمرّر ترويسة موقّعة (`Api.signFor` تخزّنها
-/// مؤقتاً فلا تتغيّر كل إطار فتُبطل كاش الصور وتُهزّ القائمة).
+/// هذا الغلاف يبقي واجهة القسم كما هي (بديل + مقاس) ويفوّض البناء الفعلي
+/// إلى `SignedImage` المشترك، الذي يحلّ الترويسة مرة واحدة بعد البناء —
+/// فالتوقيع صار Ed25519 غير متزامن، ولا يمكن حسابه داخل `build`.
 class _SignedImage extends StatelessWidget {
   const _SignedImage({
     required this.api,
@@ -1061,20 +1077,12 @@ class _SignedImage extends StatelessWidget {
   final BoxFit fit;
 
   @override
-  Widget build(BuildContext context) {
-    final absolute = url.startsWith('/') ? '$kApiBase$url' : url;
-    return Image.network(
-      absolute,
-      fit: fit,
-      headers: url.startsWith('/') ? api.signFor('GET', url) : null,
-      // فشل الصورة لا يُفرغ المكان: يبقى البديل ظاهراً بلا خطأ.
-      errorBuilder: (_, __, ___) => fallback,
-      // لا دوّار تحميل ولا وميض: يظهر البديل حتى تصل الصورة، فيبدو الانتقال
-      // ثابتاً بدل أن يقفز بين حالات.
-      frameBuilder: (_, child, frame, wasSync) =>
-          frame == null && !wasSync ? fallback : child,
-    );
-  }
+  Widget build(BuildContext context) => SignedImage(
+        api: api,
+        path: url,
+        fit: fit,
+        errorBuilder: () => fallback,
+      );
 }
 
 /// مصغّرة الدرس: صورة المالك إن وُجدت، وإلا بديل مشتقّ من حالة الدرس.

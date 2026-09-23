@@ -2,7 +2,9 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../core/api.dart';
 import '../core/avatar_cache.dart';
+import '../core/config.dart';
 import 'theme.dart';
 
 /// عرض الصور عبر [AvatarCache] — بلا وميض وبلا إعادة تنزيل.
@@ -20,6 +22,7 @@ class CachedAvatar extends StatefulWidget {
     required this.url,
     required this.size,
     this.headers,
+    this.signedHeaders,
     this.showInitials = true,
     this.initials = '؟',
   });
@@ -27,6 +30,9 @@ class CachedAvatar extends StatefulWidget {
   final String url;
   final double size;
   final Map<String, String>? headers;
+
+  /// ترويسات تُبنى بعد البناء — للتوقيع غير المتزامن (Ed25519).
+  final Future<Map<String, String>>? signedHeaders;
   final bool showInitials;
   final String initials;
 
@@ -59,8 +65,9 @@ class _CachedAvatarState extends State<CachedAvatar> {
   Future<void> _request() async {
     if (_asked) return;
     _asked = true;
-    final bytes =
-        await AvatarCache.avatars.load(widget.url, headers: widget.headers);
+    // الترويسات قد تكون مستقبلاً: ننتظره مرة واحدة هنا لا في `build`.
+    final h = widget.headers ?? await widget.signedHeaders;
+    final bytes = await AvatarCache.avatars.load(widget.url, headers: h);
     if (!mounted) return;
     if (bytes != null) setState(() => _bytes = bytes);
   }
@@ -89,6 +96,84 @@ class _CachedAvatarState extends State<CachedAvatar> {
 }
 
 
+/// صورة شبكية بترويسات موقّعة تُبنى بعد البناء.
+///
+/// لماذا وجودها: التوقيع صار Ed25519 غير متزامن، فلا يمكن حساب الترويسات
+/// في `build` مباشرة. هذه تحلّ الترويسة مرة واحدة في `initState` وتبقيها،
+/// فلا يُعاد التنزيل ولا يومض العرض — وهو ما كان يفعله `Image.network` حين
+/// كان المفتاح يشمل ترويسة متجددة.
+class SignedImage extends StatefulWidget {
+  const SignedImage({
+    super.key,
+    required this.api,
+    required this.path,
+    this.cache,
+    this.fit = BoxFit.cover,
+    this.onTap,
+    this.errorBuilder,
+  });
+
+  final Api api;
+  final String path;
+  final AvatarCache? cache;
+  final BoxFit fit;
+  final VoidCallback? onTap;
+  final Widget Function()? errorBuilder;
+
+  @override
+  State<SignedImage> createState() => _SignedImageState();
+}
+
+class _SignedImageState extends State<SignedImage> {
+  Map<String, String>? _headers;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant SignedImage old) {
+    super.didUpdateWidget(old);
+    if (old.path != widget.path) _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final h = await widget.api.signFor('GET', widget.path);
+      if (!mounted) return;
+      setState(() => _headers = h);
+    } catch (_) {
+      // لا مفتاح توقيع بعد: يبقى العنصر بلا صورة بدل خطأ في الواجهة.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cache = widget.cache;
+    if (cache != null) {
+      return CachedImage(
+        url: widget.path.startsWith('/') ? '$kApiBase${widget.path}' : widget.path,
+        headers: _headers,
+        cache: cache,
+        fit: widget.fit,
+        onTap: widget.onTap,
+      );
+    }
+    if (_headers == null) {
+      return widget.errorBuilder?.call() ?? const SizedBox.shrink();
+    }
+    return Image.network(
+      widget.path.startsWith('/') ? '$kApiBase${widget.path}' : widget.path,
+      fit: widget.fit,
+      headers: _headers,
+      errorBuilder: (_, __, ___) =>
+          widget.errorBuilder?.call() ?? const SizedBox.shrink(),
+    );
+  }
+}
+
 /// صورة شبكية من الكاش: تُرسم فوراً إن كانت محفوظة، وتُطلب مرة واحدة.
 ///
 /// لماذا لا `Image.network`؟ لأن مفتاح تخزينه يشمل الترويسات، وتوقيع الطلب
@@ -101,6 +186,7 @@ class CachedImage extends StatefulWidget {
     required this.url,
     required this.cache,
     this.headers,
+    this.signedHeaders,
     this.fit = BoxFit.cover,
     this.onTap,
   });
@@ -108,6 +194,9 @@ class CachedImage extends StatefulWidget {
   final String url;
   final AvatarCache cache;
   final Map<String, String>? headers;
+
+  /// ترويسات تُبنى بعد البناء — للتوقيع غير المتزامن (Ed25519).
+  final Future<Map<String, String>>? signedHeaders;
   final BoxFit fit;
   final VoidCallback? onTap;
 
@@ -141,7 +230,9 @@ class _CachedImageState extends State<CachedImage> {
   Future<void> _request() async {
     if (_asked) return;
     _asked = true;
-    final bytes = await widget.cache.load(widget.url, headers: widget.headers);
+    // الترويسات قد تكون مستقبلاً: ننتظره مرة واحدة هنا لا في `build`.
+    final h = widget.headers ?? await widget.signedHeaders;
+    final bytes = await widget.cache.load(widget.url, headers: h);
     if (!mounted) return;
     setState(() {
       _bytes = bytes;

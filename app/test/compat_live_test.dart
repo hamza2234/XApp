@@ -22,6 +22,9 @@ void main() {
     final store = await Store.init();
     await AppConfig.instance.load();
     final api = Api(store);
+    // نفس ترتيب الإقلاع: المفتاح يُسجَّل قبل أي طلب موقّع، وإلا فشل
+    // `guest()` بـ«مفتاح التوقيع غير جاهز» لا لأمر يخص التوافقات.
+    await api.initSigningKey();
 
     // جلسة زائر حقيقية — نفس ما يفعله التطبيق عند الفتح (splash.dart).
     final g = await api.guest();

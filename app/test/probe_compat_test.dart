@@ -13,6 +13,7 @@ void main() {
     final store = await Store.init();
     await AppConfig.instance.load();
     final api = Api(store);
+    await api.initSigningKey();
     final g = await api.guest();
     await store.setToken(g['token'] as String);
     await store.setUser(g['user'] as Map<String, dynamic>);

@@ -61,6 +61,15 @@ class _SplashScreenState extends State<SplashScreen>
             : 'إعادة المحاولة (${_attempt + 1}/$_maxAutoRetries)…';
         _offline = false;
       });
+      // هوية التوقيع أولاً: لا يمكن توقيع أي طلب قبل وجود مفتاح مسجَّل،
+      // و`/v1/install/key` هو المسار الوحيد المسموح بلا توقيع. لو فشل
+      // التسجيل (شبكة) نُكمل: الإقلاع نفسه سيُعيد المحاولة، وطلبات لاحقة
+      // تُفشل بتوقيع مفقود فيُعاد الإقلاع — أوضح من شاشة عالقة.
+      setState(() => _status = 'تجهيز هوية آمنة…');
+      try {
+        await widget.api.initSigningKey();
+      } catch (_) {}
+
       final boot = await widget.api.bootstrap();
       // تُحدَّث الإعدادات المشتركة (رابط تيليجرام والباقات) من نفس الردّ.
       await AppConfig.instance.applyBootstrap(boot);

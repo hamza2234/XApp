@@ -143,16 +143,23 @@ interface Env {
   X_SIG_SECRET: string
   X_OWNER_KEY: string
   X_OWNER_JWT_SECRET?: string
-  X_FILE_KEY: string
   /**
    * مفتاح تشفير فيديوهات الدورات — لم يُعد مستعملاً.
    *
-   * كان الفيديو يُشفّر بمفتاح مستقل، لكن تطبيقاً مثبّتاً لا يملك إلا مفتاحاً
-   * واحداً مضمّناً (X_FILE_KEY)، فتعذّر فكّ الفيديو في العميل. العزل الحقيقي
-   * يأتي من دلو XLEARN المستقل؛ أُبقي الحقل اختيارياً كي لا يفشل نشر قائم
-   * يشير إليه.
+   * كان الفيديو يُشفّر بمفتاح مستقل، ثم صار التشفير كله على مستوى التطبيق
+   * بمفتاح واحد مضمّن. وقد أُزيل ذلك أيضاً: المفتاح المضمّن في كل نسخة ليس
+   * عزلاً، فمن استخرجه فكّ كل ملف. العزل الحقيقي يأتي من دلو XLEARN
+   * المستقل ومن حصر الوصول بتوقيع موثّق؛ أُبقي الحقل اختيارياً كي لا يفشل
+   * نشر قائم يشير إليه.
    */
   X_LEARN_KEY?: string
+  /**
+   * مفتاح تشفير الملفات القديم — لم يبقَ له مستعمل.
+   *
+   * أُزيل مع دوال `fileCryptoKey`/`fileNonce`. إبقاء الحقل اختياريّاً كي لا
+   * يفشل نشر قائم يشير إليه، ولا يُقرأ في أي مسار.
+   */
+  X_FILE_KEY?: string
   /** حساب خدمة Firebase (JSON كامل) — إن غاب، الدفع معطّل بهدوء. */
   FCM_SERVICE_ACCOUNT?: string
   /** معرّف مشروع Firebase — يُقرأ من الحساب إن لم يُضبط هنا. */
@@ -633,35 +640,169 @@ async function rateLimit(env: Env, request: Request, bucket: string, limit: numb
   } catch { /* كما أعلاه */ }
 }
 
-/** توقيع التطبيق: X-App-Sig = HMAC(X_SIG_SECRET, deviceId|ts|method|path) */
+/**
+ * هوية الطلب الموثّقة — تُملأ في `verifySignature` وحده.
+ *
+ * لماذا WeakMap لا ترويسة: `x-device-id` و`x-device-fp` يرسلهما العميل،
+ * ولا تدخلان في نصّ التوقيع (`installId|ts|nonce|method|path|bodyHash`).
+ * فمن سجّل مفتاح تثبيت لنفسه — وهو مجاني ولا يحتاج كلمة مرور — يستطيع
+ * توقيع طلب صحيح ثم وضع معرّف جهاز المالك فيه. التوقيع يمرّ، و`ownerDevice`
+ * كانت تعيد true، فيُفتح كل مقفل بلا كلمة مرور. وهذا هو الانتحال كاملاً:
+ * السلطة كانت تُشتقّ من قيمة يملك العميل تغييرها.
+ *
+ * الحلّ: السلطة تُشتقّ من `installId` وحده، لأنه القيمة الوحيدة التي
+ * يثبتها التوقيع بمفتاح خاص لا يغادر الجهاز. الهوية تُحسب مرة في
+ * `verifySignature` وتُقرأ هنا في المسارات، فلا تُقرأ ترويسة للسلطة أبداً.
+ *
+ * لماذا WeakMap: مربوطة بكائن الطلب نفسه، فلا تتسرّب بين الطلبات ولا
+ * تحتاج تنظيفاً، ولا يستطيع مسار لاحق تزوير هوية طلب آخر.
+ */
+const verifiedInstall = new WeakMap<Request, string>()
+
+/** معرّف التثبيت الموثّق لهذا الطلب، أو '' إن لم يُوقَّع بعد. */
+function verifiedInstallOf(request: Request): string {
+  return verifiedInstall.get(request) ?? ''
+}
+
+/** توقيع التطبيق: Ed25519 لكل تثبيت — `X-App-Sig` على
+ *  `installId|ts|nonce|method|path+query|bodyHash`، بمفتاح عام مسجَّل مسبقاً. */
 async function verifySignature(env: Env, request: Request): Promise<void> {
-  if (!env.X_SIG_SECRET) return
+  // المفتاح العام لكل تثبيت: التوقيع يُتحقَّق منه بمفتاح لا يملكه إلا صاحب
+  // التثبيت. لا سرّ مشترك في التطبيق إطلاقاً، وسرّ التوقيع القديم لم يبقَ
+  // له أثر — إبقاؤه كان يعني بقاء ما استُخرج من الحزمة صالحاً للأبد.
+  const installId = request.headers.get('x-install-id')?.trim() ?? ''
   const sig = request.headers.get('x-app-sig')?.trim() ?? ''
   const ts = Number(request.headers.get('x-app-ts')?.trim() || '0')
-  if (!sig || !ts) {
+  const nonce = request.headers.get('x-app-nonce')?.trim() ?? ''
+
+  if (!installId || !sig || !ts) {
     await noteAbuse(env, request, 'missing_signature')
     await logSecurity(env, request, 'missing_signature')
     throw new HttpError(403, 'طلب غير موقّع')
   }
-  if (Math.abs(Date.now() - ts) > 10 * 60 * 1000) {
+  // نافذة الصلاحية دقيقتان لا عشر: التوقيع لم يبقَ السرّ الوحيد، فتقصير
+  // النافذة يضيّق فرصة إعادة التشغيل بلا أن يقطع تشغيلاً طويلاً — التوقيع
+  // يُبنى لكل طلب على حدة، لا مرة عند بدء المشاهدة.
+  if (Math.abs(Date.now() - ts) > 2 * 60 * 1000) {
     await noteAbuse(env, request, 'stale_signature')
     throw new HttpError(403, 'انتهت صلاحية التوقيع')
   }
+
+  const row = await env.XDB
+    .prepare('SELECT public_key, revoked FROM x_install_keys WHERE install_id = ?1')
+    .bind(installId).first<{ public_key: string; revoked: number }>()
+  if (!row) {
+    await noteAbuse(env, request, 'unknown_install')
+    await logSecurity(env, request, 'unknown_install', `install=${installId}`)
+    throw new HttpError(403, 'تثبيت غير مسجَّل')
+  }
+  if (row.revoked) {
+    await logSecurity(env, request, 'revoked_install', `install=${installId}`)
+    throw new HttpError(403, 'تثبيت موقوف')
+  }
+
   const url = new URL(request.url)
-  // البصمة جزء من التوقيع حين تُرسل: بغير ذلك يكفي تبديل ترويسة البصمة
-  // لأخذ منحة يومية جديدة بلا حد. وعند غيابها نقبل صيغة التوقيع القديمة،
-  // فمعرّف الجهاز نفسه صار البصمة الدائمة في النسخ الجديدة.
-  const fp = request.headers.get('x-device-fp')?.trim() ?? ''
-  const legacy = `${deviceOf(request)}|${ts}|${request.method}|${url.pathname}${url.search}`
-  const expected = await hmacHex(
-    env.X_SIG_SECRET,
-    fp ? `${deviceOf(request)}|${fp}|${ts}|${request.method}|${url.pathname}${url.search}` : legacy
-  )
-  if (sig !== expected) {
+  const bodyHash = await bodyHashOf(request)
+  // التوقيع يشمل: التثبيت + الطابع الزمني + nonce + الطريقة + المسار + بصمة
+  // الجسم. بصمة الجسم تمنع اعتراض طلب موقّع وتبديل محتواه (رفع صفّ آخر،
+  // تفعيل مفتاح مختلف) — وهو ما كان ممكناً حين كان التوقيع على المسار وحده.
+  const payload = [
+    installId, ts, nonce, request.method, url.pathname + url.search, bodyHash,
+  ].join('|')
+
+  let ok = false
+  try {
+    const pub = await crypto.subtle.importKey('raw', hexToBytes(row.public_key),
+      { name: 'Ed25519' }, false, ['verify'])
+    ok = await crypto.subtle.verify({ name: 'Ed25519' }, pub,
+      hexToBytes(sig), new TextEncoder().encode(payload))
+  } catch {
+    ok = false
+  }
+  if (!ok) {
     await noteAbuse(env, request, 'bad_signature')
-    await logSecurity(env, request, 'bad_signature', `ts=${ts}`)
+    await logSecurity(env, request, 'bad_signature', `install=${installId}`)
     throw new HttpError(403, 'توقيع غير صالح')
   }
+
+  // الهوية الموثّقة تُثبَّت هنا وحدها: بعد أن أثبت التوقيع أن هذا الطلب
+  // صادر عن صاحب المفتاح الخاص لهذا التثبيت. كل ما بعد هذا السطر يقرأ
+  // منها ولا يقرأ ترويسة.
+  verifiedInstall.set(request, installId)
+
+  // يُسجَّل آخر طابع زمني مقبول، ويُستهلك الـnonce للطلبات الحسّاسة وحدها.
+  await env.XDB.prepare(
+    'UPDATE x_install_keys SET last_ts = ?1, last_seen = ?2 WHERE install_id = ?3'
+  ).bind(ts, new Date().toISOString(), installId).run()
+
+  if (nonce && isSensitive(request.method, url.pathname)) {
+    // الإدراج نفسه هو الفحص: المفتاح الأساسي (install_id, nonce) يجعل
+    // الطلب الثاني يفشل بلا سباق بين قراءة وكتابة.
+    const claimed = await env.XDB.prepare(
+      `INSERT INTO x_req_nonces (install_id, nonce, at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(install_id, nonce) DO NOTHING RETURNING nonce`
+    ).bind(installId, nonce, Date.now()).first<{ nonce: string }>()
+    if (!claimed) {
+      await noteAbuse(env, request, 'nonce_reuse')
+      await logSecurity(env, request, 'nonce_reuse', `install=${installId}`)
+      throw new HttpError(409, 'طلب مكرّر')
+    }
+    // التنظيف عشوائي لا في كل طلب: صفوف أقدم من نافذة الصلاحية لم تعد
+    // تحرس شيئاً — الطابع الزمني يرفضها أصلاً — فإبقاؤها ينفخ الجدول بلا
+    // مقابل. الاحتمال 1/50 يجعل الكلفة مهملة ويضمن التنظيف عملياً.
+    if (Math.random() < 0.02) {
+      await env.XDB.prepare('DELETE FROM x_req_nonces WHERE at < ?1')
+        .bind(Date.now() - 5 * 60 * 1000).run().catch(() => undefined)
+    }
+  }
+}
+
+/**
+ * بصمة جسم الطلب — تُحسب قبل قراءة المعالج للجسم.
+ *
+ * `request.clone()` إلزامي: قراءة الجسم تستهلك الدفق، فتمريره للمعالج بعد
+ * استهلاكه كان يجعل كل طلب POST بجسم يفشل. النسخة تُقرأ هنا والأصل يمرّ.
+ *
+ * الحدّ الأقصى مقصود: رفع فيديو يمرّ بجسم بمئات الميغابايت، وحساب بصمته
+ * يعني سحبه كاملاً إلى الذاكرة — وهذا يهدم البثّ المدفوع بالذاكرة ويتجاوز
+ * حدود العامل. فوق الحدّ تُترك البصمة فارغة، ويبقى التوقيع على المسار
+ * والطابع الزمني وnonce، وتبقى تلك المسارات محكومة بجلسة المالك وبطول
+ * الأجزاء. أمن الرفع لا يقوم على بصمة الجسم بل على هوية المالك وجلسته.
+ */
+const MAX_BODY_HASH = 256 * 1024
+
+async function bodyHashOf(request: Request): Promise<string> {
+  if (request.method === 'GET' || request.method === 'HEAD') return ''
+  const declared = Number(request.headers.get('content-length') ?? '0')
+  if (!declared || declared > MAX_BODY_HASH) return ''
+  try {
+    const buf = await request.clone().arrayBuffer()
+    if (buf.byteLength > MAX_BODY_HASH) return ''
+    const digest = await crypto.subtle.digest('SHA-256', buf)
+    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * الطلبات التي تستهلك nonce: ما يغيّر حالة أو يصرف رصيداً.
+ *
+ * القراءات لا تستهلكه: كتابة صفّ لكل قراءة كانت سترفع كلفة D1 بلا مقابل
+ * أمني — إعادة قراءة لا تضرّ، وإعادة صرفٍ تضرّ.
+ */
+function isSensitive(method: string, pathname: string): boolean {
+  if (method === 'GET' || method === 'HEAD') return false
+  return true
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim()
+  const out = new Uint8Array(clean.length >> 1)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16)
+  }
+  return out
 }
 
 /**
@@ -730,9 +871,12 @@ async function authenticate(env: Env, request: Request): Promise<{ caller: Calle
   const role = typeof payload.role === 'string' ? payload.role : 'guest'
 
   if (role === 'guest') {
-    // الزائر: جلسة مرتبطة بالجهاز فقط — بلا صف في x_users
-    if (deviceOf(request) && payload.dev !== deviceOf(request)) {
-      await logSecurity(env, request, 'guest_token_device_mismatch')
+    // الزائر: جلسة مرتبطة بالتثبيت الموثّق — بلا صف في x_users.
+    // كان الربط بـ`payload.dev` من ترويسة يملك العميل تغييرها، فمن سرق رمز
+    // زائر استعمله من أي مكان. المفتاح الخاص لا ينتقل، فالتثبيت هو الحدّ.
+    const inst = verifiedInstallOf(request)
+    if (payload.inst && inst && payload.inst !== inst) {
+      await logSecurity(env, request, 'guest_token_install_mismatch')
       throw new HttpError(401, 'invalid token')
     }
     return { caller: { uid: sub, role }, user: null }
@@ -781,15 +925,16 @@ function blockedResponse(settings: XSettings): Response {
 }
 
 /**
- * بصمة الجهاز الدائمة — أساس المنحة اليومية.
+ * بصمة الجهاز كما يرسلها العميل — تُستعمل للعرض فقط، لا للسلطة.
  *
  * معرّف الجهاز كان يُولَّد داخل التطبيق ويُخزَّن مع بياناته، فمسح البيانات
  * يمحوه ويعود المستخدم بمنحة جديدة. البصمة تأتي من النظام (ANDROID_ID)
  * وتُخزَّن في التخزين الأصلي، فتبقى بعد مسح البيانات وبعد تبديل الحساب.
  *
- * ولا تُقبل من العميل بلا تحقق: التوقيع يشملها (انظر verifySignature)، فتبديلها
- * في الطلب يكسر التوقيع. وهي داخل خادم واحد لكل الأدوار، فيتشارك الزائر
- * والمشترك والمسجّل المنحة نفسها على الجهاز نفسه.
+ * تحذير كان مكتوباً هنا خطأً: «التوقيع يشملها فتبديلها يكسر التوقيع» غير
+ * صحيح. نصّ التوقيع هو `installId|ts|nonce|method|path|bodyHash`، والبصمة
+ * ليست فيه. لذلك لا تُشتقّ منها سلطة هنا: تُمرَّر إلى `walletKey` التي تربطها
+ * بالتثبيت الموثّق مرة واحدة، ثم تتجاهلها.
  */
 function fingerprint(request: Request): string {
   const fp = request.headers.get('x-device-fp')?.trim() ?? ''
@@ -800,34 +945,58 @@ function fingerprint(request: Request): string {
 }
 
 /**
- * مفتاح محفظة الزائر: بصمة الجهاز مع ترحيل المحفظة القديمة.
+ * مفتاح محفظة الزائر: يُثبَّت على التثبيت الموثّق عند أول ظهور، ثم لا يُقرأ
+ * من الترويسة بعدها أبداً.
  *
- * كانت المحافظ مفتاحها معرّف الجهاز المخزَّن في بيانات التطبيق، فمسحها يفقد
- * الرصيد. البصمة أدوم، فننقل الرصيد عند أول ظهور لها بدل إضاعته.
+ * العلة التي أُغلقت: كان المفتاح هو `x-device-fp` المُرسَل من العميل. ومعرّف
+ * الجهاز ليس سراً — يظهر في الدردشة وفي تصدير اللوحة — فمن قرأه أرسله مع
+ * بصمته وصرف رصيد الضحية بلا جلسته ولا بصمته. والبصمة الواحدة كانت تكفي
+ * لفتح كل ملف ودخول كل شركة من رصيد غيره.
+ *
+ * الحلّ: الربط يُخزَّن على الخادم مرة واحدة (`x_wallet_bindings`)، وبعدها
+ * مفتاح المحفظة يأتي من المخزَّن لا من الطلب. تغيير الترويسة بعد الربط
+ * لا يُنتج هوية جديدة ولا يصل إلى محفظة أحد.
+ *
+ * والمحفظة القائمة تبقى قابلة للوصول: من كان مفتاحه `fp:X` يُربط به عند
+ * أول طلب ويحتفظ برصيده. لكن بصمة مملوكة لتثبيت آخر لا تُتبنّى — صاحبها
+ * لا يفقدها لمن أرسلها.
  */
-async function walletKey(env: Env, fp: string, dev: string): Promise<string> {
-  if (!fp.startsWith('fp:') || !dev) return fp
-  const mine = await env.XDB.prepare(
-    'SELECT 1 AS x FROM x_guest_wallets WHERE device_id = ?1'
-  ).bind(fp).first()
-  if (mine) return fp
-  // تُنشأ محفظة فارغة ولا يُنقل رصيد أحد.
-  //
-  // كانت الترحيل تنسخ رصيد المحفظة القديمة كاملاً. وهي مسار سرقة: معرّف
-  // الجهاز ليس سراً (يظهر في الدردشة وفي تصدير اللوحة)، فمن قرأه يرسله مع
-  // بصمة جهازه فيمرّ الترحيل وينسخ رصيد الضحية إلى محفظته — بلا حاجة إلى
-  // بصمتها ولا إلى جلسة. رصيد الزوار لا يُرحَّل الآن إطلاقاً؛ من فقد
-  // بصمته يفقد المنحة اليومية فقط، وهي تُستعاد تلقائياً في اليوم التالي.
+async function walletKey(env: Env, request: Request, fp: string): Promise<string> {
+  const installId = verifiedInstallOf(request)
+  // طلب بلا تثبيت موثّق: لا سلطة تُبنى عليه. مفتاح معزول لا يُخلط بأحد.
+  if (!installId) return `anon:${ip(request)}`
+
+  const bound = await env.XDB.prepare(
+    'SELECT wallet_key FROM x_wallet_bindings WHERE install_id = ?1'
+  ).bind(installId).first<{ wallet_key: string }>()
+  // الربط القائم هو الحكم: الترويسة لا تُقرأ إطلاقاً بعد هذه اللحظة.
+  if (bound) return bound.wallet_key
+
+  // أول ظهور: تُتبنّى البصمة إن كانت حرّة، وإلا مفتاح خاص بهذا التثبيت.
+  // البصمة المملوكة لتثبيت آخر تُرفض، فلا تُسرق محفظة قائمة.
+  let key = `in:${installId}`
+  if (fp.startsWith('fp:')) {
+    const taken = await env.XDB.prepare(
+      'SELECT 1 x FROM x_wallet_bindings WHERE wallet_key = ?1'
+    ).bind(fp).first()
+    if (!taken) key = fp
+  }
   await env.XDB.prepare(
-    `INSERT OR IGNORE INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
-     VALUES (?1, 0, 0, ?2, ?2)`
-  ).bind(fp, new Date().toISOString()).run()
-  return fp
+    `INSERT INTO x_wallet_bindings (install_id, wallet_key, bound_at)
+     VALUES (?1, ?2, ?3) ON CONFLICT(install_id) DO NOTHING`
+  ).bind(installId, key, new Date().toISOString()).run().catch(() => undefined)
+
+  // إعادة القراءة: طلبان أولان متزامنان قد يسبق أحدهما الآخر، والمخزَّن هو
+  // الحكم حتى لا يرى المستخدم محفظتين في طلبين متتاليين.
+  const again = await env.XDB.prepare(
+    'SELECT wallet_key FROM x_wallet_bindings WHERE install_id = ?1'
+  ).bind(installId).first<{ wallet_key: string }>()
+  return again?.wallet_key ?? key
 }
 
 /** مفتاح الهوية لهذا الطلب — يُحسب مرة ويُمرَّر لكل عمليات الخصم والعرض. */
 async function walletOf(env: Env, request: Request): Promise<string> {
-  return walletKey(env, fingerprint(request), deviceOf(request))
+  return walletKey(env, request, fingerprint(request))
 }
 
 /**
@@ -852,10 +1021,13 @@ async function fingerprintRotated(
   const fp = request.headers.get('x-device-fp')?.trim().toLowerCase() ?? ''
   // نسخ قديمة لا ترسل بصمة — لا شيء نربطه ولا شيء نمنعه.
   if (!/^[0-9a-f]{16,64}$/.test(fp)) return false
+  // العضوية للتثبيت الموثّق: كان `d:${deviceOf(request)}` وهو ما يملك
+  // العميل تغييره، فيكفي تبديل ترويسة لتبدو البصمة جديدة وتُعاد المنحة.
+  const installId = verifiedInstallOf(request)
   const who = caller.role === 'user' || caller.role === 'owner'
     ? `u:${caller.uid}`
-    : `d:${deviceOf(request)}`
-  if (!deviceOf(request) && !who.startsWith('u:')) return false
+    : `d:${installId}`
+  if (!installId && !who.startsWith('u:')) return false
   const key = `fpb:${who}`
   const bound = await kvGet(env, key)
   if (!bound) {
@@ -1475,30 +1647,6 @@ async function listLocalModels(env: Env, brandId: string): Promise<CatalogModel[
   })
 }
 
-// ============================== تشفير الملفات ==============================
-// كل ملف يُقدَّم مشفراً بـ AES-CTR — البايتات المسروقة عديمة الفائدة
-// بدون مفتاح التطبيق. nonce ثابت مشتق من etag حتى تبقى نسخة الكاش صالحة.
-
-let _fileKey: Promise<CryptoKey> | null = null
-
-function fileCryptoKey(env: Env): Promise<CryptoKey> {
-  _fileKey ??= (async () => {
-    const raw = new Uint8Array(32)
-    for (let i = 0; i < 32; i++) raw[i] = parseInt(env.X_FILE_KEY.slice(i * 2, i * 2 + 2), 16)
-    return crypto.subtle.importKey('raw', raw, { name: 'AES-CTR' }, false, ['encrypt'])
-  })()
-  return _fileKey
-}
-
-async function fileNonce(env: Env, r2Key: string, etag: string): Promise<Uint8Array> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256', new TextEncoder().encode(`${r2Key}|${etag}|${env.X_FILE_KEY}`))
-  const nonce = new Uint8Array(digest).slice(0, 16)
-  // آخر 8 بايتات صفر — العداد يبدأ من هنا حتى يتطابق مع تنفيذ Dart (عداد 128-بت)
-  nonce.fill(0, 8)
-  return nonce
-}
-
 const EXT_MIME: Record<string, string> = {
   pdf: 'application/pdf', svg: 'image/svg+xml', png: 'image/png',
   jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp'
@@ -1526,16 +1674,17 @@ async function listLocalFiles(env: Env, folderId: string): Promise<CatalogEntry[
 }
 // ============================== أكاديمية الدورات ==============================
 //
-// الأمان هنا مبني على ثلاث طبقات مستقلة، ونجاح أي منها وحده لا يكفي:
-//   1. توقيع الطلب (x-app-sig) — يمنع أي سكربت خارجي من لمس المسارات.
-//   2. الاستحقاق — يُحسب من x_course_grants بمعرّف الجهاز، لا من عميل.
-//   3. التشفير — الفيديو لا يُخدَم صريحاً أبداً، بل AES-CTR كمثل بقية الملفات.
+// الأمان هنا مبني على طبقتين مستقلتين، ونجاح أي منهما وحده لا يكفي:
+//   1. توقيع الطلب (x-app-sig) — Ed25519 بمفتاح خاص بكل تثبيت. يمنع أي
+//      سكربت خارجي من لمس المسارات، ولا سرّ مشترك في الحزمة يُستخرج.
+//   2. الاستحقاق — يُحسب من x_course_grants بمفتاح `install_id` الموثّق
+//      بالتوقيع، لا بمعرّف جهاز يرسله العميل.
 // وكل مسار يقرأ الاستحقاق من الخادم لا من الطلب، فالتلاعب بالعميل لا يفتح شيئاً.
 //
-// ملاحظة: بث الفيديو يستعمل نفس مفتاح الملفات (X_FILE_KEY) وتشفير
-// fileCryptoKey/fileNonce. تطبيق مثبّت لا يملك إلا مفتاحاً واحداً مضمّناً،
-// فلو شُفّر الفيديو بمفتاح آخر لتعذّر فكّه في التطبيق. العزل الفعلي بين
-// فيديوهات الدورات وبقية الملفات يأتي من دلو R2 منفصل (XLEARN)، لا من المفتاح.
+// ملاحظة عن التشفير: كان كل ملف يُخدَم مشفراً بـ AES-CTR بمفتاح مضمّن في
+// التطبيق. ذلك لم يكن عزلاً: المفتاح نفسه في كل نسخة، ومن استخرجه فكّ كل
+// ملف. أُزيل التشفير على مستوى التطبيق، والملفات تُخدَم كما هي عبر TLS.
+// العزل الفعلي يأتي من دلو R2 منفصل (XLEARN) ومن حصر الوصول بتوقيع موثّق.
 
 /** يجزّئ كود المفتاح — القاعدة تحفظ البصمة لا الكود. */
 async function keyHash(code: string): Promise<string> {
@@ -1564,47 +1713,55 @@ function makeKeyCode(): string {
  * الربط بالجهاز لا بالحساب عن قصد: إنشاء حساب جديد على الجهاز نفسه لا
  * يمنح دورةً ثانية، وإعادة تثبيت التطبيق على جهاز آخر لا تنقل المفتاح.
  */
-async function courseUnlocked(env: Env, deviceId: string, courseId: string): Promise<boolean> {
+async function courseUnlocked(env: Env, installId: string, courseId: string): Promise<boolean> {
   const course = await env.XDB
     .prepare('SELECT locked FROM x_courses WHERE id = ?1 AND published = 1')
     .bind(courseId).first<{ locked: number }>()
   if (!course) return false
   // دورة غير مقفلة أصلاً: لا كود عليها، فكل فيديو غير موسوم «مجاني» مباح.
   if (!course.locked) return true
-  if (!deviceId) return false
+  // لا تثبيت موثّقاً يعني لا استحقاق: الطلب غير موقّع أصلاً في هذه الحالة.
+  if (!installId) return false
   const grant = await env.XDB
-    .prepare('SELECT 1 x FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2')
-    .bind(deviceId, courseId).first<{ x: number }>()
+    .prepare('SELECT 1 x FROM x_course_grants WHERE install_id = ?1 AND course_id = ?2')
+    .bind(installId, courseId).first<{ x: number }>()
   return !!grant
 }
 
 /**
- * جهاز المالك: أي جهاز فُتحت عليه لوحة المالك بنجاح.
+ * تثبيت المالك: أي تثبيت فُتحت عليه لوحة المالك بنجاح.
  *
  * هذا هو ما يصنع استحقاق المالك الحقيقي، لا وجود رمز جلسة في الطلب. لو
  * اعتمدنا على `role === 'owner'` وحده لكان المالك يرى دوراته المقفلة مفتوحة
  * على أي جهاز يسجّل فيه بحسابه العادي — وهو بالضبط ما جعل القفل يبدو معطلاً.
  *
- * الوسم صريح في قاعدة البيانات ولا يُشتق من الدور: منحه يحتاج مفتاح المالك.
+ * المفتاح هو `installId` الموثّق بالتوقيع، لا معرّف الجهاز المرسل في ترويسة.
+ * كان الوسم يُنسب إلى `x-device-id`، وهو ما جعل الانتحال ممكناً: من وقّع
+ * طلباً بمفتاحه الخاص ثم وضع معرّف جهاز المالك صار مالكاً. الآن لا يُشتقّ
+ * الوسم من شيء يملك العميل تغييره.
+ *
+ * الوسم صريح في قاعدة البيانات ولا يُشتقّ من الدور: منحه يحتاج مفتاح المالك.
  */
-async function ownerDevice(env: Env, deviceId: string): Promise<boolean> {
-  if (!deviceId) return false
+async function ownerDevice(env: Env, installId: string): Promise<boolean> {
+  if (!installId) return false
   const row = await env.XDB
-    .prepare('SELECT 1 x FROM x_devices WHERE device_id = ?1 AND owner_marked = 1')
-    .bind(deviceId).first<{ x: number }>()
+    .prepare('SELECT 1 x FROM x_devices WHERE install_id = ?1 AND owner_marked = 1')
+    .bind(installId).first<{ x: number }>()
   return !!row
 }
 
-/** يوسم الجهاز الحالي كجهاز مالك. يُنادى بعد دخول اللوحة بنجاح. */
-async function markOwnerDevice(env: Env, deviceId: string): Promise<void> {
-  if (!deviceId) return
+/** يوسم التثبيت الحالي كتثبيت مالك. يُنادى بعد دخول اللوحة بنجاح. */
+async function markOwnerDevice(env: Env, installId: string, deviceId: string): Promise<void> {
+  if (!installId) return
   const now = new Date().toISOString()
   try {
+    // الصف مفتاحه install_id: التثبيت وحدة مستقلة. device_id يُكتب للعرض
+    // في اللوحة فقط، ولا يُقرأ منه استحقاق.
     await env.XDB.prepare(
-      `INSERT INTO x_devices (device_id, owner_marked, first_seen, last_seen)
-       VALUES (?1, 1, ?2, ?2)
-       ON CONFLICT(device_id) DO UPDATE SET owner_marked = 1, last_seen = ?2`
-    ).bind(deviceId, now).run()
+      `INSERT INTO x_devices (install_id, device_id, owner_marked, first_seen, last_seen)
+       VALUES (?1, ?2, 1, ?3, ?3)
+       ON CONFLICT(install_id) DO UPDATE SET owner_marked = 1, last_seen = ?3`
+    ).bind(installId, deviceId, now).run()
   } catch { /* الوسم ليس شرطاً لدخول اللوحة */ }
 }
 
@@ -1621,39 +1778,39 @@ const MAX_OWNER_DEVICES = 3
 async function ownerDevices(env: Env): Promise<string[]> {
   try {
     const rows = await env.XDB
-      .prepare('SELECT device_id FROM x_devices WHERE owner_bound = 1 ORDER BY last_seen DESC')
-      .all<{ device_id: string }>()
-    return (rows.results ?? []).map(r => r.device_id)
+      .prepare('SELECT install_id FROM x_devices WHERE owner_bound = 1 ORDER BY last_seen DESC')
+      .all<{ install_id: string }>()
+    return (rows.results ?? []).map(r => r.install_id).filter(Boolean)
   } catch {
     return []
   }
 }
 
-async function registerOwnerDevice(env: Env, deviceId: string): Promise<void> {
-  if (!deviceId) return
+async function registerOwnerDevice(env: Env, installId: string, deviceId: string): Promise<void> {
+  if (!installId) return
   const now = new Date().toISOString()
   await env.XDB.prepare(
-    `INSERT INTO x_devices (device_id, owner_marked, owner_bound, first_seen, last_seen)
-     VALUES (?1, 1, 1, ?2, ?2)
-     ON CONFLICT(device_id) DO UPDATE SET owner_marked = 1, owner_bound = 1, last_seen = ?2`
-  ).bind(deviceId, now).run()
+    `INSERT INTO x_devices (install_id, device_id, owner_marked, owner_bound, first_seen, last_seen)
+     VALUES (?1, ?2, 1, 1, ?3, ?3)
+     ON CONFLICT(install_id) DO UPDATE SET owner_marked = 1, owner_bound = 1, last_seen = ?3`
+  ).bind(installId, deviceId, now).run()
 }
 
-/** يفرّغ خانة: يسحب ربط الجهاز ووسمه معاً. */
-async function releaseOwnerDevice(env: Env, deviceId: string): Promise<void> {
-  if (!deviceId) return
+/** يفرّغ خانة: يسحب ربط التثبيت ووسمه معاً. */
+async function releaseOwnerDevice(env: Env, installId: string): Promise<void> {
+  if (!installId) return
   await env.XDB.prepare(
-    'UPDATE x_devices SET owner_marked = 0, owner_bound = 0 WHERE device_id = ?1'
-  ).bind(deviceId).run()
+    'UPDATE x_devices SET owner_marked = 0, owner_bound = 0 WHERE install_id = ?1'
+  ).bind(installId).run()
 }
 
-/** يزيل وسم المالك عن جهاز (عند الخروج من اللوحة). */
-async function unmarkOwnerDevice(env: Env, deviceId: string): Promise<void> {
-  if (!deviceId) return
+/** يزيل وسم المالك عن التثبيت (عند الخروج من اللوحة). */
+async function unmarkOwnerDevice(env: Env, installId: string): Promise<void> {
+  if (!installId) return
   try {
     await env.XDB.prepare(
-      'UPDATE x_devices SET owner_marked = 0 WHERE device_id = ?1'
-    ).bind(deviceId).run()
+      'UPDATE x_devices SET owner_marked = 0 WHERE install_id = ?1'
+    ).bind(installId).run()
   } catch { /* تجاهل */ }
 }
 
@@ -1697,7 +1854,7 @@ function videoView(v: any, unlocked: boolean, hidden = false) {
  * خضع لقاعدة الاستحقاق لظهرت دوراته المقفلة أمامه بلا رابط بثّ — أي أن
  * معاينته لعمله كانت ستعلق على «جار التحميل» للأبد. المالك يرى ما يملك.
  */
-async function coursesFor(env: Env, deviceId: string, isOwner = false,
+async function coursesFor(env: Env, installId: string, isOwner = false,
                           videosHidden = false) {
   const courses = await env.XDB.prepare(
     `SELECT id, title, subtitle, description, cover_key, locked, sort
@@ -1709,10 +1866,10 @@ async function coursesFor(env: Env, deviceId: string, isOwner = false,
   ).all<any>()
 
   const granted = new Set<string>()
-  if (deviceId) {
+  if (installId) {
     const rows = await env.XDB
-      .prepare('SELECT course_id FROM x_course_grants WHERE device_id = ?1')
-      .bind(deviceId).all<{ course_id: string }>()
+      .prepare('SELECT course_id FROM x_course_grants WHERE install_id = ?1')
+      .bind(installId).all<{ course_id: string }>()
     for (const r of rows.results ?? []) granted.add(r.course_id)
   }
 
@@ -2493,8 +2650,13 @@ export default {
         await trackDeviceFarm(env, request)
       }
 
-      // توقيع التطبيق إلزامي لكل /v1/* — السكريبتات الخارجية تموت هنا
-      if (path.startsWith('/v1/')) await verifySignature(env, request)
+      // توقيع التطبيق إلزامي لكل /v1/* — السكريبتات الخارجية تموت هنا.
+      // تسجيل المفتاح العام معفى: لا يمكن توقيع طلب بمفتاح لم يُسجَّل بعد،
+      // وهو الطلب الوحيد الذي يسبق وجود التوقيع. حمايته في حدّ المعدّل
+      // وطول المفتاح، لا في التوقيع.
+      if (path.startsWith('/v1/') && path !== '/v1/install/key') {
+        await verifySignature(env, request)
+      }
 
       // حدّ الانفجار على كل مسارات التطبيق: نافذة ثانية واحدة توقف الحلقات
       // الآلية مهما كانت نافذة الحدّ الأخرى طويلة. مسارات المالك مستثناة
@@ -2583,16 +2745,70 @@ export default {
         return json({ ok: true })
       }
 
+      /**
+       * تسجيل المفتاح العام للتثبيت — نقطة الدخول الوحيدة قبل وجود توقيع.
+       *
+       * التطبيق يولّد زوج مفاتيح Ed25519 عند أول تشغيل، يحفظ الخاص في مخزن
+       * الجهاز ولا يُخرجه أبداً، ويرسل العام هنا مرة واحدة. من هذه اللحظة
+       * يُتحقَّق من كل طلب بتوقيع لا يقدر عليه غيره.
+       *
+       * الثقة الأولى (TOFU): من يسجّل أولاً باسم تثبيت يملكه. وهذا لا يمنح
+       * شيئاً: التسجيل لا يصدر رصيداً ولا صلاحية، والاستحقاق يبقى مشروطاً
+       * بجلسته وبكود المالك. ولو سجّل غريب مفتاحه مكان تثبيت قائم، فلن
+       * يُقبل مفتاحه أصلاً لأن التسجيل لا يستبدل مفتاحاً قائماً.
+       */
+      if (path === '/v1/install/key' && request.method === 'POST') {
+        await rateLimit(env, request, 'install_key', 30, 3600)
+        const b = await request.json().catch(() => ({})) as {
+          installId?: string; publicKey?: string; appVersion?: string
+        }
+        const installId = String(b.installId ?? '').trim()
+        const publicKey = String(b.publicKey ?? '').trim().toLowerCase()
+        if (!/^[\w-]{8,80}$/.test(installId)) throw new HttpError(400, 'installId غير صالح')
+        // مفتاح Ed25519 العام 32 بايت = 64 محرفاً سادس عشرياً بالضبط.
+        if (!/^[0-9a-f]{64}$/.test(publicKey)) throw new HttpError(400, 'publicKey غير صالح')
+        const now = new Date().toISOString()
+        const existing = await env.XDB
+          .prepare('SELECT public_key, revoked FROM x_install_keys WHERE install_id = ?1')
+          .bind(installId).first<{ public_key: string; revoked: number }>()
+        if (existing) {
+          // المفتاح نفسه مسجّل من قبل: نداء متكرّر بعد إعادة تشغيل التطبيق،
+          // فيُقبل بلا تغيير. مفتاح مختلف يعني إما تثبيتاً أُعيد ضبطه أو
+          // محاولة انتحال — كلاهما لا يُحلّ هنا، ولا يُمنح مفتاح جديد بصمت.
+          if (existing.public_key === publicKey && !existing.revoked) {
+            await env.XDB.prepare(
+              'UPDATE x_install_keys SET last_seen = ?1, device_id = ?2 WHERE install_id = ?3'
+            ).bind(now, deviceOf(request) || '', installId).run()
+            return json({ ok: true, reused: true })
+          }
+          await logSecurity(env, request, 'install_key_conflict', `install=${installId}`)
+          throw new HttpError(409, 'مفتاح هذا التثبيت مسجَّل بالفعل')
+        }
+        await env.XDB.prepare(
+          `INSERT INTO x_install_keys (install_id, public_key, device_id, app_version,
+             last_ts, revoked, first_seen, last_seen)
+           VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?5)`
+        ).bind(installId, publicKey, deviceOf(request) || '',
+               String(b.appVersion ?? '').slice(0, 20), now).run()
+        return json({ ok: true, enrolled: true })
+      }
+
       // ---------- المصادقة ----------
 
       if (path === '/v1/auth/guest' && request.method === 'POST') {
         // 60 بدل 10: إنشاء الجلسة يحدث في كل فتح، والحدّ الضيّق كان يرفض
         // المستخدم في أول تشغيل. المفتاح صار الجهاز فلا يضر أحداً بغيره.
         await rateLimit(env, request, 'guest', 60, 3600)
+        const installId = verifiedInstallOf(request)
+        if (!installId) throw new HttpError(403, 'طلب غير موثّق')
         const dev = deviceOf(request)
-        if (!dev) throw new HttpError(400, 'deviceId required')
-        const token = await signJwt({ sub: `guest_${dev}`, role: 'guest', dev }, env.X_JWT_SECRET, 7 * DAY)
-        return json({ token, user: { id: `guest_${dev}`, role: 'guest' } })
+        // الهوية من التثبيت الموثّق لا من الترويسة. `guest_<deviceId>` كان
+        // يعني أن من وضع معرّف جهاز غيره حصل على هوية ذلك الجهاز في الدردشة
+        // (يقرأ رسائله ويحذفها). الترويسة تبقى للعرض فقط.
+        const token = await signJwt(
+          { sub: `guest_${installId}`, role: 'guest', inst: installId, dev },
+          env.X_JWT_SECRET, 7 * DAY)
+        return json({ token, user: { id: `guest_${installId}`, role: 'guest' } })
       }
 
       if (path === '/v1/auth/register' && request.method === 'POST') {
@@ -2658,15 +2874,19 @@ export default {
       // typ=owner، فلا يمكن تحويل جلسة مستخدم عادي إلى جلسة مالك.
       if (path === '/v1/owner/login' && request.method === 'POST') {
         await ownerLoginGuard(env)
+        // الهوية من التوقيع لا من الترويسة: `x-device-id` يملك العميل
+        // تغييره، فلو بُني السقف عليه لكان كل محاولة دخول «جهازاً جديداً»
+        // بتغيير حرف واحد — فيسقط حدّ الأجهزة كلياً.
+        const installId = verifiedInstallOf(request)
+        if (!installId) throw new HttpError(403, 'طلب غير موثّق')
         const dev = deviceOf(request)
-        if (!dev) throw new HttpError(403, 'تعذّر التعرّف على الجهاز')
-        // فحص السقف قبل كلمة المرور: الجهاز الزائد يُرفض بلا كشف أي شيء عن
+        // فحص السقف قبل كلمة المرور: التثبيت الزائد يُرفض بلا كشف أي شيء عن
         // صحة البيانات، فلا يتحول الطلب إلى مِجَسّ لكلمة المرور.
         const known = await ownerDevices(env)
-        const isNew = !known.includes(dev)
+        const isNew = !known.includes(installId)
         if (isNew && known.length >= MAX_OWNER_DEVICES) {
           await logSecurity(env, request, 'owner_device_limit',
-            `dev=${dev.slice(0, 10)} agents=${known.length}`)
+            `install=${installId.slice(0, 10)} agents=${known.length}`)
           throw new HttpError(403,
             `بلغت حدّ الأجهزة المسموح بها (${MAX_OWNER_DEVICES}) — أفرج عن جهاز من اللوحة ثم أعد المحاولة`)
         }
@@ -2684,12 +2904,12 @@ export default {
         // الهاتف الجديد يُسجَّل صريحاً في السجل: دخول من جهاز لم يُرَ قبل
         // ليس حدثاً صامتاً، ولو كانت كلمة المرور صحيحة.
         if (isNew) {
-          await registerOwnerDevice(env, dev)
-          await logSecurity(env, request, 'owner_device_new', `dev=${dev.slice(0, 10)}`)
+          await registerOwnerDevice(env, installId, dev)
+          await logSecurity(env, request, 'owner_device_new', `install=${installId.slice(0, 10)}`)
         }
         // وسم الجهاز صريحاً: هو ما يمنح المالك استحقاق دوراته، لا وجود رمز
         // اللوحة في الطلب. الجلسة قد تنتهي أو تُسحب، والوسم يبقى.
-        await markOwnerDevice(env, dev)
+        await markOwnerDevice(env, installId, dev)
         return json({
           ok: true,
           token,
@@ -3019,32 +3239,23 @@ export default {
           ? -1
           : await consumeFileOnce(env, ctx, request, caller, settings, fp, r2Key)
 
-        // كاش الحافة: النص المشفر ثابت لكل (ملف+إصدار) — فتح فوري في نفس المنطقة
-        // حتى على إنترنت ضعيف. الفحص الأمني والحصة يسبقان الكاش دائماً.
-        const cacheKey = new Request(
-          `https://x-edge.internal/enc/${encodeURIComponent(r2Key)}?e=${encodeURIComponent(headObj.etag)}`)
-        const hit = await caches.default.match(cacheKey)
-        if (hit) {
-          const h = new Headers(hit.headers)
-          h.set('x-quota-remaining', String(remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining))
-          h.set('x-cache', 'HIT')
-          h.set('cache-control', 'no-store')
-          return new Response(hit.body, { status: 200, headers: h })
-        }
+        // لا كاش حافة بعد الآن: كان الكاش يُخزّن النص المشفّر ثابتاً لكل
+        // (ملف+إصدار). مع الخدمة المباشرة صار الكاش يخزّن الملف نفسه، وهذا
+        // يقصّر عمر الكاش ويرفع خطر بقاء نسخة بعد تغيّر الصلاحية — فالكاش
+        // يُترك للشبكة (`no-store` يمنع الوسائط من تخزينه).
 
         const object = await env.SCHEMATICS.get(r2Key)
         if (!object?.body) throw new HttpError(404, 'file not found')
-        const plain = await object.arrayBuffer()
 
-        const nonce = await fileNonce(env, r2Key, headObj.etag)
-        const cipher = await crypto.subtle.encrypt(
-          { name: 'AES-CTR', counter: nonce, length: 64 },
-          await fileCryptoKey(env), plain)
-
+        // يُخدَم الملف كما هو فوق TLS — لا تشفير على مستوى التطبيق.
+        //
+        // كان يُشفَّر AES-CTR بمفتاح مضمَّن في الحزمة (`FileKey`)، ثم يفكّه
+        // التطبيق. هذا لم يكن يحمي شيئاً: المفتاح نفسه كان يُستخرج من الـAPK
+        // بأمر واحد، فمن وصل إلى الملف وصل إلى مفتاحه. والأسوأ أنه أوهم
+        // بأن هناك حماية بينما الأصل هو قناة TLS والتحقق من الجلسة والحصة.
+        // إزالة الطبقة تُبقي الحماية الحقيقية وتُزيل سرّاً مضمّناً من الحزمة.
         const headers = new Headers()
-        headers.set('content-type', 'application/octet-stream')
-        headers.set('x-enc', 'aes-ctr')
-        headers.set('x-enc-nonce', [...nonce].map(b => b.toString(16).padStart(2, '0')).join(''))
+        headers.set('content-type', headObj.httpMetadata?.contentType ?? 'application/octet-stream')
         headers.set('x-orig-type', headObj.httpMetadata?.contentType ?? 'application/octet-stream')
         headers.set('x-orig-size', String(headObj.size))
         headers.set('etag', headObj.etag)
@@ -3052,12 +3263,7 @@ export default {
         headers.set('x-quota-remaining', String(remaining === Number.MAX_SAFE_INTEGER ? -1 : remaining))
         headers.set('x-cache', 'MISS')
 
-        const response = new Response(cipher, { status: 200, headers })
-        if (cipher.byteLength < 128 * 1024 * 1024) {
-          const copy = response.clone()
-          copy.headers.set('cache-control', 'public, max-age=86400')
-          ctx.waitUntil(caches.default.put(cacheKey, copy))
-        }
+        const response = new Response(object.body, { status: 200, headers })
         return response
       }
 
@@ -3860,8 +4066,22 @@ export default {
         const auth = await authenticate(env, request)
         if (auth.caller.role !== 'owner') throw new HttpError(403, 'forbidden')
         const body = await request.json<any>().catch(() => ({}))
-        const target = String(body.deviceId ?? '').trim()
-        if (!/^[\w-]{8,64}$/.test(target)) throw new HttpError(400, 'deviceId مطلوب')
+        // الوسم مفتاحه install_id الآن. يُقبل deviceId للتوافق مع لوحة
+        // قديمة، لكن يُترجم إلى install_id أولاً: تمريره كما هو كان يفرّغ
+        // صفاً غير موجود فيبدو الإفراج ناجحاً والخانة مشغولة.
+        const installId = String(body.installId ?? '').trim()
+        const deviceId = String(body.deviceId ?? '').trim()
+        if (!/^[\w-]{8,80}$/.test(installId) && !/^[\w-]{8,64}$/.test(deviceId)) {
+          throw new HttpError(400, 'installId مطلوب')
+        }
+        let target = installId
+        if (!target) {
+          const row = await env.XDB.prepare(
+            'SELECT install_id FROM x_devices WHERE device_id = ?1 LIMIT 1'
+          ).bind(deviceId).first<{ install_id: string }>()
+          target = row?.install_id ?? ''
+        }
+        if (!target) throw new HttpError(404, 'التثبيت غير موجود')
         await releaseOwnerDevice(env, target)
         await logSecurity(env, request, 'owner_device_release', `target=${target.slice(0, 10)}`)
         return json({ ok: true })
@@ -3873,15 +4093,16 @@ export default {
       if (path === '/v1/owner/device/release' && request.method === 'POST') {
         const auth = await authenticate(env, request)
         if (auth.caller.role !== 'owner') throw new HttpError(403, 'forbidden')
-        await unmarkOwnerDevice(env, deviceOf(request))
+        await unmarkOwnerDevice(env, verifiedInstallOf(request))
         await logSecurity(env, request, 'owner_device_release')
         return json({ ok: true })
       }
 
       if (path === '/v1/learn/courses' && request.method === 'GET') {
         await rateLimit(env, request, 'learn_list', 240, 600)
-        const list = await coursesFor(env, deviceOf(request),
-          await ownerDevice(env, deviceOf(request)), settings.videosHidden)
+        const installId = verifiedInstallOf(request)
+        const list = await coursesFor(env, installId,
+          await ownerDevice(env, installId), settings.videosHidden)
         return json(
           { courses: list, telegramUrl: settings.telegramLink },
           200,
@@ -3893,8 +4114,11 @@ export default {
       // ويربط التمكين بالجهاز. الكود لا يُخزَّن صريحاً في أي رد أو سجل.
       if (path === '/v1/learn/redeem' && request.method === 'POST') {
         await rateLimit(env, request, 'learn_redeem', 10, 600)
+        // المنحة تُنسب إلى التثبيت الموثّق: `x-device-id` كان يكفي لفتح
+        // أي دورة بلا كود أصلاً، لأن من قرأ معرّف جهاز مشترك يضعه في طلبه.
+        const installId = verifiedInstallOf(request)
+        if (!installId) throw new HttpError(403, 'طلب غير موثّق')
         const dev = deviceOf(request)
-        if (!dev) throw new HttpError(400, 'معرّف الجهاز مفقود')
         const body = await request.json().catch(() => ({})) as { code?: string }
         const code = String(body.code ?? '').trim()
         // 20 محرفاً + شرطات. رفض الشكل أولاً يمنع إغراق القاعدة بمحاولات.
@@ -3906,15 +4130,15 @@ export default {
           .prepare('SELECT * FROM x_course_keys WHERE code_hash = ?1')
           .bind(hash).first<any>()
         if (!key || key.revoked) {
-          await logSecurity(env, request, 'learn_bad_key', `dev=${dev}`)
+          await logSecurity(env, request, 'learn_bad_key', `install=${installId}`)
           throw new HttpError(404, 'كود غير صحيح أو ملغى')
         }
         if (key.expires_at > 0 && Date.now() > key.expires_at) {
           throw new HttpError(410, 'انتهت صلاحية الكود')
         }
         const already = await env.XDB
-          .prepare('SELECT 1 x FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2')
-          .bind(dev, key.course_id).first<{ x: number }>()
+          .prepare('SELECT 1 x FROM x_course_grants WHERE install_id = ?1 AND course_id = ?2')
+          .bind(installId, key.course_id).first<{ x: number }>()
         if (!already) {
           // المفتاح لدورة واحدة: الربط بمفتاح واحد يمنع استخدام الكود نفسه
           // على عدة دورات، وmax_uses يحدّ عدد الأجهزة (1 افتراضياً).
@@ -3929,17 +4153,17 @@ export default {
                 SET used_count = used_count + 1, device_id = ?1, used_at = ?2
               WHERE id = ?3 AND used_count < max_uses
               RETURNING used_count`
-          ).bind(dev, new Date().toISOString(), key.id)
+          ).bind(dev || installId, new Date().toISOString(), key.id)
             .first<{ used_count: number }>()
           if (!claimed) {
             await logSecurity(env, request, 'learn_key_exhausted', `key=${key.id}`)
             throw new HttpError(409, 'الكود مستخدم على جهاز آخر')
           }
           await env.XDB.prepare(
-            `INSERT INTO x_course_grants (device_id, course_id, key_id, user_id, at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(device_id, course_id) DO NOTHING`
-          ).bind(dev, key.course_id, key.id, caller.uid, Date.now()).run()
+            `INSERT INTO x_course_grants (install_id, device_id, course_id, key_id, user_id, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(install_id, course_id) DO NOTHING`
+          ).bind(installId, dev, key.course_id, key.id, caller.uid, Date.now()).run()
         }
         const course = await env.XDB
           .prepare('SELECT title FROM x_courses WHERE id = ?1')
@@ -3973,10 +4197,10 @@ export default {
         // جهاز المالك نفسه. الدور وحده لا يفتح شيئاً: من سجّل بحساب المالك
         // على جهاز آخر لا يرث استحقاقه.
         const allowed = video.mode === 'free' ||
-          await courseUnlocked(env, deviceOf(request), video.course_id) ||
-          await ownerDevice(env, deviceOf(request))
+          await courseUnlocked(env, verifiedInstallOf(request), video.course_id) ||
+          await ownerDevice(env, verifiedInstallOf(request))
         if (!allowed) {
-          await logSecurity(env, request, 'learn_locked_stream', `video=${video.id} dev=${deviceOf(request)}`)
+          await logSecurity(env, request, 'learn_locked_stream', `video=${video.id} install=${verifiedInstallOf(request)}`)
           throw new HttpError(403, 'هذا الفيديو مقفل — افتح الدورة بمفتاح')
         }
 
@@ -3988,52 +4212,10 @@ export default {
 
         const obj = await env.XLEARN.get(video.object_key)
         if (!obj?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
-        const nonce = await fileNonce(env, video.object_key, obj.httpEtag ?? '')
         const mime = video.mime || 'video/mp4'
 
-        /**
-         * فكّ التشفير هنا، لا في المشغّل.
-         *
-         * السبب: `video_player` لا يفكّ AES-CTR، والحلّ السابق كان تنزيل الملف
-         * كاملاً ثم فكّه وحفظه عند العميل — أي كاش كامل بالميغابايت يخالف
-         * المطلوب. بفكّه على الخادم تُخدم البايتات الأصلية مباشرة بدعم Range،
-         * فيبثّ المشغّل نفسه من هذه النقطة ويرجّع موضعه بلا أي ملف وسيط.
-         *
-         * لا تُرسل ترويسات `x-enc` إطلاقاً: العميل يفترض نصّاً عادياً الآن.
-         * النوع `video/mp4` صريح كي يعرف المشغّل أنه مقطع مباشر فيبدأ فوراً.
-         */
-        const CHUNK = 64 * 1024            // 64KB: مضاعف لـ16 بايت ولا شقّ لكتلة
-        const key = await fileCryptoKey(env)
-
-        async function chunkAt(offset: number, len: number): Promise<Uint8Array> {
-          // AES-CTR يتقدّم بالكتل: العدّاد لا يعرف «نصف كتلة». طلب Range من
-          // إزاحة غير مضاعفة لـ16 كان سيفكّ أول كتلة بمفتاح خاطئ فيخرج رأس
-          // الفيديو مشوّهاً. الحل: ننزل إلى بداية الكتلة ثم نحذف الزائد.
-          const aligned = offset - (offset % 16)
-          const lead = offset - aligned
-          const range = await env.XLEARN.get(video.object_key, {
-            range: { offset: aligned, length: lead + len }
-          })
-          if (!range?.body) return new Uint8Array(0)
-          // عدّاد القطعة = nonce + (offset / 16) — المشتقّ من الإزاحة المطلقة،
-          // فكل قطعة تُفكّ مستقلة عن سابقاتها وهذا ما يجعل Range ممكناً.
-          const ctr = new Uint8Array(nonce)
-          ctr.fill(0, 8)
-          let carry = BigInt(aligned / 16)
-          for (let i = 15; i >= 8; i--) {
-            ctr[i] = Number(carry & 0xffn)
-            carry >>= 8n
-          }
-          const dec = await crypto.subtle.decrypt(
-            { name: 'AES-CTR', counter: ctr, length: 64 },
-            key, await range.arrayBuffer())
-          const out = new Uint8Array(dec)
-          return lead > 0 ? out.subarray(lead) : out
-        }
-
         // دعم Range: المشغّل يطلب البداية القليلة ليعرض فوراً ثم يواصل الباقي
-        // في الخلفية. AES-CTR يسمح بالبدء من أي إزاحة لأن عدّاد كل قطعة
-        // مُشتقّ من الإزاحة المطلقة، فالتشغيل لا ينتظر تنزيل الملف كاملاً.
+        // في الخلفية. نمرّر المدى إلى R2 نفسه بدل تنزيل الملف كاملاً.
         const size = obj.size ?? 0
         let start = 0
         let end = size > 0 ? size - 1 : 0
@@ -4046,7 +4228,6 @@ export default {
               start = Number(m[1])
               if (m[2]) end = Number(m[2])
             } else {
-              // صيغة اللاحقة `bytes=-N`: آخر N بايت.
               start = Math.max(0, size - Number(m[2]))
             }
             end = Math.min(end, size - 1)
@@ -4061,19 +4242,14 @@ export default {
         }
         const span = size > 0 ? end - start + 1 : 0
 
-        let offset = start
-        const body = span > CHUNK
-          ? new ReadableStream<Uint8Array>({
-              async pull(controller) {
-                if (offset > end) { controller.close(); return }
-                const len = Math.min(CHUNK, end - offset + 1)
-                const bytes = await chunkAt(offset, len)
-                if (!bytes.length) { controller.close(); return }
-                offset += len
-                controller.enqueue(bytes)
-              }
+        // الملف مخزّن نصّاً صريحاً، فالتمرير مباشر: يُعاد نفس جسم R2 بلا فكّ
+        // ولا وسيط. هذا ما يجعل البداية فورية والتقديم/التأخير بلا إعادة تنزيل.
+        const ranged = partial && size > 0
+          ? await env.XLEARN.get(video.object_key, {
+              range: { offset: start, length: span }
             })
-          : await chunkAt(start, span)
+          : obj
+        if (!ranged?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
 
         const headers = new Headers({
           // النوع الأصلي صريحاً: `application/octet-stream` كان يجعل المشغّل
@@ -4088,7 +4264,7 @@ export default {
           headers.set('content-length', String(span))
           if (partial) headers.set('content-range', `bytes ${start}-${end}/${size}`)
         }
-        return new Response(body, { status: partial ? 206 : 200, headers })
+        return new Response(ranged.body, { status: partial ? 206 : 200, headers })
       }
 
       // غلاف الدورة. صورة عرض عامة بطبيعتها، لكنها تمرّ من هنا كي لا
@@ -4803,8 +4979,11 @@ export default {
             `SELECT id, course_id, label, max_uses, used_count, device_id, expires_at, revoked, created_at
              FROM x_course_keys ORDER BY created_at DESC LIMIT 500`
           ).all<any>()
+          // يُعرض المعرّفان: install_id هو ما يُسحب فعلاً، وdevice_id
+          // للعرض فقط لأن المالك يتعرّف على أجهزته به. لو عرضنا device_id
+          // وحده لصار زر السحب بلا أثر — فهو لا يحكم المنحة.
           const grants = await env.XDB.prepare(
-            `SELECT device_id, course_id, key_id, user_id, at
+            `SELECT install_id, device_id, course_id, key_id, user_id, at
              FROM x_course_grants ORDER BY at DESC LIMIT 500`
           ).all<any>()
 
@@ -4859,7 +5038,10 @@ export default {
               expiresAt: k.expires_at, revoked: !!k.revoked, createdAt: k.created_at,
             })),
             subscribers: (grants.results ?? []).map(g => ({
-              deviceId: g.device_id, shortId: `${g.device_id.slice(0, 8)}…`,
+              // installId هو ما يُسحب به فعلاً؛ deviceId للعرض فقط لأن
+              // المالك يتعرّف على أجهزته به.
+              installId: g.install_id, deviceId: g.device_id,
+              shortId: `${(g.device_id || g.install_id || '').slice(0, 8)}…`,
               courseId: g.course_id, courseTitle: titleOf.get(g.course_id) ?? '',
               keyId: g.key_id, userId: g.user_id, at: g.at,
             })),
@@ -5445,14 +5627,26 @@ export default {
         // لتغيير أي شيء في جهازه، ولو كان الفيديو محمّلاً عنده.
         if (path === '/v1/owner/learn/revoke' && request.method === 'POST') {
           const b = await request.json<any>().catch(() => ({}))
-          const deviceId = String(b.deviceId ?? '')
-          const courseId = String(b.courseId ?? '')
-          if (!deviceId || !courseId) throw new HttpError(400, 'deviceId و courseId مطلوبان')
-          await env.XDB.prepare(
-            'DELETE FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2'
-          ).bind(deviceId, courseId).run()
+          // يُقبل installId، وdeviceId احتياطاً للنسخ القديمة من اللوحة:
+          // حذف بمعرّف لا يحكم المنحة كان يُبلّغ بنجاح بلا حذف شيء، فيظنّ
+          // المالك أنه سحب الوصول والوصول باقٍ.
+          const installId = String(b.installId ?? '').trim()
+          const deviceId = String(b.deviceId ?? '').trim()
+          const courseId = String(b.courseId ?? '').trim()
+          if ((!installId && !deviceId) || !courseId) {
+            throw new HttpError(400, 'installId و courseId مطلوبان')
+          }
+          if (installId) {
+            await env.XDB.prepare(
+              'DELETE FROM x_course_grants WHERE install_id = ?1 AND course_id = ?2'
+            ).bind(installId, courseId).run()
+          } else {
+            await env.XDB.prepare(
+              'DELETE FROM x_course_grants WHERE device_id = ?1 AND course_id = ?2'
+            ).bind(deviceId, courseId).run()
+          }
           await logSecurity(env, request, 'owner_learn_revoke',
-            `dev=${deviceId} course=${courseId}`)
+            `install=${installId || '-'} dev=${deviceId || '-'} course=${courseId}`)
           return sealed({ ok: true })
         }
 

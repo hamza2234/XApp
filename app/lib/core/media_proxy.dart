@@ -78,7 +78,7 @@ class MediaProxy {
       if (range != null) proxied.headers['range'] = range;
       final accept = req.headers.value('accept');
       if (accept != null) proxied.headers['accept'] = accept;
-      proxied.headers.addAll(api.streamHeadersFor(path));
+      proxied.headers.addAll(await api.streamHeadersFor(path));
 
       client = http.Client();
       final upstream = await client

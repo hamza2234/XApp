@@ -292,7 +292,13 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 final list = splitModelLines(models.text)
                     .map((e) => e.toLowerCase())
                     .toList();
-                if (list.isEmpty) return;
+                // الحفظ بصمت عند قائمة فارغة كان يُوهم المالك أن الزرّ لا
+                // يعمل. نقول له السبب صراحةً.
+                if (list.isEmpty) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                      content: Text('اكتب موديلاً واحداً على الأقل')));
+                  return;
+                }
                 try {
                   await widget.api
                       .ownerCompatAdd(brand: widget.brand.ref, rows: [
@@ -316,15 +322,34 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ),
       ),
     );
-    if (ok == true) await _ownerRefresh();
+    if (ok == true) await _ownerRefresh(done: 'تمت إضافة الصفّ');
   }
 
   /// بعد أي تحرير: نعيد تنفيذ البحث نفسه بنفس النص، فيرى المالك النتيجة
   /// النهائية كما يراها المستخدم — لا انعكاس محلي قد يخفي فشل الحفظ.
-  Future<void> _ownerRefresh() async {
+  ///
+  /// وإن كان نصّ البحث أقصر من الحدّ فلا نتائج تُحدَّث أصلاً؛ الرسالة وحدها
+  /// تُطمئن المالك أن الحفظ وقع فعلاً بدل صمت يُوهمه بالفشل.
+  Future<void> _ownerRefresh({String? done}) async {
     final q = _query.trim();
-    if (q.length < _minQuery) return;
+    if (q.length < _minQuery) {
+      if (done != null) _ownerToast(done);
+      return;
+    }
     await _search(q);
+    if (done != null) _ownerToast(done);
+  }
+
+  void _ownerToast(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(m),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: XTheme.ok,
+        duration: const Duration(seconds: 2),
+      ));
   }
 
   Future<void> _ownerEditRow(CompatRecord r) async {
@@ -380,7 +405,13 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 final list = splitModelLines(models.text)
                     .map((e) => e.toLowerCase())
                     .toList();
-                if (list.isEmpty) return;
+                // الحفظ بصمت عند قائمة فارغة كان يُوهم المالك أن الزرّ لا
+                // يعمل. نقول له السبب صراحةً.
+                if (list.isEmpty) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                      content: Text('اكتب موديلاً واحداً على الأقل')));
+                  return;
+                }
                 try {
                   await widget.api.ownerCompatPatch(
                     brand: widget.brand.ref,
@@ -405,7 +436,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ),
       ),
     );
-    if (ok == true) await _ownerRefresh();
+    if (ok == true) await _ownerRefresh(done: 'تم حفظ التعديل');
   }
 
   Future<void> _ownerDeleteRow(CompatRecord r) async {
@@ -429,7 +460,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     if (ok != true) return;
     try {
       await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: r.id);
-      await _ownerRefresh();
+      await _ownerRefresh(done: 'تم حذف الصفّ');
     } on ApiException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)

@@ -8,6 +8,7 @@ import 'brand_logo.dart';
 import 'compat_brand_screen.dart';
 import 'subscribe_dialog.dart';
 import 'external_link.dart';
+import 'cached_image.dart';
 
 /// شاشة التوافقات — لوحة إعلانات أعلى + شبكة الشركات (توافقات نصية فقط)
 class CompatScreen extends StatefulWidget {
@@ -92,11 +93,11 @@ class _CompatScreenState extends State<CompatScreen>
   /// صورة الإعلان — الروابط النسبية /v1/media/ تُحمَّل بطلب موقّع
   Widget _adImage(String url) {
     if (url.startsWith('/')) {
-      return Image.network(
-        '$kApiBase$url',
+      return SignedImage(
+        api: widget.api,
+        path: url,
         fit: BoxFit.cover,
-        headers: widget.api.signFor('GET', url),
-        errorBuilder: (_, __, ___) => Container(color: XTheme.surface2),
+        errorBuilder: () => Container(color: XTheme.surface2),
       );
     }
     return Image.network(url,

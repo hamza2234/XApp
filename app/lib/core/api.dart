@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart' as cg;
 import 'package:http/http.dart' as http;
 import 'config.dart';
 import 'models.dart';
+import 'signer.dart';
 import 'store.dart';
 
 /// فك تشفير ردود لوحة المالك.
@@ -88,13 +88,14 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-/// عميل HTTP يوقّع كل طلب بـ HMAC-SHA256 ويربطه بالجهاز والإصدار.
+/// عميل HTTP يوقّع كل طلب بمفتاح Ed25519 خاص بالتثبيت ويربطه بالجهاز.
 /// لا تُرسل أي طلبات خارج Worker التطبيق.
 class Api {
-  Api(this.store) {
+  Api(this.store) : _signer = RequestSigner(store) {
     current = this;
   }
   final Store store;
+  final RequestSigner _signer;
 
   /// آخر عميل أُنشئ — نقطة وصول واحدة لمعالج الدفع.
   static Api? current;
@@ -105,15 +106,20 @@ class Api {
   /// رابطاً جديداً لكل صورة في كل إطار. Flutter يخزّن الصور بمفتاح يشمل
   /// الترويسات، فتغيّرها يُبطل التخزين ويُعيد التنزيل — وهذا سبب ارتجاف
   /// الصور واهتزاز القائمة عند الكتابة أو كل دورة تحديث. ترويسة ثابتة داخل
-  /// نافذة الصلاحية (10 دقائق في الخادم) تُعيد التخزين إلى العمل.
+  /// نافذة الصلاحية تُعيد التخزين إلى العمل.
   final _sigCache = <String, Map<String, String>>{};
   final _sigCacheAt = <String, int>{};
 
-  /// صلاحية ترويسة الوسائط — أقصر من نافذة الخادم (10 دقائق) بهامش أمان
+  /// صلاحية ترويسة الوسائط — أقصر من نافذة الخادم (دقيقتان) بهامش أمان
   /// يستوعب فرق ساعة الجهاز، فلا يُرفض رابط ثُبّت لتوّه.
-  static const _mediaSigTtlMs = 6 * 60 * 1000;
+  static const _mediaSigTtlMs = 90 * 1000;
 
-  Map<String, String> signFor(String method, String pathWithQuery) {
+  /// توقيع جاهز لمسار — غير متزامن لأن التوقيع بمفتاح التثبيت.
+  ///
+  /// التخزين المؤقت ضروري لا تحسيناً: بناء قائمة صور يطلب التوقيع لكل عنصر
+  /// في كل إطار، وتوقيع Ed25519 لكل طلب كان يجعل التمرير ثقيلاً.
+  Future<Map<String, String>> signFor(String method, String pathWithQuery,
+      {List<int>? body}) async {
     // الجلسة جزء من المفتاح: تخزين ترويسة تحمل رمز جلسة قديم بعد تبديل
     // الحساب يعني تحميل وسائط بصلاحية من سجّل خروجه — وهذا خلل أمني لا
     // مجرّد خطأ عرض. تغيّر الرمز يُبطل المفتاح فيُوقَّع من جديد فوراً.
@@ -123,7 +129,7 @@ class Api {
     if (cached != null && now - (_sigCacheAt[key] ?? 0) < _mediaSigTtlMs) {
       return cached;
     }
-    final fresh = _sign(method, pathWithQuery);
+    final fresh = await _sign(method, pathWithQuery, body: body);
     // حدّ أعلى للمفاتيح: كل قسم/صورة مدخل، وقائمة بلا سقف تنمو بلا نهاية
     // في جلسة طويلة. 256 مدخلاً تكفي شاشات مفتوحة فعلياً.
     if (_sigCache.length >= 256) {
@@ -135,25 +141,12 @@ class Api {
     return fresh;
   }
 
-  Map<String, String> _sign(String method, String pathWithQuery) {
-    final ts = DateTime.now().millisecondsSinceEpoch.toString();
-    final dev = store.deviceId;
-    final fp = store.fingerprint;
-    // البصمة داخل التوقيع حين تتوفر: تُربط بالطلب فلا يستطيع أحد تبديلها
-    // للحصول على منحة يومية جديدة.
-    final payload = fp.isEmpty
-        ? '$dev|$ts|$method|$pathWithQuery'
-        : '$dev|$fp|$ts|$method|$pathWithQuery';
-    final sig = Hmac(sha256, utf8.encode(SigKey.secret))
-        .convert(utf8.encode(payload))
-        .toString();
+  /// التوقيع الفعلي — يفوّض للموقّع ذي المفتاح الخاص بالتثبيت.
+  Future<Map<String, String>> _sign(String method, String pathWithQuery,
+      {List<int>? body}) async {
+    final base = await _signer.headers(method, pathWithQuery, body: body);
     return {
-      'x-device-id': dev,
-      if (fp.isNotEmpty) 'x-device-fp': fp,
-      'x-app-ts': ts,
-      'x-app-sig': sig,
-      'x-app-version': '$kAppVersion',
-      'User-Agent': 'X-App/$kAppVersionName',
+      ...base,
       // جلسة المالك تُقدَّم أولاً: الخادم يميّزها بسرّها المستقل، وبدونها
       // كان المالك يُعامَل كمشترك بلا استحقاق فيُحجب عنه بثّ دوراته المقفلة.
       if (store.ownerToken != null && store.ownerToken!.isNotEmpty)
@@ -165,7 +158,7 @@ class Api {
 
   /// توقيع طلبات التعلّم. التوقيع الأساسي يعرّف المالك أصلاً (انظر [_sign])،
   /// وهذا الغلاف موجود ليبقى نية طلبات الدورات صريحة في موضع النداء.
-  Map<String, String> _signLearn(String method, String pathWithQuery) =>
+  Future<Map<String, String>> _signLearn(String method, String pathWithQuery) =>
       _sign(method, pathWithQuery);
 
   /// عنوان مطلق لمسار بثّ داخل الخادم — تستعمله وكيل الوسائط المحلي.
@@ -176,7 +169,8 @@ class Api {
   /// التوقيع يحمل طابعاً زمنياً يُرفض بعد 10 دقائق، فلا يصلح ترويسة ثابتة
   /// تُمرَّر للمشغّل مرة واحدة: التشغيل الطويل ينقطع في المنتصف. يستدعي هذا
   /// من الوكيل المحلي عند **كل** طلب قطعة، فيبقى التوقيع صالحاً دائماً.
-  Map<String, String> streamHeadersFor(String path) => _signLearn('GET', path);
+  Future<Map<String, String>> streamHeadersFor(String path) =>
+      _signLearn('GET', path);
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final base = Uri.parse(kApiBase);
@@ -192,7 +186,7 @@ class Api {
     final uri = _uri(path, query);
     final pq = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
     final res = await http
-        .get(uri, headers: _sign('GET', pq))
+        .get(uri, headers: await _sign('GET', pq))
         .timeout(timeout ?? const Duration(seconds: 30));
     return _decode(res);
   }
@@ -201,10 +195,16 @@ class Api {
       {Map<String, String>? query, Duration? timeout}) async {
     final uri = _uri(path, query);
     final pq = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
+    final encoded = jsonEncode(body);
     final res = await http
         .post(uri,
-            headers: {..._sign('POST', pq), 'Content-Type': 'application/json'},
-            body: jsonEncode(body))
+            // بصمة الجسم جزء من التوقيع: إرسال الجسم بلا توقيعه يعني رفض
+            // الطلب بـ«توقيع غير صالح» على كل POST في التطبيق.
+            headers: {
+              ...await _sign('POST', pq, body: utf8.encode(encoded)),
+              'Content-Type': 'application/json',
+            },
+            body: encoded)
         .timeout(timeout ?? const Duration(seconds: 30));
     return _decode(res);
   }
@@ -218,9 +218,13 @@ class Api {
     final uri = _uri(path);
     final res = await (switch (method) {
       'PUT' => http.put(uri,
-          headers: {..._sign('PUT', uri.path), 'Content-Type': 'application/json'},
+          headers: {
+            ...await _sign('PUT', uri.path,
+                body: body == null ? null : utf8.encode(jsonEncode(body))),
+            'Content-Type': 'application/json',
+          },
           body: body == null ? null : jsonEncode(body)),
-      'DELETE' => http.delete(uri, headers: _sign('DELETE', uri.path)),
+      'DELETE' => http.delete(uri, headers: await _sign('DELETE', uri.path)),
       _ => throw ArgumentError(method),
     }).timeout(const Duration(seconds: 30));
     return _decode(res);
@@ -231,26 +235,15 @@ class Api {
       String path) async {
     final uri = _uri(path);
     final res = await http
-        .get(uri, headers: _sign('GET', uri.path))
+        .get(uri, headers: await _sign('GET', uri.path))
         .timeout(const Duration(minutes: 3));
     if (res.statusCode != 200) {
       throw ApiException(res.statusCode, _errMsg(res));
     }
-    var bytes = res.bodyBytes;
-    var contentType = res.headers['content-type'] ?? '';
-
-    // فك AES-CTR — الخادم يخدم الملفات مشفرة دائماً
-    if (res.headers['x-enc'] == 'aes-ctr') {
-      final nonceHex = res.headers['x-enc-nonce'] ?? '';
-      final nonce = Uint8List.fromList(List<int>.generate(nonceHex.length ~/ 2,
-          (i) => int.parse(nonceHex.substring(i * 2, i * 2 + 2), radix: 16)));
-      final algo =
-          cg.AesCtr.with256bits(macAlgorithm: cg.MacAlgorithm.empty);
-      final box = cg.SecretBox(bytes, nonce: nonce, mac: cg.Mac.empty);
-      bytes = Uint8List.fromList(
-          await algo.decrypt(box, secretKey: cg.SecretKey(FileKey.bytes)));
-      contentType = res.headers['x-orig-type'] ?? 'application/octet-stream';
-    }
+    final bytes = res.bodyBytes;
+    final contentType = res.headers['content-type'] ??
+        res.headers['x-orig-type'] ??
+        'application/octet-stream';
     return (
       bytes: bytes,
       quotaLeft: int.tryParse(res.headers['x-quota-remaining'] ?? '') ?? -1,
@@ -258,15 +251,16 @@ class Api {
     );
   }
 
-  /// ينزّل بثّ الفيديو ويفكّ تشفيره على شكل دفق إلى ملف.
+  /// ينزّل بثّ الفيديو على شكل دفق إلى ملف.
   ///
-  /// لماذا دفق مزدوج: فيديو بمئات الميغابايت كان يُجلب كاملاً (`bodyBytes`)
-  /// ثم يُفكّ كاملاً في الذاكرة — ذروتان متتاليتان بحجم الملف نفسه. هنا
-  /// يمرّ من الذاكرة ما يلزم للقطعة الحالية فقط، فيعمل الفيديو نفسه على
-  /// جهاز بذاكرة صغيرة.
+  /// لماذا دفق: فيديو بمئات الميغابايت كان يُجلب كاملاً (`bodyBytes`) ثم
+  /// يُكتب. هنا يمرّ من الذاكرة ما يلزم للقطعة الحالية فقط، فيعمل الفيديو
+  /// نفسه على جهاز بذاكرة صغيرة.
   ///
-  /// `AesCtr.decryptStream` يزحف بعدّاده مع كل قطعة، مطابقاً لتشفير الخادم
-  /// المقسّم، فالقطع المتسلسلة تُفكّ كملف واحد متصل.
+  /// لا فكّ تشفير في العميل: كان الملف يُشفَّر بمفتاح مضمَّن في الحزمة
+  /// (`FileKey`) ثم يُفكّ هنا. المفتاح كان يُستخرج من الـAPK، فلم يكن يمنع
+  /// أحداً. الحماية الفعلية هي TLS + جلسة صالحة + كود المالك، وكلها على
+  /// الخادم.
   ///
   /// يعيد: عدد البايتات المكتوبة، ونوع المحتوى الأصلي.
   /// يرمي [ApiException] عند فشل الشبكة أو رفض الخادم.
@@ -280,7 +274,7 @@ class Api {
     File? tmp;
     try {
       final req = http.Request('GET', uri)
-        ..headers.addAll(_signLearn('GET', uri.path));
+        ..headers.addAll(await _signLearn('GET', uri.path));
       final res = await client
           .send(req)
           .timeout(const Duration(minutes: 5));
@@ -291,10 +285,10 @@ class Api {
             _errMsgFromBody(body, res.statusCode));
       }
 
-      final nonceHex = res.headers['x-enc-nonce'] ?? '';
-      final encrypted = res.headers['x-enc'] == 'aes-ctr';
       final total = int.tryParse(res.headers['content-length'] ?? '') ?? 0;
-      final contentType = res.headers['x-orig-type'] ?? 'video/mp4';
+      final contentType = res.headers['x-orig-type'] ??
+          res.headers['content-type'] ??
+          'video/mp4';
 
       // نكتب أولاً إلى ملف جانبي: لو انقطع الاتصال في المنتصف لم يبقَ ملف
       // ناقص يُظنّ لاحقاً أنه فيديو كامل وشغّل نصف مقطع.
@@ -302,25 +296,9 @@ class Api {
       final sink = tmp.openWrite();
       var received = 0;
       try {
-        final source = onProgress == null && !encrypted
-            ? res.stream
-            : res.stream.map((c) {
-                received += c.length;
-                onProgress?.call(received, total);
-                return c;
-              });
-
-        final out = encrypted
-            ? cg.AesCtr.with256bits(macAlgorithm: cg.MacAlgorithm.empty)
-                .decryptStream(
-                source,
-                secretKey: cg.SecretKey(FileKey.bytes),
-                nonce: _hexToBytes(nonceHex),
-                mac: cg.Mac.empty,
-              )
-            : source;
-
-        await for (final chunk in out) {
+        await for (final chunk in res.stream) {
+          received += chunk.length;
+          onProgress?.call(received, total);
           sink.add(chunk);
         }
       } finally {
@@ -338,15 +316,14 @@ class Api {
     } finally {
       client.close();
       // ملف جانبي متبقٍ بعد فشل: يُنظَّف هنا بلا استثناء.
-      try {
-        if (tmp != null && await tmp.exists()) await tmp.delete();
-      } catch (_) {}
+      if (tmp != null && await tmp.exists()) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+      }
     }
   }
 
-  static Uint8List _hexToBytes(String hex) => Uint8List.fromList(
-      List<int>.generate(hex.length ~/ 2,
-          (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16)));
 
   /// رسالة الخطأ من جسم لم تُفكّ ترميزه بعد — تُستعمل مع الاستجابات المتدفقة.
   String _errMsgFromBody(String body, int status) {
@@ -377,39 +354,29 @@ class Api {
 
   // ===== لوحة المالك: جلسة معزولة وردود مشفّرة =====
 
+  /// جسم الطلب بصيغة البايتات المرسلة فعلاً — للتوقيع.
+  static List<int>? _enc(Map<String, dynamic>? body) =>
+      body == null ? null : utf8.encode(jsonEncode(body));
+
   /// ترويسات جلسة المالك — تُستخدم لطلبات اللوحة وحدها.
-  Map<String, String> _ownerSign(String method, String pathWithQuery) {
-    final ts = DateTime.now().millisecondsSinceEpoch.toString();
-    final dev = store.deviceId;
-    final fp = store.fingerprint;
-    final payload = fp.isEmpty
-        ? '$dev|$ts|$method|$pathWithQuery'
-        : '$dev|$fp|$ts|$method|$pathWithQuery';
-    final sig = Hmac(sha256, utf8.encode(SigKey.secret))
-        .convert(utf8.encode(payload))
-        .toString();
-    return {
-      'x-device-id': dev,
-      if (fp.isNotEmpty) 'x-device-fp': fp,
-      'x-app-ts': ts,
-      'x-app-sig': sig,
-      'x-app-version': '$kAppVersion',
-      'User-Agent': 'X-App/$kAppVersionName',
-      'Authorization': 'Bearer ${store.ownerToken}',
-    };
+  Future<Map<String, String>> _ownerSign(String method, String pathWithQuery,
+      {List<int>? body}) async {
+    final base = await _signer.headers(method, pathWithQuery, body: body);
+    return {...base, 'Authorization': 'Bearer ${store.ownerToken}'};
   }
 
   /// دخول المالك — مسار معزول يعيد جلسة بسرّ مستقل.
   Future<Map<String, dynamic>> ownerLogin(
       String username, String password) async {
     final uri = _uri('/v1/owner/login');
+    final payload = jsonEncode({'username': username, 'password': password});
     final res = await http
         .post(uri,
             headers: {
-              ..._sign('POST', uri.path),
+              ...await _sign('POST', uri.path, body: utf8.encode(payload)),
               'Content-Type': 'application/json'
             },
-            body: jsonEncode({'username': username, 'password': password}))
+            body: payload)
         .timeout(const Duration(seconds: 30));
     return _decode(res);
   }
@@ -437,7 +404,7 @@ class Api {
     final uri = _uri(path, query);
     final pq = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
     final res = await http
-        .get(uri, headers: _ownerSign('GET', pq))
+        .get(uri, headers: await _ownerSign('GET', pq))
         .timeout(const Duration(seconds: 30));
     return _ownerDecode(res);
   }
@@ -448,17 +415,17 @@ class Api {
     final res = await (switch (method) {
       'POST' => http.post(uri,
           headers: {
-            ..._ownerSign('POST', uri.path),
+            ...await _ownerSign('POST', uri.path, body: _enc(body)),
             'Content-Type': 'application/json'
           },
           body: body == null ? null : jsonEncode(body)),
       'PUT' => http.put(uri,
           headers: {
-            ..._ownerSign('PUT', uri.path),
+            ...await _ownerSign('PUT', uri.path, body: _enc(body)),
             'Content-Type': 'application/json'
           },
           body: body == null ? null : jsonEncode(body)),
-      'DELETE' => http.delete(uri, headers: _ownerSign('DELETE', uri.path)),
+      'DELETE' => http.delete(uri, headers: await _ownerSign('DELETE', uri.path)),
       _ => throw ArgumentError(method),
     }).timeout(const Duration(seconds: 30));
     return _ownerDecode(res);
@@ -473,7 +440,7 @@ class Api {
       {String contentType = 'application/octet-stream'}) async {
     final uri = _uri(path);
     final headers = {
-      ..._ownerSign(method, uri.path),
+      ...await _ownerSign(method, uri.path, body: bytes),
       'Content-Type': contentType,
     };
     final res = await (switch (method) {
@@ -544,6 +511,37 @@ class Api {
       });
 
   Future<Map<String, dynamic>> me() => get('/v1/me');
+
+  /// يهيّئ هوية التوقيع: يولّد زوج المفاتيح ويسجّل العام على الخادم.
+  ///
+  /// يُستدعى في الإقلاع قبل أي طلب آخر. التسجيل نفسه غير موقّع — لا يمكن
+  /// توقيع طلب بمفتاح لم يُسجَّل بعد — وهو الطلب الوحيد المستثنى في الخادم.
+  Future<void> initSigningKey() async {
+    await _signer.ensureKey((installId, publicKey) async {
+      // نداء مباشر بلا توقيع: الموقّع لم يُجهَّز بعد.
+      final uri = _uri('/v1/install/key');
+      final res = await http
+          .post(uri,
+              headers: {
+                'Content-Type': 'application/json',
+                'x-device-id': store.deviceId,
+                'x-app-version': '$kAppVersion',
+                'User-Agent': 'X-App/$kAppVersionName',
+              },
+              body: jsonEncode({
+                'installId': installId,
+                'publicKey': publicKey,
+                'appVersion': '$kAppVersion',
+              }))
+          .timeout(const Duration(seconds: 30));
+      // 409 يعني أن هذا التثبيت سُجّل بمفتاح آخر (أُعيد ضبط البيانات مع
+      // بقاء المعرّف). لا يُحلّ بصمت: نرمي ليُعاد التوليد بمعرّف جديد في
+      // الإقلاع التالي بدل أن يبقى التطبيق بلا توقيع صالح.
+      if (res.statusCode != 200) {
+        throw ApiException(res.statusCode, _errMsg(res));
+      }
+    });
+  }
 
   /// المطالبة بهدية الحصة اليومية.
   ///
@@ -867,7 +865,7 @@ class Api {
     final res = await http
         .put(uri,
             headers: {
-              ..._sign('PUT', uri.path),
+              ...await _sign('PUT', uri.path, body: body),
               'Content-Type': 'application/octet-stream',
             },
             body: body)
@@ -1015,9 +1013,14 @@ class Api {
       ownerSend('DELETE', '/v1/owner/learn/key/$id', null);
 
   /// يسحب تمكين مشترك — ينقطع وصوله فوراً بلا أي إجراء على جهازه.
-  Future<void> ownerRevokeCourseGrant(String deviceId, String courseId) =>
+  ///
+  /// `installId` هو ما يحكم المنحة فعلاً. `deviceId` يبقى احتياطاً للنسخ
+  /// القديمة من اللوحة، لكن الاعتماد عليه وحده كان يُبلّغ بنجاح بلا حذف.
+  Future<void> ownerRevokeCourseGrant(String installId, String courseId,
+          {String deviceId = ''}) =>
       ownerSend('POST', '/v1/owner/learn/revoke', {
-        'deviceId': deviceId,
+        if (installId.isNotEmpty) 'installId': installId,
+        if (deviceId.isNotEmpty) 'deviceId': deviceId,
         'courseId': courseId,
       });
 

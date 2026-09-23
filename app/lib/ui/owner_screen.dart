@@ -11,6 +11,7 @@ import '../core/store.dart';
 import 'theme.dart';
 import 'biometric_gate.dart';
 import 'brand_logo.dart';
+import 'cached_image.dart';
 
 /// نسخ معرّف الجهاز — يُستخدم من عدة تبويبات في لوحة المالك.
 Future<void> copyDeviceId(BuildContext context, String value) async {
@@ -3715,15 +3716,16 @@ class _CoursesTabState extends State<_CoursesTab>
     }
   }
 
-  /// سحب تمكين مشترك — الأثر فوري: الطلب التالي من جهازه يُرفض.
-  Future<void> _revokeGrant(String deviceId, String courseId,
-      String title) async {
+  /// سحب تمكين مشترك — الأثر فوري: الطلب التالي من تثبيته يُرفض.
+  Future<void> _revokeGrant(String installId, String courseId,
+      String title, {String deviceId = ''}) async {
     final ok = await _confirm('سحب الوصول؟',
         'سيفقد هذا الجهاز الوصول إلى «$title» فوراً، حتى لو كان الفيديو '
         'محمّلاً عنده. يمكنك منحه مفتاحاً جديداً لاحقاً.');
     if (ok != true) return;
     try {
-      await widget.api.ownerRevokeCourseGrant(deviceId, courseId);
+      await widget.api.ownerRevokeCourseGrant(installId, courseId,
+          deviceId: deviceId);
       _toast('سُحب الوصول');
       await _load();
     } catch (e) {
@@ -3895,12 +3897,11 @@ class _CoursesTabState extends State<_CoursesTab>
                             ? XTheme.ok
                             : XTheme.gold,
                       )
-                    : Image.network(
-                        '${kApiBase}${v['thumbUrl']}',
-                        headers: widget.api
-                            .signFor('GET', '${v['thumbUrl']}'),
+                    : SignedImage(
+                        api: widget.api,
+                        path: '${v['thumbUrl']}',
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Icon(
+                        errorBuilder: () => Icon(
                             Icons.image_not_supported_outlined,
                             size: 16, color: XTheme.textDim),
                       ),
@@ -4087,8 +4088,9 @@ class _CoursesTabState extends State<_CoursesTab>
               ),
               trailing: TextButton.icon(
                 onPressed: () => _revokeGrant(
-                    '${s['deviceId']}', '${s['courseId']}',
-                    '${s['courseTitle']}'),
+                    '${s['installId'] ?? ''}', '${s['courseId']}',
+                    '${s['courseTitle']}',
+                    deviceId: '${s['deviceId'] ?? ''}'),
                 icon: const Icon(Icons.remove_circle_outline, size: 16),
                 label: const Text('سحب'),
                 style: TextButton.styleFrom(foregroundColor: XTheme.danger),
@@ -4144,11 +4146,11 @@ class _CourseCoverButton extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: hasCover
-          ? Image.network(
-              '$kApiBase$coverUrl',
-              headers: api.signFor('GET', coverUrl),
+          ? SignedImage(
+              api: api,
+              path: coverUrl,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Icon(
+              errorBuilder: () => Icon(
                   Icons.image_not_supported_outlined,
                   size: 16, color: XTheme.textDim),
             )

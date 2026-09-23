@@ -198,7 +198,7 @@ class _MediaViewerState extends State<MediaViewer> {
       // كل فتح. البايتات المحفوظة تُرسم فوراً وبلا شبكة.
       child: CachedImage(
         url: widget.url.startsWith('/') ? '$kApiBase${widget.url}' : widget.url,
-        headers: widget.url.startsWith('/')
+        signedHeaders: widget.url.startsWith('/')
             ? widget.api.signFor('GET', widget.url)
             : null,
         cache: AvatarCache.media,

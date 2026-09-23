@@ -1,0 +1,39 @@
+# ── إعداد اختبار حقيقي: Worker + D1 + R2 + KV محلية ──
+# نسخة من wrangler.toml بمعرّفات محلية، فلا تلمس موارد الإنتاج.
+name = "x-app-api-test"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "XDB"
+database_name = "x-app-db"
+database_id = "local-xdb"
+
+[[d1_databases]]
+binding = "MIRROR"
+database_name = "phonex-mirror"
+database_id = "local-mirror"
+
+[[r2_buckets]]
+binding = "SCHEMATICS"
+bucket_name = "test-schematics"
+
+[[r2_buckets]]
+binding = "XMEDIA"
+bucket_name = "test-xmedia"
+
+[[r2_buckets]]
+binding = "XLEARN"
+bucket_name = "test-xlearn"
+
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "test-releases"
+
+[[kv_namespaces]]
+binding = "QUOTA"
+id = "local-quota"
+
+[vars]
+X_JWT_SECRET = "test_jwt_secret_value"
+X_OWNER_KEY = "test_owner_key_value"
