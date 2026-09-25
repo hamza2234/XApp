@@ -2975,7 +2975,10 @@ export default {
         if (caller.role === 'guest' && settings.compatLocked) {
           throw new HttpError(403, 'التوافقات للمشتركين فقط — تواصل مع المالك')
         }
-        const brands = (await mirrorCollection(env.MIRROR, 'brands')).map(d => ({ id: d.id, ...d.fields }))
+        // `id` بعد الانتشار: حقل `id` الرقمي داخل data كان يطمس مفتاح
+        // الوثيقة (b_brand_123) فيصل العميل «328» لا يطابقه أي صفّ عند
+        // التحرير — فيردّ الخادم «الصفّ غير موجود». المفتاح مرجع الردّ.
+        const brands = (await mirrorCollection(env.MIRROR, 'brands')).map(d => ({ ...d.fields, id: d.id }))
         // شركات فرعية افتراضية (Redmi/POCO/Oppo/Honor/iQOO) — قراءة فقط من ملفات الشركات الأم
         const files = new Set(brands.map(b => (b as any).file))
         for (const vb of VIRTUAL_SUB_BRANDS) {
@@ -3073,7 +3076,9 @@ export default {
           await detectSweep(env, request, 'compatq', `${brandRef}|${q}`, 120)
         }
         return json({
-          records: results.map(d => ({ id: d.id, ...d.fields })),
+          // مفتاح الوثيقة آخراً: `id` الرقمي داخل data يطمس مفتاح الصفّ
+          // فيفشل تعديله بـ«غير موجود». الترتيب هنا هو الذي يحدد الفائز.
+          records: results.map(d => ({ ...d.fields, id: d.id })),
           types: allTypes, charged: r.charged, source: r.source,
           remaining: r.freeLeft,
           balance: r.balance
@@ -3125,7 +3130,7 @@ export default {
         const results = await mergeCompatEdits(
           env, brandFile, raw, tokens, keyword, type || undefined, 120)
         return json({
-          records: results.map(d => ({ id: d.id, ...d.fields })),
+          records: results.map(d => ({ ...d.fields, id: d.id })),
           charged: r.charged, source: r.source,
           remaining: r.freeLeft,
           balance: r.balance
@@ -5238,7 +5243,9 @@ export default {
           const records: any[] = []
           for (const d of res) {
             const merged = applyEdit(d.id, d.fields, edits)
-            if (merged) records.push({ id: d.id, edited: edits.has(d.id), ...merged })
+            // مفتاح الوثيقة بعد الدمج: `id` داخل حقول الصفّ رقمي داخلي،
+            // وطمسه لمفتاح الوثيقة هو سبب «الصفّ غير موجود» عند الحفظ.
+            if (merged) records.push({ ...merged, id: d.id, edited: edits.has(d.id) })
           }
           // السجلات الجديدة التي كتبها المالك لهذه الشركة: ليست في المرآة
           // أصلاً، فبلا إضافتها هنا لا يراها المالك بعد إنشائها.
@@ -5248,7 +5255,7 @@ export default {
           ).bind(brandFile).all<any>()
           for (const r of newRows.results ?? []) {
             try {
-              records.push({ id: r.doc_key, edited: true, isNew: true, ...JSON.parse(r.data) })
+              records.push({ ...JSON.parse(r.data), id: r.doc_key, edited: true, isNew: true })
             } catch { /* صفّ تالف لا يُسقط القائمة */ }
           }
 
