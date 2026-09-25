@@ -22,12 +22,18 @@ flutter build apk --release --target-platform android-arm64 --split-per-abi  # 2
 المستودع يدعم keystore إصدار عبر `app/android/key.properties` (مستثنى في
 `.gitignore`). المفتاح الدائم الموجود:
 
-- `app/android/xapp-release.jks` (نسخة احتياطية في `/workspace/keys/`)
-- alias: `xapp` · sha256: `032f8c38b7ff886fe5d55a1ce1a0342dc3b0f64e0826bdb09369697df34ae697`
+- `app/android/app/x-release.jks` + `app/android/key.properties` (نسخة في `D:\XApp\app\android\`)
+- alias: `xkey` · sha256: `20a5b58c37da45bf00cc2ca1b573be9337dceae0370f559d9e275c848b272d1c`
+- تنبيه: مفتاح `xapp-release.jks` الموثّق سابقاً (sha256 `032f8c38…`) ضاع مع
+  بيئة العمل القديمة، والنسخة على الهاتف كانت بشهادة أخرى (`fb8fe9dc…`)
+  فتطلّب التثبيت حذفها. **كل بناء جديد يجب أن يكون بمفتاح `x-release.jks`
+  هذا** وإلا رفض أندرويد التحديث مرة أخرى.
 
-البيئة تُعاد تهيئتها دوريًا فتفقد `~/.android/debug.keystore` وقد يفقد `/usr/lib/jvm`
-أيضاً. بدون `key.properties` يُستخدم مفتاح debug فيتغيّر التوقيع ويرفض أندرويد
+بدون `key.properties` يُستخدم مفتاح debug فيتغيّر التوقيع ويرفض أندرويد
 التحديث فوق النسخة القديمة. لذلك استخدم المفتاح الدائم دائماً.
+
+ملاحظة بيئة: قرص C: كان يمتلئ فيفشل `assembleRelease` بـ«no space» — نُقلت
+ذاكرة Gradle إلى `D:\gradle-home` ويُبنى بـ `GRADLE_USER_HOME=D:\gradle-home`.
 
 ### متطلبات البيئة بعد إعادة التهيئة
 
