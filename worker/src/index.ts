@@ -2798,7 +2798,10 @@ export default {
       if (settings.appLocked && !gateExempt) {
         throw new HttpError(503, settings.lockMessage || 'التطبيق متوقف مؤقتاً للصيانة')
       }
-      if (!gateExempt) {
+      // بثّ الدروس بالرمز معفى من بوابة الإصدار: المشغّل لا يرسل ترويسة
+      // `x-app-version` أصلاً فكان يُردّ بـ426 — هذا هو «تعذّر التشغيل»
+      // الكامل. الرمز نفسه صدر لتطبيق اجتاز البوابة عند جلب الدورات.
+      if (!gateExempt && !learnTokenRequest(request)) {
         const gate = versionGate(request, settings)
         if (gate) return gate
       }
@@ -3248,10 +3251,16 @@ export default {
         // لحظة الفتح تُقرأ من صفّ المحفظة. بلا هذا كان العدّاد يشير إلى منتصف
         // الليل بينما الاستلام الفعلي بعد 24 ساعة من الاستلام — فرق يصل إلى
         // 24 ساعة بين ما يعرضه العدّاد وما يقبله الخادم.
+        // حالة الهدية مفتاحها المحفظة وبصمة الجهاز معاً: تثبيت جديد على
+        // نفس الجهاز يجب أن يرى «مستلمة» لا زراً متاحاً — وإلا ظهر الزر
+        // ثم ردّ الخادم 409، وهو شكل الخلل الذي شُكي منه.
+        const fpKey = fingerprint(request)
         const giftRow = giftAmount > 0
           ? await env.XDB.prepare(
-              'SELECT last_at, next_at FROM x_gift_claims WHERE wallet = ?1'
-            ).bind(fp).first<{ last_at: number; next_at: number }>()
+              `SELECT last_at, next_at FROM x_gift_claims
+               WHERE wallet IN (?1, ?2) ORDER BY next_at DESC LIMIT 1`
+            ).bind(fp, fpKey.startsWith('fp:') ? fpKey : fp)
+              .first<{ last_at: number; next_at: number }>()
           : null
         // قاعدة لم تُحدَّث بعد لا تحمل الصفّ: نرجع لفحص اليوم التقويمي كي لا
         // يظهر الزر متاحاً ثم يردّ الخادم 409.
@@ -4131,16 +4140,35 @@ export default {
           throw new HttpError(403, 'تعذر تأكيد هوية المحفظة')
         }
         const stamp = new Date(nowMs).toISOString()
-        // محاولة تحديث صفّ قائم انتهت مهلته.
-        // لا صفّ أصلاً = أول استلام. الإدخال يفشل إن سبقه طلب متزامن،
-        // فيبقى المنح مرة واحدة.
-        const claim = env.XDB.prepare(
+        // الثغرة التي أُغلقت: الاستلام كان مفتاحه المحفظة فقط، ومسح بيانات
+        // التطبيق يولّد تثبيتاً جديداً فتُخلق له محفظة `in:` جديدة فتُمنح
+        // الهديّة مرة أخرى لنفس الجهاز. البصمة (ANDROID_ID) تبقى بعد المسح
+        // وإعادة التثبيت، فالاستلام يُحجز عليها أيضاً: جهاز واحد = هديّة
+        // واحدة في اليوم مهما أُعيد التثبيت. من زوّر بصمة عشوائية جديدة
+        // يحصل محفظة جديدة خاوية — لكن لا هديّة إضافية على بصمة مستعملة.
+        const claimSql =
           `INSERT INTO x_gift_claims (wallet, last_at, next_at, updated_at)
            VALUES (?1, ?2, ?3, ?4)
            ON CONFLICT(wallet) DO UPDATE SET last_at = ?2, next_at = ?3, updated_at = ?4
            WHERE next_at <= ?2 AND last_at <= ?5
            RETURNING wallet`
-        ).bind(fp, nowMs, nextMs, stamp, nowMs - DAY * 1000)
+        const fpRaw = fingerprint(request)
+        // حجز البصمة أولاً ومنفرداً: لو دخل في نفس الدفعة مع الإيداع لأُودعت
+        // العملات ثم اكتشفنا أن الجهاز استلم — رصيد بلا استحقاق. الفشل هنا
+        // يرفض الطلب قبل أن تتحرك أي عملة.
+        if (fpRaw.startsWith('fp:') && fpRaw !== fp) {
+          const fpClaim = await env.XDB.prepare(claimSql)
+            .bind(fpRaw, nowMs, nextMs, stamp, nowMs - DAY * 1000).run()
+          if (!fpClaim.results.length) {
+            return json({
+              ok: false,
+              error: 'يمكن استلام الحصة مرة كل 24 ساعة',
+              status: 409
+            }, 409)
+          }
+        }
+        const claim = env.XDB.prepare(claimSql)
+          .bind(fp, nowMs, nextMs, stamp, nowMs - DAY * 1000)
         // الجدول غير موجود بعد على قاعدة لم تُحدَّث: لا نُسقط الاستلام،
         // ونرجع للمفتاح اليومي كي تبقى الهديّة تعمل بلا انقطاع.
         // الإيداع في المحفظة الحقيقية: مشترك في رصيده، وزائر في محفظته.
@@ -4348,7 +4376,11 @@ export default {
         }
 
         const obj = await env.XLEARN.get(video.object_key)
-        if (!obj?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
+        if (!obj?.body) {
+          await logSecurity(env, request, 'learn_stream_missing',
+            `video=${video.id} key=${video.object_key}`)
+          throw new HttpError(404, 'ملف الفيديو مفقود')
+        }
         const mime = video.mime || 'video/mp4'
 
         // دعم Range: المشغّل يطلب البداية القليلة ليعرض فوراً ثم يواصل الباقي
@@ -4376,6 +4408,23 @@ export default {
             status: 416,
             headers: { 'content-range': `bytes */${size}` }
           })
+        }
+        // تشخيص البثّ: نسجّل بداية التشغيل فقط (start=0) — يكفي لمعرفة
+        // أن الطلب وصل وأن الرمز والاستحقاق والملف كلها سليمة، ولا نغرق
+        // السجل بعشرات طلبات القطع التي يرسلها المشغّل لكل مقطع.
+        if (start === 0) {
+          // أول 16 بايت تكشف تلف الملف: MP4 سليم يبدأ بصندوق `ftyp`.
+          let head = ''
+          try {
+            const h = await env.XLEARN.get(video.object_key,
+              { range: { offset: 0, length: 16 } })
+            if (h) {
+              const b = new Uint8Array(await h.arrayBuffer())
+              head = Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+            }
+          } catch { /* التشخيص لا يُسقط البثّ */ }
+          await logSecurity(env, request, 'learn_stream_serve',
+            `video=${video.id} install=${installId.slice(0, 10)} size=${size} head=${head}`)
         }
         const span = size > 0 ? end - start + 1 : 0
 

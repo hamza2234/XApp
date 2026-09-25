@@ -1095,14 +1095,13 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       );
 
-  /// شريط الأقسام وحده — الاسم والإعدادات في الرأس.
+  /// شريط الأقسام: أقراص نصّية مدمجة بأسلوب ماسنجر.
   ///
-  /// كان الشريط يحمل ثلاثة أدوار في سطر: تنقّل + كتم + ملف. ثم بقي الاسم
-  /// مكرّراً في كل قرص، فيأخذ الشريط سطراً كاملاً لعرض معلومة معروضة أصلاً
-  /// في الرأس. الآن الأقراص أيقونات فقط: الاسم في الرأس مرة واحدة، والشريط
-  /// يعود لمساحة صغيرة لا تزاحم الرسائل.
-  /// شريط الأقسام على طراز صفّ «المتصلون» في ماسنجر: دوائر بأسماء تحتها.
+  /// كانت كل قرص دائرة 46px بأيقونة واسم تحتها — الشريط وحده يبتلع 76px
+  /// من شاشة الرسائل لمجرد تبويب. والأيقونة أزيلت كلياً بطلب المستخدم: هي
+  /// زينة لا وظيفة، واسم القسم أوضح من أي أيقونة. قسم واحد = بلا شريط.
   Widget _roomBar() {
+    if (_rooms.length <= 1) return const SizedBox.shrink();
     return Container(
       decoration: BoxDecoration(
         color: XTheme.surface,
@@ -1111,67 +1110,46 @@ class _ChatScreenState extends State<ChatScreen>
         ),
       ),
       child: SizedBox(
-        height: 76,
+        height: 46,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           reverse: true,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           itemCount: _rooms.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
           itemBuilder: (_, i) => _roomChip(_rooms[i]),
         ),
       ),
     );
   }
 
-  /// قرص القسم بأسلوب ماسنجر: دائرة محاطة بحلقة متدرّجة حين يكون نشطاً،
-  /// واسم القسم تحتها — فلا يحتاج المستخدم التلميح ليعرف ما يضغطه.
+  /// قرص قسم مدمج: اسم القسم في حبّة متدرّجة للنشط، رمادية للخامل.
   Widget _roomChip(ChatRoom r) {
     final active = _room?.id == r.id;
-    return Tooltip(
-      message: r.name,
-      child: GestureDetector(
-        onTap: () => _switchRoom(r),
-        child: SizedBox(
-          width: 58,
-          child: Column(children: [
-            const SizedBox(height: 8),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 46,
-              height: 46,
-              padding: const EdgeInsets.all(2.5),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: active ? XTheme.gradient : null,
-                border: active
-                    ? null
-                    : Border.all(color: XTheme.textDim.withOpacity(.16)),
-                boxShadow:
-                    active ? XTheme.glow(XTheme.accent, strength: .45) : null,
-              ),
-              child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: XTheme.surface2,
-                ),
-                child: Icon(_roomIcon(r.icon),
-                    size: 19,
-                    color: active ? XTheme.accent : XTheme.textDim),
-              ),
+    return GestureDetector(
+      onTap: () => _switchRoom(r),
+      child: Center(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 7),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            gradient: active ? XTheme.gradient : null,
+            color: active ? null : XTheme.surface2,
+            border: active
+                ? null
+                : Border.all(color: XTheme.textDim.withOpacity(.16)),
+          ),
+          child: Text(
+            r.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+              color: active ? Colors.white : XTheme.textDim,
             ),
-            const SizedBox(height: 4),
-            Text(
-              r.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-                color: active ? XTheme.text : XTheme.textDim,
-              ),
-            ),
-          ]),
+          ),
         ),
       ),
     );

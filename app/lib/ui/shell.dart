@@ -1006,10 +1006,16 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                     color: XTheme.textDim.withOpacity(.4),
                     borderRadius: BorderRadius.circular(4))),
             const SizedBox(height: 16),
-            const Text('باقات بطاقات المخططات',
+            // العنوان عام لأن البطاقة عملة واحدة: تفتح مخططاً أو بحث
+            // توافقات. تسميتها «باقات المخططات» وحدها كانت توهم أن
+            // التوافقات خارجها.
+            const Text('باقات البطاقات',
                 style:
                     TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-            Text('كل بطاقة = فتح مخطط واحد • الشراء عبر تيليجرام',
+            const SizedBox(height: 4),
+            Text(
+                'البطاقة تفتح مخططاً أو بحث توافقات • الشحن عبر تيليجرام',
+                textAlign: TextAlign.center,
                 style: TextStyle(color: XTheme.textDim, fontSize: 12)),
             const SizedBox(height: 16),
             if (_cfg.packages.isEmpty)
@@ -1029,55 +1035,87 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                           : 'صالحة شهرين';
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
-                child: GlassCard(
+                child: Container(
                   padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: XTheme.surface2,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                        color: XTheme.textDim.withOpacity(.12)),
+                  ),
                   child: Row(children: [
+                    // عدد البطاقات بحجم بارز — هو ما يشتريه المستخدم فعلاً
                     Container(
-                      width: 52, height: 52,
+                      width: 54, height: 54,
                       decoration: BoxDecoration(
                           gradient: XTheme.gradient,
-                          borderRadius: BorderRadius.circular(14)),
+                          borderRadius: BorderRadius.circular(15)),
                       child: Center(
                           child: Text('$cards',
                               style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w900,
-                                  fontSize: 17))),
+                                  fontSize: 18))),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('$cards بطاقة',
+                            Text('باقة $cards بطاقة',
                                 style: const TextStyle(
-                                    fontWeight: FontWeight.w800)),
-                            Text('صالحة لغاية $period',
-                                style: TextStyle(
-                                    color: XTheme.textDim, fontSize: 11.5)),
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 14.5)),
+                            const SizedBox(height: 3),
+                            Row(children: [
+                              Icon(Icons.verified_outlined,
+                                  size: 13, color: XTheme.ok),
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(period,
+                                    style: TextStyle(
+                                        color: XTheme.textDim,
+                                        fontSize: 11.5)),
+                              ),
+                            ]),
                           ]),
                     ),
-                    Column(children: [
-                      Text(price,
-                          style: TextStyle(
-                              color: XTheme.gold,
-                              fontWeight: FontWeight.w900,
-                              fontSize: 16)),
-                      const SizedBox(height: 4),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: XTheme.accent,
-                            foregroundColor: Colors.white,
+                    const SizedBox(width: 10),
+                    Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          // السعر في شارة ذهبية — يُقرأ قبل زر الشراء
+                          Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 6),
-                            minimumSize: Size.zero),
-                        onPressed: () => _buyPackage(cards, price),
-                        child: const Text('شراء',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                fontSize: 12.5)),
-                      ),
-                    ]),
+                                horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: XTheme.gold.withOpacity(.12),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                  color: XTheme.gold.withOpacity(.35)),
+                            ),
+                            child: Text(price,
+                                style: TextStyle(
+                                    color: XTheme.gold,
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 14)),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: XTheme.accent,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 6),
+                                minimumSize: Size.zero),
+                            icon: const Icon(Icons.telegram, size: 15),
+                            onPressed: () => _buyPackage(cards, price),
+                            label: const Text('شراء',
+                                style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 12.5)),
+                          ),
+                        ]),
                   ]),
                 ),
               );
@@ -1099,7 +1137,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     await openExternal(
         context,
         _tgWithText(
-            'مرحباً، أنا المشترك $username — أريد شحن باقة $cards بطاقة مخططات بسعر $price'),
+            'مرحباً، أنا المشترك $username — أريد شحن باقة $cards بطاقة بسعر $price'),
         label: 'تيليجرام');
   }
 
@@ -1165,7 +1203,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                         await openExternal(
                             context,
                             _tgWithText(
-                                'مرحباً، أنا ${user.text.trim()} — طلبت حساباً في تطبيق X وأريد باقة $cards بطاقة مخططات بسعر $price'),
+                                'مرحباً، أنا ${user.text.trim()} — طلبت حساباً في تطبيق X وأريد باقة $cards بطاقة بسعر $price'),
                             label: 'تيليجرام');
                       } on ApiException catch (e) {
                         setD(() => sending = false);
