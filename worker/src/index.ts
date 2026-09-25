@@ -1867,6 +1867,46 @@ async function releaseOwnerDevice(env: Env, installId: string): Promise<void> {
 // المشغّل مباشرة: أقصر مسار ممكن وأسرع بداية على أي شبكة.
 const LEARN_STREAM_TTL = 6 * 3600 * 1000
 
+/**
+ * يقطّع تياراً إلى المدى المطلوب: يتجاوز `start` بايت ثم يمرّر `span` بايت.
+ *
+ * لماذا نقطّع بدل جلب مدى من R2؟ لأن المصدر قد يكون ردّاً من كاش الحافة —
+ * الردّ الكامل المخزَّن يُقرأ بسرعة الشبكة الداخلية، والمشغّل لا يستقبل
+ * إلا المدى الذي طلبه. تجاوز البايتات داخل العامل عملية إدخال/إخراج لا
+ * حساب، فلا تُستهلك حصة المعالج.
+ */
+function sliceStream(
+  body: ReadableStream<Uint8Array>, start: number, span: number
+): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = body.getReader()
+      let skip = start, left = span
+      try {
+        while (left > 0) {
+          const { done, value } = await reader.read()
+          if (done) break
+          let chunk = value
+          if (skip > 0) {
+            if (chunk.byteLength <= skip) { skip -= chunk.byteLength; continue }
+            chunk = chunk.subarray(skip)
+            skip = 0
+          }
+          const part = chunk.byteLength > left ? chunk.subarray(0, left) : chunk
+          left -= part.byteLength
+          controller.enqueue(part)
+        }
+        controller.close()
+      } catch (e) {
+        controller.error(e)
+      } finally {
+        reader.releaseLock()
+      }
+    },
+    cancel() { body.cancel() },
+  })
+}
+
 let _learnKey: Promise<CryptoKey> | null = null
 function learnHmacKey(env: Env): Promise<CryptoKey> {
   _learnKey ??= crypto.subtle.importKey('raw',
@@ -4447,14 +4487,31 @@ export default {
         }
         const span = size > 0 ? end - start + 1 : 0
 
-        // الملف مخزّن نصّاً صريحاً، فالتمرير مباشر: يُعاد نفس جسم R2 بلا فكّ
-        // ولا وسيط. هذا ما يجعل البداية فورية والتقديم/التأخير بلا إعادة تنزيل.
-        const ranged = partial && size > 0
-          ? await env.XLEARN.get(video.object_key, {
-              range: { offset: start, length: span }
-            })
-          : await env.XLEARN.get(video.object_key)
-        if (!ranged?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
+        // كاش الحافة: البايتات نفسها تُخزَّن في أقرب نقطة Cloudflare
+        // للمشاهد، فيصل أول إطار دون رحلة إلى R2 — وهذا هو الفارق بين
+        // «تجهيز» طويل وبداية شبه فورية. الأمان لا يتغير: التحقق من الرمز
+        // والاستحقاق يجري قبل قراءة الكاش، فالكاش يخزّن بايتات لا صلاحية،
+        // ومن لا يحمل رمزاً صالحاً يُرفض قبل أن يُقرأ له بايت واحد.
+        // مفتاح الكاش يتضمن حجم الملف: إعادة رفع الملف بنفس المفتاح يغيّر
+        // الحجم فتتجدد النسخة بدل خدمة بايتات قديمة.
+        const canon = new Request(
+          `https://xapp-media.edge/${video.object_key}?z=${size}`)
+        let base = await caches.default.match(canon)
+        if (!base?.body) {
+          const full = await env.XLEARN.get(video.object_key)
+          if (!full?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
+          // tee يشقّ الجسم: نسخة تُكتب للكاش في الخلفية ونسخة تُخدم فوراً —
+          // أول طلب لا ينتظر اكتمال التخزين.
+          const [toCache, toServe] = full.body.tee()
+          ctx.waitUntil(caches.default.put(canon, new Response(toCache, {
+            headers: {
+              'content-length': String(size),
+              'cache-control': 'public, max-age=21600',
+            },
+          })))
+          base = new Response(toServe)
+        }
+        const body = sliceStream(base.body!, start, span)
 
         const headers = new Headers({
           // النوع الأصلي صريحاً: `application/octet-stream` كان يجعل المشغّل
@@ -4469,7 +4526,7 @@ export default {
           headers.set('content-length', String(span))
           if (partial) headers.set('content-range', `bytes ${start}-${end}/${size}`)
         }
-        return new Response(ranged.body, { status: partial ? 206 : 200, headers })
+        return new Response(body, { status: partial ? 206 : 200, headers })
       }
 
       // غلاف الدورة. صورة عرض عامة بطبيعتها، لكنها تمرّ من هنا كي لا

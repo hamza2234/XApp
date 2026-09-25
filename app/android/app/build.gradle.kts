@@ -59,6 +59,10 @@ android {
                 signingConfigs.getByName("release")
             else
                 signingConfigs.getByName("debug")
+            // تصغير R8 + حذف الموارد غير المستخدمة: أصغر حجماً وأصعب
+            // قليلاً على القارئ العكسي. قواعد keep تأتي مدمجة مع الإضافات.
+            isMinifyEnabled = true
+            isShrinkResources = true
         }
     }
 }
