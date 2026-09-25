@@ -6,6 +6,7 @@ import '../core/api.dart';
 import '../core/app_config.dart';
 import '../core/config.dart';
 import '../core/models.dart';
+import '../core/media_proxy.dart';
 import '../core/store.dart';
 import 'theme.dart';
 import 'auth_screen.dart';
@@ -35,7 +36,7 @@ class _SplashScreenState extends State<SplashScreen>
 
   /// أقصى عدد محاولات تلقائية قبل إظهار زر إعادة المحاولة — بدل حلقة
   /// صامتة لا تنتهي كانت تُظهر «تعذر الاتصال» بلا مخرج عند أول تشغيل.
-  static const _maxAutoRetries = 5;
+  static const _maxAutoRetries = 2;
 
   @override
   void initState() {
@@ -65,10 +66,10 @@ class _SplashScreenState extends State<SplashScreen>
       // و`/v1/install/key` هو المسار الوحيد المسموح بلا توقيع. لو فشل
       // التسجيل (شبكة) نُكمل: الإقلاع نفسه سيُعيد المحاولة، وطلبات لاحقة
       // تُفشل بتوقيع مفقود فيُعاد الإقلاع — أوضح من شاشة عالقة.
-      setState(() => _status = 'تجهيز هوية آمنة…');
-      try {
-        await widget.api.initSigningKey();
-      } catch (_) {}
+      // هوية التوقيع تُهيَّأ بسرعة محليّاً؛ تسجيلها على الخادم يتم ضمن
+      // الاتصال الأول ولا يُوقِّف الإقلاع بشاشة خاصة.
+      await widget.api.initSigningKey();
+      if (!mounted) return;
 
       final boot = await widget.api.bootstrap();
       // تُحدَّث الإعدادات المشتركة (رابط تيليجرام والباقات) من نفس الردّ.
@@ -106,17 +107,16 @@ class _SplashScreenState extends State<SplashScreen>
 
       // تسجيل التثبيت مرة واحدة
       if (!widget.store.installSent) {
-        try {
-          await widget.api.registerInstall();
-          await widget.store.markInstallSent();
-        } catch (_) {}
+        unawaited(_registerInstall());
       }
 
       // استعادة الجلسة أو دخول كزائر صامت
       if (widget.store.hasSession) {
         try {
-          await widget.api.me();
-        } catch (_) {
+          final me = await widget.api.me();
+          await widget.store.setUser(me['user'] as Map<String, dynamic>?);
+        } on ApiException catch (e) {
+          if (e.status != 401) rethrow;
           await widget.store.clearSession();
         }
       }
@@ -161,8 +161,16 @@ class _SplashScreenState extends State<SplashScreen>
     }
   }
 
+  Future<void> _registerInstall() async {
+    try {
+      await widget.api.registerInstall();
+      await widget.store.markInstallSent();
+    } catch (_) {}
+  }
+
   void _retry() {
     setState(() {
+      _blocked = false;
       _attempt = 0;
       _offline = false;
     });
@@ -262,18 +270,6 @@ class _SplashScreenState extends State<SplashScreen>
                     padding: const EdgeInsets.symmetric(
                         horizontal: 26, vertical: 12)),
               ),
-              const SizedBox(height: 10),
-              // المالك قد يكون جهازه محظوراً أو جلسته منتهية: بدون هذا الزر
-              // لا يجد طريقاً للوحة التحكم لإلغاء الحظر، فيبقى خارج تطبيقه.
-              TextButton.icon(
-                onPressed: () => openAuth(context, widget.api, widget.store)
-                    .then((_) {
-                  if (mounted) _retry();
-                }),
-                icon: const Icon(Icons.admin_panel_settings_outlined, size: 18),
-                label: const Text('دخول المالك'),
-                style: TextButton.styleFrom(foregroundColor: XTheme.gold),
-              ),
             ] else ...[
               Text(_status,
                   style: TextStyle(color: XTheme.textDim, fontSize: 14)),
@@ -292,6 +288,26 @@ class _SplashScreenState extends State<SplashScreen>
 }
 
 /// بعد الدخول كزائر يمكن الترقية لحساب من شاشة الدخول
+Future<void> logoutToGuest(BuildContext context, Api api, Store store) async {
+  MediaProxy.instance.clear();
+  // سحب وسم «جهاز المالك» من الخادم قبل مسح الرمز: بدونه يبقى الخادم
+  // يعتبر هذا التثبيت جهاز مالك فيفتح كل دورة مقفلة رغم خروجه. يحتاج
+  // رمز المالك لذلك يسبق clearSession. الفشل (لا رمز، لا شبكة) لا يمنع
+  // الخروج المحلي — لكنه يُحاول دائماً ولا يُتخطّى.
+  try {
+    await api.ownerReleaseDevice();
+  } catch (_) {}
+  await store.clearSession();
+  api.clearMediaSignatures();
+  PaintingBinding.instance.imageCache.clear();
+  PaintingBinding.instance.imageCache.clearLiveImages();
+  if (!context.mounted) return;
+  Navigator.of(context).pushAndRemoveUntil(
+    MaterialPageRoute(builder: (_) => SplashScreen(api: api, store: store)),
+    (route) => false,
+  );
+}
+
 Future<void> openAuth(BuildContext context, Api api, Store store) {
   return Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => AuthScreen(api: api, store: store)));

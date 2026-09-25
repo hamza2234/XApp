@@ -29,6 +29,18 @@ class MediaProxy {
 
   /// المسار الحقيقي الموقّع المقابل لكل مفتاح محلي.
   final _paths = <String, String>{};
+  final _clients = <http.Client>{};
+  int _session = 0;
+
+  void clear() {
+    _session++;
+    _paths.clear();
+    _api = null;
+    for (final client in _clients) {
+      client.close();
+    }
+    _clients.clear();
+  }
 
   Future<int> _ensure() async {
     final s = _server;
@@ -59,6 +71,7 @@ class MediaProxy {
 
   Future<void> _handle(HttpRequest req) async {
     final res = req.response;
+    final session = _session;
     http.Client? client;
     try {
       final seg = req.uri.pathSegments;
@@ -79,8 +92,10 @@ class MediaProxy {
       final accept = req.headers.value('accept');
       if (accept != null) proxied.headers['accept'] = accept;
       proxied.headers.addAll(await api.streamHeadersFor(path));
+      if (session != _session) throw StateError('session ended');
 
       client = http.Client();
+      _clients.add(client);
       final upstream = await client
           .send(proxied)
           .timeout(const Duration(seconds: 30));
@@ -99,6 +114,7 @@ class MediaProxy {
         res.statusCode = HttpStatus.badGateway;
       } catch (_) {}
     } finally {
+      _clients.remove(client);
       client?.close();
       try {
         await res.close();

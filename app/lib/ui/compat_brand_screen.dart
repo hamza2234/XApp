@@ -84,6 +84,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   bool _locked = false;
   bool _quotaEmpty = false;
   List<CompatRecord> _records = const [];
+  final Set<String> _savingRows = {};
   int _remaining = -1;
   int _balance = -1;
   String _source = '';
@@ -139,7 +140,9 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   void _selectType(String type) {
+    _seq++;
     setState(() {
+      _loading = false;
       _type = _type == type ? null : type;
       _query = '';
       _records = const [];
@@ -152,7 +155,11 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
   }
 
   void _onQuery(String v) {
-    setState(() => _query = v);
+    _seq++;
+    setState(() {
+      _query = v;
+      _loading = false;
+    });
     _timer?.cancel();
     final q = v.trim();
     if (q.length < _minQuery) {
@@ -322,7 +329,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ),
       ),
     );
-    if (ok == true) await _ownerRefresh(done: 'تمت إضافة الصفّ');
+    if (ok == true) await _ownerRefresh(done: 'تم');
   }
 
   /// بعد أي تحرير: نعيد تنفيذ البحث نفسه بنفس النص، فيرى المالك النتيجة
@@ -338,6 +345,40 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     }
     await _search(q);
     if (done != null) _ownerToast(done);
+  }
+
+  Future<bool> _saveRow(CompatRecord row, Map<String, dynamic>? fields) async {
+    if (!_savingRows.add(row.id)) return false;
+    _seq++;
+    setState(() => _loading = false);
+    try {
+      final result = fields == null
+          ? await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: row.id)
+          : await widget.api.ownerCompatPatch(
+              brand: widget.brand.ref, id: row.id, fields: fields);
+      if (result['ok'] != true) throw ApiException(500, 'لم يؤكد الخادم الحفظ');
+      CompatRecord? saved;
+      if (fields != null) {
+        final data = result['record'];
+        if (data is! Map || data['id'] != row.id) {
+          throw ApiException(409, 'الخادم يحتاج تحديثاً لتأكيد التعديل داخل الصف');
+        }
+        saved = CompatRecord.fromJson(Map<String, dynamic>.from(data));
+      }
+      if (!mounted) return true;
+      _seq++;
+      setState(() {
+        _loading = false;
+        _records = [
+          for (final item in _records)
+            if (item.id != row.id) item else if (saved != null) saved,
+        ];
+      });
+      return true;
+    } finally {
+      _savingRows.remove(row.id);
+      if (mounted) setState(() {});
+    }
   }
 
   void _ownerToast(String m) {
@@ -413,16 +454,12 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                   return;
                 }
                 try {
-                  await widget.api.ownerCompatPatch(
-                    brand: widget.brand.ref,
-                    id: r.id,
-                    fields: {
-                      'compatibleModels': list,
-                      'componentType': chosen,
-                      'subCategory': {'name': sub.text.trim()},
-                    },
-                  );
-                  if (ctx.mounted) Navigator.pop(ctx, true);
+                  final saved = await _saveRow(r, {
+                    'compatibleModels': list,
+                    'componentType': chosen,
+                    'subCategory': {'name': sub.text.trim()},
+                  });
+                  if (saved && ctx.mounted) Navigator.pop(ctx, true);
                 } on ApiException catch (e) {
                   if (ctx.mounted) {
                     ScaffoldMessenger.of(ctx)
@@ -436,7 +473,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ),
       ),
     );
-    if (ok == true) await _ownerRefresh(done: 'تم حفظ التعديل');
+    if (ok == true) _ownerToast('تم حفظ التعديل');
   }
 
   Future<void> _ownerDeleteRow(CompatRecord r) async {
@@ -459,8 +496,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
     );
     if (ok != true) return;
     try {
-      await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: r.id);
-      await _ownerRefresh(done: 'تم حذف الصفّ');
+      if (await _saveRow(r, null)) _ownerToast('تم حذف الصفّ');
     } on ApiException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -734,10 +770,11 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             // أدوات المالك على الصفّ نفسه: إضافة نصّ وتعديل وحذف في موضعها
             // الطبيعي بجانب البيانات، بلا تبويب منفصل.
             if (_isOwner) ...[
+              if (_savingRows.contains(r.id)) const LinearProgressIndicator(),
               const SizedBox(height: 8),
               Row(children: [
                 TextButton.icon(
-                  onPressed: () => _ownerAddModel(r),
+                  onPressed: _savingRows.contains(r.id) ? null : () => _ownerAddModel(r),
                   icon: const Icon(Icons.add, size: 16),
                   label: const Text('إضافة نصّ', style: TextStyle(fontSize: 12)),
                   style: TextButton.styleFrom(
@@ -747,7 +784,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 ),
                 const Spacer(),
                 TextButton.icon(
-                  onPressed: () => _ownerEditRow(r),
+                  onPressed: _savingRows.contains(r.id) ? null : () => _ownerEditRow(r),
                   icon: const Icon(Icons.edit_outlined, size: 16),
                   label: const Text('تعديل', style: TextStyle(fontSize: 12)),
                   style: TextButton.styleFrom(
@@ -756,7 +793,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                   ),
                 ),
                 TextButton.icon(
-                  onPressed: () => _ownerDeleteRow(r),
+                  onPressed: _savingRows.contains(r.id) ? null : () => _ownerDeleteRow(r),
                   icon: const Icon(Icons.delete_outline, size: 16),
                   label: const Text('حذف', style: TextStyle(fontSize: 12)),
                   style: TextButton.styleFrom(
@@ -796,7 +833,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
           // هدف لمس صغير فعلاً — أيقونة 15 داخل حشو 4 — فتُخطئ الضغطة أقل
           // قدر ممكن على شاشة ازدحام الرقاقات.
           InkWell(
-            onTap: () => _ownerRemoveModel(row, m),
+            onTap: _savingRows.contains(row.id) ? null : () => _ownerRemoveModel(row, m),
             borderRadius: BorderRadius.circular(9),
             child: Padding(
               padding: const EdgeInsets.all(4),
@@ -824,20 +861,14 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
             : 'يُحذف هذا النصّ وحده ويبقى بقية الصفّ كما هو.');
     if (!ok) return;
     try {
-      if (last) {
-        await widget.api.ownerCompatDelete(brand: widget.brand.ref, id: r.id);
-      } else {
-        await widget.api.ownerCompatPatch(
-          brand: widget.brand.ref,
-          id: r.id,
-          fields: {'compatibleModels': left},
-        );
-      }
-      await _ownerRefresh();
-    } on ApiException catch (e) {
+      final saved = await _saveRow(r, last ? null : {'compatibleModels': left});
+      if (saved) _ownerToast(last ? 'تم حذف الصفّ' : 'تم حذف النصّ');
+    } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(e.message)));
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(
+            content: Text(e is ApiException ? e.message : 'تعذر الحفظ — تحقق من الاتصال')));
       }
     }
   }
@@ -878,16 +909,14 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
                 }
               }
               try {
-                await widget.api.ownerCompatPatch(
-                  brand: widget.brand.ref,
-                  id: r.id,
-                  fields: {'compatibleModels': list},
-                );
-                if (ctx.mounted) Navigator.pop(ctx, true);
-              } on ApiException catch (e) {
+                final saved = await _saveRow(r, {'compatibleModels': list});
+                if (saved && ctx.mounted) Navigator.pop(ctx, true);
+              } catch (e) {
                 if (ctx.mounted) {
                   ScaffoldMessenger.of(ctx)
-                      .showSnackBar(SnackBar(content: Text(e.message)));
+                    ..clearSnackBars()
+                    ..showSnackBar(SnackBar(
+                      content: Text(e is ApiException ? e.message : 'تعذر الحفظ — تحقق من الاتصال')));
                 }
               }
             },
@@ -896,7 +925,7 @@ class _CompatBrandScreenState extends State<CompatBrandScreen> {
         ],
       ),
     );
-    if (added == true) await _ownerRefresh();
+    if (added == true) _ownerToast('تمت إضافة النصّ');
   }
 
   Future<bool> _confirm(String title, String body) async {

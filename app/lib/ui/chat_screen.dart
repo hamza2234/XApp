@@ -954,17 +954,34 @@ class _ChatScreenState extends State<ChatScreen>
     );
   }
 
-  /// أيقونة القسم داخل قرص متدرّج — نقطة التعرّف البصرية على القسم.
-  Widget _roomBadge(ChatRoom room) => Container(
-        width: 38,
-        height: 38,
-        decoration: BoxDecoration(
-          gradient: XTheme.gradient,
-          borderRadius: BorderRadius.circular(13),
-          boxShadow: XTheme.glow(XTheme.accent, strength: .45),
+  /// أيقونة القسم دائرية بإطار متدرّج ونقطة حضور خضراء — كصورة المحادثة
+  /// في ماسنجر: الدائرة والنقطة هما ما يتعرّف عليه المستخدم فوراً.
+  Widget _roomBadge(ChatRoom room) => Stack(children: [
+        Container(
+          width: 42,
+          height: 42,
+          decoration: BoxDecoration(
+            gradient: XTheme.gradient,
+            shape: BoxShape.circle,
+            boxShadow: XTheme.glow(XTheme.accent, strength: .45),
+          ),
+          child: Icon(_roomIcon(room.icon), size: 20, color: Colors.white),
         ),
-        child: Icon(_roomIcon(room.icon), size: 19, color: Colors.white),
-      );
+        if (_online > 0)
+          PositionedDirectional(
+            bottom: 0,
+            end: 0,
+            child: Container(
+              width: 13,
+              height: 13,
+              decoration: BoxDecoration(
+                color: XTheme.ok,
+                shape: BoxShape.circle,
+                border: Border.all(color: XTheme.surface, width: 2),
+              ),
+            ),
+          ),
+      ]);
 
   /// اسم القسم وسطر الوصف: «N عضواً» دائماً، والرقم الملون عن المتصلين.
   Widget _roomTitle(ChatRoom room) => Column(
@@ -1084,6 +1101,7 @@ class _ChatScreenState extends State<ChatScreen>
   /// مكرّراً في كل قرص، فيأخذ الشريط سطراً كاملاً لعرض معلومة معروضة أصلاً
   /// في الرأس. الآن الأقراص أيقونات فقط: الاسم في الرأس مرة واحدة، والشريط
   /// يعود لمساحة صغيرة لا تزاحم الرسائل.
+  /// شريط الأقسام على طراز صفّ «المتصلون» في ماسنجر: دوائر بأسماء تحتها.
   Widget _roomBar() {
     return Container(
       decoration: BoxDecoration(
@@ -1092,45 +1110,68 @@ class _ChatScreenState extends State<ChatScreen>
           bottom: BorderSide(color: XTheme.textDim.withOpacity(.10)),
         ),
       ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
-        child: SizedBox(
-          height: 34,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            reverse: true,
-            itemCount: _rooms.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 7),
-            itemBuilder: (_, i) => _roomChip(_rooms[i]),
-          ),
+      child: SizedBox(
+        height: 76,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          reverse: true,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          itemCount: _rooms.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 10),
+          itemBuilder: (_, i) => _roomChip(_rooms[i]),
         ),
       ),
     );
   }
 
-  /// قرص القسم — أيقونة فقط، والاسم في التلميح والرأس. النشط متدرّج بحلقة
-  /// فاتحة، والخامل زجاج شفّاف بلا حدّ.
+  /// قرص القسم بأسلوب ماسنجر: دائرة محاطة بحلقة متدرّجة حين يكون نشطاً،
+  /// واسم القسم تحتها — فلا يحتاج المستخدم التلميح ليعرف ما يضغطه.
   Widget _roomChip(ChatRoom r) {
     final active = _room?.id == r.id;
     return Tooltip(
       message: r.name,
       child: GestureDetector(
         onTap: () => _switchRoom(r),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          width: 48,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            gradient: active ? XTheme.gradient : null,
-            color: active ? null : XTheme.surface2,
-            borderRadius: BorderRadius.circular(30),
-            border: active
-                ? null
-                : Border.all(color: XTheme.textDim.withOpacity(.16)),
-            boxShadow: active ? XTheme.glow(XTheme.accent, strength: .45) : null,
-          ),
-          child: Icon(_roomIcon(r.icon),
-              size: 18, color: active ? Colors.white : XTheme.textDim),
+        child: SizedBox(
+          width: 58,
+          child: Column(children: [
+            const SizedBox(height: 8),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: 46,
+              height: 46,
+              padding: const EdgeInsets.all(2.5),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: active ? XTheme.gradient : null,
+                border: active
+                    ? null
+                    : Border.all(color: XTheme.textDim.withOpacity(.16)),
+                boxShadow:
+                    active ? XTheme.glow(XTheme.accent, strength: .45) : null,
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: XTheme.surface2,
+                ),
+                child: Icon(_roomIcon(r.icon),
+                    size: 19,
+                    color: active ? XTheme.accent : XTheme.textDim),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              r.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                color: active ? XTheme.text : XTheme.textDim,
+              ),
+            ),
+          ]),
         ),
       ),
     );

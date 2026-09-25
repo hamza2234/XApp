@@ -240,7 +240,18 @@ class Store {
   }
 
   Future<void> clearSession() async {
+    await _p.remove(_kOwnerToken);
+    await _p.remove(_kOwnerTokenAt);
+    await _p.remove(_kOwnerUnlockAt);
     await _p.remove(_kToken);
     await _p.remove(_kUser);
+  }
+
+  /// يولّد هوية تثبيت جديدة — يُستخدم عند خروج المالك لإلغاء وصوله
+  /// للدورات المفتوحة على هذا الجهاز (المنح مربوطة بالتثبيت لا بالحساب).
+  Future<void> resetInstall() async {
+    await _p.remove(_kInstallId);
+    await _p.remove(_kInstallSent);
+    await _p.remove(_kOwnerUnlockAt);
   }
 }

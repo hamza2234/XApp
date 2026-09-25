@@ -45,11 +45,14 @@ class GiftScreen extends StatefulWidget {
 
 /// نتيجة محاولة الاستلام كما تراها الواجهة.
 class GiftClaimResult {
-  const GiftClaimResult({required this.ok, this.amount = 0, this.message = ''});
+  const GiftClaimResult({required this.ok, this.amount = 0, this.message = '',
+    this.balance, this.nextAt});
 
   final bool ok;
   final int amount;
   final String message;
+  final int? balance;
+  final int? nextAt;
 }
 
 class _GiftScreenState extends State<GiftScreen>
@@ -91,6 +94,7 @@ class _GiftScreenState extends State<GiftScreen>
   late bool _claimed = widget.claimed;
   late int _amount = widget.amount;
   late int _balance = widget.balance;
+  late int _nextAt = widget.nextAt;
   bool _busy = false;
 
   /// هل انكشف المبلغ؟ يبقى مخفياً حتى تستقرّ العجلة على نتيجة اليوم.
@@ -111,6 +115,7 @@ class _GiftScreenState extends State<GiftScreen>
     super.didUpdateWidget(old);
     // تحديث الخادم يتقدّم على الحالة المحلية: إن قال إن هديّة جديدة فُتحت
     // نُعيد الزر، وإن تأكّد الاستلام نُبقيه مغلقاً.
+    if (_busy) return;
     if (widget.amount != old.amount ||
         widget.claimed != old.claimed ||
         widget.nextAt != old.nextAt ||
@@ -119,6 +124,7 @@ class _GiftScreenState extends State<GiftScreen>
         _amount = widget.amount;
         _claimed = widget.claimed;
         _balance = widget.balance;
+        _nextAt = widget.nextAt;
       });
       _syncCountdown();
     }
@@ -135,22 +141,24 @@ class _GiftScreenState extends State<GiftScreen>
   /// أسوأ من عدم عرضه، لأن المستخدم سينتظر لحظة لا تفتح فيها الهديّة.
   void _syncCountdown() {
     _tick?.cancel();
-    if (widget.nextAt <= 0) {
+    if (_nextAt <= 0) {
       _left = Duration.zero;
       return;
     }
     void step() {
-      final ms = widget.nextAt - DateTime.now().millisecondsSinceEpoch;
+      final ms = _nextAt - DateTime.now().millisecondsSinceEpoch;
       if (!mounted) return;
       setState(() => _left = ms > 0 ? Duration(milliseconds: ms) : Duration.zero);
       // انتهى الوقت: نطلب تحديثاً من الأب لجلب الرصيد والحالة الجديدة، بدل
       // أن نفتح الزر محلياً ثم يرفض الخادم عند الضغط.
       if (ms <= 0) {
         _tick?.cancel();
+        if (!_busy) setState(() => _claimed = false);
       }
     }
 
     step();
+    if (_left == Duration.zero) return;
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => step());
   }
 
@@ -166,8 +174,8 @@ class _GiftScreenState extends State<GiftScreen>
     // الزيادة اللازمة فوق `a` كي يستقرّ وسط القطاع تحت المؤشّر، في [0,2π).
     var d = ((-math.pi / 2 - mid) - a) % (2 * math.pi);
     if (d < 0) d += 2 * math.pi;
-    // دورتان على الأقل حتى لا تبدو الحركة ارتداداً قصيراً.
-    return a + d + 2 * 2 * math.pi;
+    // دورة واحدة فقط ثم الاستقرار — لا تكرار مزعج.
+    return a + d + 2 * math.pi;
   }
 
   /// يُدير العجلة من موضعها الحالي إلى `target` خلال `d`.
@@ -189,18 +197,15 @@ class _GiftScreenState extends State<GiftScreen>
     if (_disabled || _claimed) return;
     setState(() => _busy = true);
 
-    final future = widget.onClaim();
+    final future = widget.onClaim().catchError((Object _) =>
+        const GiftClaimResult(ok: false, message: 'تعذر الاتصال بالخادم'));
     // مرحلة حرّة: تستمر حتى يصل الردّ أو تنقضي مدتها، فأي منهما أبطأ.
-    await Future.wait<void>([
-      _spinTo(_angle + 3 * 2 * math.pi, const Duration(milliseconds: 1400)),
-      future.then((_) {}),
-    ]);
-
     final r = await future;
     if (!mounted) return;
 
-    final labels = _segLabels;
     if (r.ok) {
+      setState(() => _amount = r.amount);
+      final labels = _segLabels;
       // الاستقرار على القطاع الحامل للقيمة: يُحسب الآن لأن قيمة اليوم
       // معروفة، ولم يكن ممكناً حسابه قبل ردّ الخادم.
       await _spinTo(
@@ -210,12 +215,18 @@ class _GiftScreenState extends State<GiftScreen>
       setState(() {
         _busy = false;
         _claimed = true;
-        _balance += r.amount;
-        _amount = widget.amount;
+        _balance = r.balance ?? (_balance + r.amount);
+        _amount = r.amount;
+        _nextAt = r.nextAt ?? widget.nextAt;
       });
     } else {
       // رُفض الطلب: العجلة تتوقف بلا توجيه إلى أي قطاع.
-      setState(() => _busy = false);
+      setState(() {
+        _busy = false;
+        _claimed = widget.claimed;
+        _nextAt = widget.nextAt;
+        _balance = widget.balance;
+      });
     }
 
     ScaffoldMessenger.of(context)
@@ -252,7 +263,7 @@ class _GiftScreenState extends State<GiftScreen>
             _statusCard(),
             const SizedBox(height: 14),
             _claimButton(),
-            if (_claimed && widget.nextAt > 0) ...[
+            if (_claimed && _nextAt > 0) ...[
               const SizedBox(height: 18),
               _countdown(),
             ],

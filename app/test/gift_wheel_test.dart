@@ -19,7 +19,7 @@ double restFor(double a, int i, int n) {
   final mid = i * sweep + sweep / 2;
   var d = ((-math.pi / 2 - mid) - a) % (2 * math.pi);
   if (d < 0) d += 2 * math.pi;
-  return a + d + 2 * 2 * math.pi;
+  return a + d + 2 * math.pi;
 }
 
 /// الزاوية الظاهرة للقطاع `i` عند الزاوية الكلية `a` — منفصلة عن الكسور.
@@ -40,10 +40,10 @@ void main() {
       }
     });
 
-    test('الدوران دائماً للأمام ولا يقلّ عن دورتين', () {
+    test('الدوران دائماً للأمام ولا يقلّ عن دورة واحدة', () {
       for (final a in [0.0, 5.0, 40.0]) {
         final rest = restFor(a, _winIndex, _labels.length);
-        expect(rest - a, greaterThan(2 * 2 * math.pi - 1e-9),
+        expect(rest - a, greaterThan(2 * math.pi - 1e-9),
             reason: 'حركة قصيرة أو ارتداد للخلف تبدو غير طبيعية');
       }
     });

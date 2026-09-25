@@ -28,6 +28,25 @@ GiftScreen _gift({
     );
 
 void main() {
+  testWidgets('المبلغ والرصيد من رد الخادم ولا يتكرر الطلب', (t) async {
+    var calls = 0;
+    await t.pumpWidget(_host(_gift(
+      amount: 5,
+      balance: 10,
+      onClaim: () async {
+        calls++;
+        return const GiftClaimResult(ok: true, amount: 37, balance: 47);
+      },
+    )));
+    await t.tap(find.text('أدِر العجلة واستلم'));
+    await t.pumpAndSettle(const Duration(milliseconds: 50));
+    expect(find.text('47 عملة'), findsOneWidget);
+    expect(find.text('37'), findsWidgets);
+    expect(calls, 1);
+    expect(t.widget<FilledButton>(find.byType(FilledButton)).onPressed, isNull);
+    expect(t.takeException(), isNull);
+  });
+
   testWidgets('تُبنى بلا استثناء وتعرض زر الإدارة والأرقام', (t) async {
     await t.pumpWidget(_host(_gift()));
     await t.pump();

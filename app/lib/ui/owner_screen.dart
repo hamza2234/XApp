@@ -12,6 +12,7 @@ import 'theme.dart';
 import 'biometric_gate.dart';
 import 'brand_logo.dart';
 import 'cached_image.dart';
+import 'splash.dart';
 
 /// نسخ معرّف الجهاز — يُستخدم من عدة تبويبات في لوحة المالك.
 Future<void> copyDeviceId(BuildContext context, String value) async {
@@ -60,7 +61,7 @@ class _OwnerScreenState extends State<OwnerScreen> {
         ),
         body: TabBarView(children: [
           _OverviewTab(api: widget.api),
-          _SettingsTab(api: widget.api),
+          _SettingsTab(api: widget.api, store: widget.store),
           _UsersTab(api: widget.api),
           _WalletsTab(api: widget.api),
           _AnnouncementsTab(api: widget.api),
@@ -245,8 +246,9 @@ class _OverviewTabState extends State<_OverviewTab> {
 // ============ الإعدادات ============
 
 class _SettingsTab extends StatefulWidget {
-  const _SettingsTab({required this.api});
+  const _SettingsTab({required this.api, required this.store});
   final Api api;
+  final Store store;
   @override
   State<_SettingsTab> createState() => _SettingsTabState();
 }
@@ -336,7 +338,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                 })
             .toList(),
         dailyFree: saved.dailyFreeQuota,
-        dailyGift: saved.dailyGiftAmount,
+        dailyGift: saved.dailyFreeQuota,
         videosHidden: saved.videosHidden,
         videosHiddenMessage: saved.videosHiddenMessage,
       );
@@ -373,8 +375,8 @@ class _SettingsTabState extends State<_SettingsTab> {
               ]),
               const SizedBox(height: 6),
               Text(
-                  'عدد العمليات المجانية يومياً لكل مستخدم — زائر ومسجّل ومشترك. '
-                  'عدّاد واحد يُخصم منه فتح المخططات ودخول الشركات في التوافقات.',
+                  'عدد العملات التي يستلمها المستخدم عبر العجلة كل 24 ساعة كاملة. '
+                  'رصيد واحد للمخططات والتوافقات، دون منحة تلقائية إضافية.',
                   style: TextStyle(color: XTheme.textDim, fontSize: 12)),
               const SizedBox(height: 8),
               Row(children: [
@@ -719,7 +721,7 @@ class _SettingsTabState extends State<_SettingsTab> {
                 style: TextStyle(
                     color: _msg == 'تم الحفظ' ? XTheme.ok : XTheme.danger)),
           ),
-        _OwnerPanelSecurity(),
+        _OwnerPanelSecurity(api: widget.api, store: widget.store),
         const SizedBox(height: 18),
         SizedBox(
           width: double.infinity,
@@ -2906,7 +2908,9 @@ class _ChatTabState extends State<_ChatTab>
 /// الخادم. «إنهاء الجلسة» يمحو الرمز المحلي وختم الفتح معاً، فلا يبقى أثر
 /// يصلح لفتح اللوحة إن فُقد الهاتف.
 class _OwnerPanelSecurity extends StatefulWidget {
-  const _OwnerPanelSecurity();
+  final Api api;
+  final Store store;
+  const _OwnerPanelSecurity({required this.api, required this.store});
 
   @override
   State<_OwnerPanelSecurity> createState() => _OwnerPanelSecurityState();
@@ -2960,7 +2964,7 @@ class _OwnerPanelSecurityState extends State<_OwnerPanelSecurity> {
             style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
         content: const Text(
             'ستحتاج اسم المستخدم وكلمة المرور للدخول مرة أخرى. '
-            'لا يتأثر حسابك العادي ولا اشتراكك.'),
+            'ستُغلق كل شاشات المالك وتعود للتصفح كزائر.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -2972,10 +2976,11 @@ class _OwnerPanelSecurityState extends State<_OwnerPanelSecurity> {
       ),
     );
     if (ok != true) return;
-    await Store.clearOwnerSession();
+    // إنهاء كلّ جلسات المالك والمستخدم، وتوليد تثبيت جديد لإلغاء وصول
+    // الدورات المفتوحة — المنح مربوطة بالتثبيت لا بالحساب.
     if (!mounted) return;
-    // نعود لبوابة الدخول: اللوحة الحالية صارت بلا جلسة صالحة.
-    Navigator.of(context).popUntil((r) => r.isFirst);
+    // عودة كاملة للإقلاع: تُعيد تهيئة كل الشاشات والبيانات كزائر.
+    await logoutToGuest(context, widget.api, widget.store);
   }
 
   @override
@@ -3409,6 +3414,21 @@ class _CoursesTabState extends State<_CoursesTab>
     final busy = ValueNotifier<bool>(false);
     final progress = ValueNotifier<String>('');
     String? picked;
+    XFile? thumb;
+    XFile? cover;
+
+    Future<String?> _toB64(XFile? file) async {
+      if (file == null) return null;
+      final bytes = await file.readAsBytes();
+      return base64Encode(bytes);
+    }
+
+    String _imageMime(String name) {
+      final n = name.toLowerCase();
+      if (n.endsWith('.png')) return 'image/png';
+      if (n.endsWith('.webp')) return 'image/webp';
+      return 'image/jpeg';
+    }
 
     final ok = await showDialog<bool>(
       context: context,
@@ -3457,6 +3477,44 @@ class _CoursesTabState extends State<_CoursesTab>
                   ),
               ]),
             ),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy.value ? null : () async {
+                    final x = await ImagePicker().pickImage(
+                      source: ImageSource.gallery,
+                      maxWidth: 1024,
+                      maxHeight: 1024,
+                      imageQuality: 85,
+                    );
+                    if (x == null) return;
+                    thumb = x;
+                    if (ctx.mounted) (ctx as Element).markNeedsBuild();
+                  },
+                  icon: const Icon(Icons.image_outlined, size: 18),
+                  label: Text(thumb == null ? 'مصغّرة الفيديو' : 'تم اختيار مصغّرة'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: busy.value ? null : () async {
+                    final x = await ImagePicker().pickImage(
+                      source: ImageSource.gallery,
+                      maxWidth: 1280,
+                      maxHeight: 720,
+                      imageQuality: 85,
+                    );
+                    if (x == null) return;
+                    cover = x;
+                    if (ctx.mounted) (ctx as Element).markNeedsBuild();
+                  },
+                  icon: const Icon(Icons.image, size: 18),
+                  label: Text(cover == null ? 'غلاف الدورة' : 'تم اختيار غلاف'),
+                ),
+              ),
+            ]),
             const SizedBox(height: 6),
             ValueListenableBuilder<bool>(
               valueListenable: free,
@@ -3512,7 +3570,7 @@ class _CoursesTabState extends State<_CoursesTab>
                 }
                 busy.value = true;
                 try {
-                  await widget.api.ownerUploadCourseVideo(
+                  final res = await widget.api.ownerUploadCourseVideo(
                     courseId: courseId,
                     title: title.text.trim(),
                     filePath: picked!,
@@ -3526,6 +3584,25 @@ class _CoursesTabState extends State<_CoursesTab>
                       progress.value = 'يُرفع… $pct٪ ($mb من ${(total / 1048576).toStringAsFixed(1)} MB)';
                     },
                   );
+                  final videoId = res['id']?.toString() ?? '';
+                  if (videoId.isNotEmpty) {
+                    final t = thumb;
+                    if (t != null) {
+                      final thumbB64 = await _toB64(t);
+                      if (thumbB64 != null) {
+                        await widget.api.ownerUploadCourseThumb(
+                            videoId, thumbB64, _imageMime(t.name));
+                      }
+                    }
+                    final cv = cover;
+                    if (cv != null) {
+                      final coverB64 = await _toB64(cv);
+                      if (coverB64 != null) {
+                        await widget.api.ownerUploadCourseCover(
+                            courseId, coverB64, _imageMime(cv.name));
+                      }
+                    }
+                  }
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx, true);
                 } catch (e) {

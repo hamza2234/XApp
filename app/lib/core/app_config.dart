@@ -93,7 +93,7 @@ class AppConfig extends ChangeNotifier {
     _privacy = p.getString(_kPrivacy) ?? '';
     _dailyFree = p.getInt(_kDailyFree) ?? 5;
     _schemPrice = p.getInt(_kSchemPrice) ?? 1;
-    _dailyGift = p.getInt(_kGift) ?? 0;
+    _dailyGift = _dailyFree;
     _videosHidden = p.getBool(_kVideoHidden) ?? false;
     _videosHiddenMessage = p.getString(_kVideoHiddenMsg) ?? '';
     _chatWriteScope = p.getString(_kChatWriteScope) ?? 'registered';
@@ -129,7 +129,7 @@ class AppConfig extends ChangeNotifier {
     final quota = (s['dailyFreeQuota'] as num?)?.toInt() ??
         (legacy.isEmpty ? _dailyFree : legacy.reduce((a, b) => a > b ? a : b));
     final privacy = (s['privacyPolicy'] ?? '').toString();
-    final gift = (s['dailyGiftAmount'] as num?)?.toInt() ?? _dailyGift;
+    final gift = quota;
     final schem = (s['schemFilePrice'] as num?)?.toInt() ?? _schemPrice;
     // القيمة القادمة من الخادم هي المرجع؛ إن غابت نُبقي آخر قيمة معروفة كي
     // لا يعود الفيديو للظهور بخطأ شبكة عابر أثناء الإيقاف.
@@ -171,7 +171,7 @@ class AppConfig extends ChangeNotifier {
           packages: packages ?? _packages,
           dailyFree: dailyFree ?? _dailyFree,
           schemPrice: schemPrice ?? _schemPrice,
-          dailyGift: dailyGift ?? _dailyGift,
+          dailyGift: dailyFree ?? _dailyFree,
           videosHidden: videosHidden ?? _videosHidden,
           videosHiddenMessage: videosHiddenMessage ?? _videosHiddenMessage,
           chatWriteScope: chatWriteScope ?? _chatWriteScope,

@@ -28,7 +28,7 @@ class XApp extends StatefulWidget {
 
 class _XAppState extends State<XApp> {
   late final Future<Store> _store = Store.init();
-  late final Api api;
+  Api? _api;
 
   @override
   void initState() {
@@ -57,7 +57,7 @@ class _XAppState extends State<XApp> {
             home: Scaffold(backgroundColor: XTheme.bg),
           );
         }
-        api = Api(snap.data!);
+        final api = _api ??= Api(snap.data!);
         return MaterialApp(
           title: kAppName,
           debugShowCheckedModeBanner: false,

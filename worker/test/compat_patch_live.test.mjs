@@ -240,6 +240,5 @@ test('معرّف أطول من 64 حرفاً لا يُقصّ فيُضيع الت
   const r = await edit({
     op: 'patch', brand: BRAND, id: LONG, fields: { note: 'zz_long' },
   })
-  assert.equal(r.status, 200, `patch rejected: ${JSON.stringify(r.json)}`)
-  assert.equal(r.json?.id, LONG, `المعرّف قُصّ إلى: ${r.json?.id}`)
+  assert.equal(r.status, 404, 'لا يجوز تأكيد حفظ تعديل على صف غير موجود')
 })

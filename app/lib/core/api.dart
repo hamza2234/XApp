@@ -110,6 +110,11 @@ class Api {
   final _sigCache = <String, Map<String, String>>{};
   final _sigCacheAt = <String, int>{};
 
+  void clearMediaSignatures() {
+    _sigCache.clear();
+    _sigCacheAt.clear();
+  }
+
   /// صلاحية ترويسة الوسائط — أقصر من نافذة الخادم (دقيقتان) بهامش أمان
   /// يستوعب فرق ساعة الجهاز، فلا يُرفض رابط ثُبّت لتوّه.
   static const _mediaSigTtlMs = 90 * 1000;
@@ -123,7 +128,7 @@ class Api {
     // الجلسة جزء من المفتاح: تخزين ترويسة تحمل رمز جلسة قديم بعد تبديل
     // الحساب يعني تحميل وسائط بصلاحية من سجّل خروجه — وهذا خلل أمني لا
     // مجرّد خطأ عرض. تغيّر الرمز يُبطل المفتاح فيُوقَّع من جديد فوراً.
-    final key = '${store.token ?? ''}\u0000$method $pathWithQuery';
+    final key = '${store.ownerToken ?? ''}\u0000${store.token ?? ''}\u0000${store.installId}\u0000$method $pathWithQuery';
     final now = DateTime.now().millisecondsSinceEpoch;
     final cached = _sigCache[key];
     if (cached != null && now - (_sigCacheAt[key] ?? 0) < _mediaSigTtlMs) {
@@ -510,7 +515,7 @@ class Api {
         'note': note,
       });
 
-  Future<Map<String, dynamic>> me() => get('/v1/me');
+  Future<Map<String, dynamic>> me() => get('/v1/me', timeout: _bootTimeout);
 
   /// يهيّئ هوية التوقيع: يولّد زوج المفاتيح ويسجّل العام على الخادم.
   ///
@@ -533,7 +538,7 @@ class Api {
                 'publicKey': publicKey,
                 'appVersion': '$kAppVersion',
               }))
-          .timeout(const Duration(seconds: 30));
+          .timeout(_bootTimeout);
       // 409 يعني أن هذا التثبيت سُجّل بمفتاح آخر (أُعيد ضبط البيانات مع
       // بقاء المعرّف). لا يُحلّ بصمت: نرمي ليُعاد التوليد بمعرّف جديد في
       // الإقلاع التالي بدل أن يبقى التطبيق بلا توقيع صالح.
@@ -607,6 +612,14 @@ class Api {
           as List;
 
   // ===== المالك =====
+  /// يسحب وسم «جهاز المالك» عن هذا التثبيت قبل إنهاء الجلسة.
+  ///
+  /// بدونه يبقى `ownerDevice` صادقاً في الخادم فيرى هذا الجهاز كل دورة
+  /// مقفلة مفتوحةً حتى بعد خروج المالك — وهو بالضبط خلل «الدورات تبقى
+  /// مفتوحة بعد الخروج». الفشل هنا لا يمنع الخروج المحلي.
+  Future<void> ownerReleaseDevice() =>
+      ownerSend('POST', '/v1/owner/device/release', {}).then((_) {});
+
   Future<Map<String, dynamic>> ownerOverview() => ownerGet('/v1/owner/overview');
   Future<Map<String, dynamic>> ownerSettings() => ownerGet('/v1/owner/settings');
   Future<Map<String, dynamic>> saveSettings(Map<String, dynamic> s) =>

@@ -11,7 +11,7 @@ void main() {
   setUpAll(() {
     expect(src.existsSync(), isTrue,
         reason: 'لم يُعثر على مصدر العامل في ${src.absolute.path}');
-    ts = src.readAsStringSync();
+    ts = src.readAsStringSync().replaceAll('\r\n', '\n');
   });
 
   String fnBody(String marker) {

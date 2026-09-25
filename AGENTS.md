@@ -423,3 +423,20 @@ flutter build apk --release
 الفحص الحقيقي: `flutter test test/version_lock_live_test.dart` — يوقّع طلباً
 برقم بناء قديم ويتوقّع 426، ثم يتأكد أن النسخة الحالية تمرّ بـ200.
 
+## تحقق محلي على Windows
+
+- Flutter الموجود محلياً: `D:\flutter\bin\flutter.bat`. شغّله عبر PowerShell
+  باستخدام `& 'D:\flutter\bin\flutter.bat'`؛ غيابه عن PATH لا يعني غياب SDK.
+- فحوص التوافقات والحصة المحلية، بلا اتصال بالإنتاج:
+  `node --test test/compat_quota_local.test.mjs` من `worker/`، باستخدام Node 24.
+  الاختبار ينفذ كود المسارات مع SQLite في الذاكرة وبديل لواجهة D1؛ ليس اختباراً
+  على Cloudflare المنشور. يغطي الحفظ والقراءة وحذف النص والحصة والتراجع الذري.
+- فحوص Flutter المرتبطة:
+  `flutter test --no-pub test/compat_owner_inline_edit_test.dart test/compat_owner_security_test.dart test/gift_screen_render_test.dart test/gift_wheel_test.dart`.
+- اختبارات قراءة المصدر تطبّع CRLF إلى LF قبل البحث عن حدود الدوال.
+- الحصة المطلوبة واحدة: `dailyFreeQuota` مصدر مبلغ العجلة، و`dailyGiftAmount`
+  اسم توافق قديم للقيمة نفسها. لا حصة تلقائية فوق رصيد الاستلام. الاستلام
+  التالي بعد 86400000 ميلي ثانية من السابق، ويجب نشر Worker مع تحديث التطبيق.
+- رد تعديل التوافقات يتضمن `record` المحفوظ؛ الواجهة تحدّث هذا الصف دون إعادة
+  البحث. قاعدة المرآة تبقى للقراءة فقط، والحفظ في `x_compat_edits` الخاصة بـXApp.
+

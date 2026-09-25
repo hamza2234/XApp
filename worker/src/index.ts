@@ -352,7 +352,7 @@ function normalizeSettings(s: XSettings, raw: Partial<XSettings>): XSettings {
     if (legacy > 0) s.dailyFreeQuota = Math.min(1000, legacy)
   }
   s.dailyFreeQuota = Math.max(0, Math.min(1000, Math.floor(Number(s.dailyFreeQuota) || 0)))
-  s.dailyGiftAmount = Math.max(0, Math.min(1000, Math.floor(Number(s.dailyGiftAmount) || 0)))
+  s.dailyGiftAmount = s.dailyFreeQuota
   s.videosHidden = !!s.videosHidden
   // الحقلان المهجوران يبقيان معروضين في bootstrap بنفس القيمة كي لا تظن
   // نسخة قديمة من التطبيق أن المالك ألغى المنحة.
@@ -1107,7 +1107,8 @@ async function chargeOne(
     // المنحة الشخصية أولاً، ثم سقف العنوان: لو سبق سقف العنوان لكانت
     // الهوية الواحدة تُخصم منها منحة لم تُمنح أصلاً. فحص العنوان يقع بعد
     // نجاح المنحة الشخصية فقط، فلا يُخصم من سقف العنوان طلب لم يُمنح.
-    const freeLeft = await takeDailyFree(env.XDB, fp, settings.dailyFreeQuota)
+    const automaticFreeQuota = 0
+    const freeLeft = await takeDailyFree(env.XDB, fp, automaticFreeQuota)
     if (freeLeft >= 0) {
       if (await takeDailyFreeByIp(env.XDB, addr, settings.dailyFreeQuota)) {
         return { freeLeft, balance: -1, source: 'free' }
@@ -1262,6 +1263,7 @@ async function mergeCompatEdits(
         fields = { ...fields, ...JSON.parse(e.data) }
       } catch { /* تعديل تالف لا يُسقط الصفّ */ }
     }
+    if (!compatRowMatches(fields, tokens, keyword, type)) continue
     out.push({ id: d.id, fields })
     seen.add(d.id)
   }
@@ -3145,8 +3147,8 @@ export default {
 
       if (path === '/v1/me' && request.method === 'GET') {
         const fp = await walletOf(env, request)
-        const freeUsed = await dailyFreeUsed(env.XDB, fp)
-        const freeLimit = Math.max(0, Math.floor(Number(settings.dailyFreeQuota) || 0))
+        const freeUsed = 0
+        const freeLimit = 0
         const wallet = caller.role === 'guest'
           ? await env.XDB.prepare(
               'SELECT balance, expires_at FROM x_guest_wallets WHERE device_id = ?1'
@@ -3168,25 +3170,21 @@ export default {
         // الزر متاحاً (الخادم يرد 409 عند الضغط). الاستعلام هنا يجعل الشكل
         // صادقاً من أول تحميل، ومنه أيضاً نعرف متى تُفتح هديّة الغد.
         const giftAmount = Math.max(0, Math.min(1000,
-          Math.floor(Number(settings.dailyGiftAmount) || 0)))
+          Math.floor(Number(settings.dailyFreeQuota) || 0)))
         // لحظة الفتح تُقرأ من صفّ المحفظة. بلا هذا كان العدّاد يشير إلى منتصف
         // الليل بينما الاستلام الفعلي بعد 24 ساعة من الاستلام — فرق يصل إلى
         // 24 ساعة بين ما يعرضه العدّاد وما يقبله الخادم.
         const giftRow = giftAmount > 0
           ? await env.XDB.prepare(
-              'SELECT next_at FROM x_gift_claims WHERE wallet = ?1'
-            ).bind(fp).first<{ next_at: number }>()
+              'SELECT last_at, next_at FROM x_gift_claims WHERE wallet = ?1'
+            ).bind(fp).first<{ last_at: number; next_at: number }>()
           : null
         // قاعدة لم تُحدَّث بعد لا تحمل الصفّ: نرجع لفحص اليوم التقويمي كي لا
         // يظهر الزر متاحاً ثم يردّ الخادم 409.
-        const legacyTaken = giftRow ? false : !!(await env.XDB.prepare(
-          "SELECT 1 AS t FROM x_quota_daily WHERE uid = ?1 AND day = ?2 AND kind = 'gift'"
-        ).bind(fp, today()).first())
         const nextAt = giftRow
-          ? Number(giftRow.next_at)
-          : Date.parse(today() + 'T00:00:00.000Z') + 86400000
-        const giftTaken = giftAmount > 0 &&
-          (giftRow ? Number(giftRow.next_at) > Date.now() : legacyTaken)
+          ? Math.max(Number(giftRow.next_at), Number(giftRow.last_at) + DAY * 1000)
+          : 0
+        const giftTaken = giftAmount > 0 && nextAt > Date.now()
         return json({
           user: {
             id: caller.uid, role: caller.role,
@@ -4039,7 +4037,7 @@ export default {
         await rateLimit(env, request, 'gift_claim', 20, 3600)
         const fp = await walletOf(env, request)
         const amount = Math.max(0, Math.min(1000,
-          Math.floor(Number(settings.dailyGiftAmount) || 0)))
+          Math.floor(Number(settings.dailyFreeQuota) || 0)))
         if (amount <= 0) {
           return json({ ok: false, error: 'الهديّة معطّلة حالياً', status: 403 }, 403)
         }
@@ -4051,61 +4049,52 @@ export default {
         // من يستلم الساعة 23:00 يفقد هديّته بعد ساعة، ومن يستلم 00:05 يُمنع
         // 24 ساعة — أي هديّتان في يوم واحد أو واحدة في يومين حسب التوقيت.
         const nowMs = Date.now()
-        const nextMs = nowMs + DAY
-        let claimed = false
-        try {
-          // محاولة تحديث صفّ قائم انتهت مهلته.
-          const upd = await env.XDB.prepare(
-            `UPDATE x_gift_claims SET last_at = ?2, next_at = ?3, updated_at = ?4
-             WHERE wallet = ?1 AND next_at <= ?5
-             RETURNING wallet`
-          ).bind(fp, nowMs, nextMs, new Date(nowMs).toISOString(), nowMs)
-            .first<{ wallet: string }>()
-          if (upd) claimed = true
-          else {
-            // لا صفّ أصلاً = أول استلام. الإدخال يفشل إن سبقه طلب متزامن،
-            // فيبقى المنح مرة واحدة.
-            const ins = await env.XDB.prepare(
-              `INSERT INTO x_gift_claims (wallet, last_at, next_at, updated_at)
-               VALUES (?1, ?2, ?3, ?4)
-               ON CONFLICT(wallet) DO NOTHING
-               RETURNING wallet`
-            ).bind(fp, nowMs, nextMs, new Date(nowMs).toISOString())
-              .first<{ wallet: string }>()
-            if (ins) claimed = true
-          }
-        } catch {
-          // الجدول غير موجود بعد على قاعدة لم تُحدَّث: لا نُسقط الاستلام،
-          // ونرجع للمفتاح اليومي كي تبقى الهديّة تعمل بلا انقطاع.
-          const fallback = await env.XDB.prepare(
-            `INSERT INTO x_quota_daily (uid, day, kind, used) VALUES (?1, ?2, 'gift', ?3)
-             ON CONFLICT(uid, day, kind) DO UPDATE SET used = used + ?3 WHERE 0
-             RETURNING used`
-          ).bind(fp, today(), amount).first<{ used: number }>()
-          claimed = !!fallback
+        const nextMs = nowMs + DAY * 1000
+        if (caller.role !== 'user' && caller.role !== 'guest') {
+          throw new HttpError(403, 'الحصة متاحة للمستخدمين والزوار فقط')
         }
-        if (!claimed) {
-          return json({ ok: false, error: 'حصلت على هديّة اليوم بالفعل', status: 409 }, 409)
+        if (await fingerprintRotated(env, request, caller)) {
+          throw new HttpError(403, 'تعذر تأكيد هوية المحفظة')
         }
+        const stamp = new Date(nowMs).toISOString()
+        // محاولة تحديث صفّ قائم انتهت مهلته.
+        // لا صفّ أصلاً = أول استلام. الإدخال يفشل إن سبقه طلب متزامن،
+        // فيبقى المنح مرة واحدة.
+        const claim = env.XDB.prepare(
+          `INSERT INTO x_gift_claims (wallet, last_at, next_at, updated_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(wallet) DO UPDATE SET last_at = ?2, next_at = ?3, updated_at = ?4
+           WHERE next_at <= ?2 AND last_at <= ?5
+           RETURNING wallet`
+        ).bind(fp, nowMs, nextMs, stamp, nowMs - DAY * 1000)
+        // الجدول غير موجود بعد على قاعدة لم تُحدَّث: لا نُسقط الاستلام،
+        // ونرجع للمفتاح اليومي كي تبقى الهديّة تعمل بلا انقطاع.
         // الإيداع في المحفظة الحقيقية: مشترك في رصيده، وزائر في محفظته.
-        let balance: number
-        if (caller.role === 'user') {
-          const row = await env.XDB.prepare(
-            'UPDATE x_users SET quota_balance = quota_balance + ?2 WHERE id = ?1 RETURNING quota_balance'
-          ).bind(caller.uid, amount).first<{ quota_balance: number }>()
-          balance = row?.quota_balance ?? 0
-        } else if (caller.role === 'guest') {
-          const row = await env.XDB.prepare(
-            `INSERT INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
-             VALUES (?1, ?2, 0, ?3, ?3)
-             ON CONFLICT(device_id) DO UPDATE SET balance = balance + ?2, updated_at = ?3
-             RETURNING balance`
-          ).bind(fp, amount, new Date().toISOString())
-            .first<{ balance: number }>()
-          balance = row?.balance ?? 0
-        } else {
-          balance = -1
+        const credit = caller.role === 'user'
+          ? env.XDB.prepare(
+              `UPDATE x_users SET
+                 quota_balance = CASE WHEN quota_expires_at > 0 AND quota_expires_at <= ?3
+                   THEN ?2 ELSE quota_balance + ?2 END,
+                 quota_expires_at = CASE WHEN quota_expires_at > 0 AND quota_expires_at <= ?3
+                   THEN 0 ELSE quota_expires_at END
+               WHERE id = ?1 AND changes() = 1 RETURNING quota_balance AS balance`
+            ).bind(caller.uid, amount, nowMs)
+          : env.XDB.prepare(
+              `INSERT INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
+               SELECT ?1, ?2, 0, ?3, ?3 WHERE changes() = 1
+               ON CONFLICT(device_id) DO UPDATE SET
+                 balance = CASE WHEN expires_at > 0 AND expires_at <= ?4
+                   THEN ?2 ELSE balance + ?2 END,
+                 expires_at = CASE WHEN expires_at > 0 AND expires_at <= ?4
+                   THEN 0 ELSE expires_at END,
+                 updated_at = ?3
+               RETURNING balance`
+            ).bind(fp, amount, stamp, nowMs)
+        const result = await env.XDB.batch([claim, credit])
+        if (!result[0].results.length) {
+          return json({ ok: false, error: 'يمكن استلام الحصة مرة كل 24 ساعة', status: 409 }, 409)
         }
+        const balance = Number((result[1].results[0] as { balance: number }).balance)
         await logSecurity(env, request, 'gift_claim', `amount=${amount} role=${caller.role}`)
         return json({
           ok: true, amount, balance, nextAt: nextMs,
@@ -4475,7 +4464,7 @@ export default {
           await env.XDB.prepare(
             `INSERT INTO x_settings (id, data) VALUES ('main', ?1)
              ON CONFLICT(id) DO UPDATE SET data = ?1`
-          ).bind(JSON.stringify(next)).run()
+          ).bind(JSON.stringify(normalizeSettings(next, body))).run()
           return sealed({ ok: true, settings: next })
         }
 
@@ -5323,7 +5312,7 @@ export default {
           if (op === 'patch') {
             const id = String(body.id ?? '').trim()
             const fields = body.fields
-            if (!id || !fields || typeof fields !== 'object') {
+            if (!id || !fields || typeof fields !== 'object' || Array.isArray(fields)) {
               throw new HttpError(400, 'id و fields مطلوبان')
             }
             // الطبقة تُبنى على أي تعديل سابق لنفس الصفّ: صفّ أنشأه المالك
@@ -5333,11 +5322,14 @@ export default {
             // جديد تنجح لأن مسارها `new`، فيبدو الفشل خاصاً بالصفوف القائمة.
             const prev = await env.XDB.prepare(
               `SELECT data, kind FROM x_compat_edits
-               WHERE doc_key = ?1 AND kind IN ('new', 'patch')`
-            ).bind(id).first<{ data: string; kind: string }>()
+               WHERE doc_key = ?1 AND brand_file = ?2 AND kind IN ('new', 'patch')`
+            ).bind(id, brandFile).first<{ data: string; kind: string }>()
             let merged: Record<string, unknown> = {}
             if (prev) { try { merged = JSON.parse(prev.data) } catch { /* تجاهل */ } }
-            merged = { ...merged, ...(fields as Record<string, unknown>) }
+            const original = prev?.kind === 'new' ? null : await env.MIRROR.prepare(
+              "SELECT data FROM docs WHERE id = ?1 AND brand_file = ?2 AND collection = 'compatibility'"
+            ).bind(id, brandFile).first<{ data: string }>()
+            if (!original && prev?.kind !== 'new') throw new HttpError(404, 'صف التوافق غير موجود في هذه الشركة')
             // كل حقل يُفلتَر باسمه: لا يُقبل مفتاح لم نختره، ولا قيمة بلا حدّ.
             // كان `fields` يُدمج كما وصل، فجلسة مسروقة تكتب ما تشاء في الصفّ
             // الذي يقرأه كل المستخدمين.
@@ -5345,6 +5337,10 @@ export default {
             for (const key of Object.keys(fields as Record<string, unknown>)) {
               const v = (fields as Record<string, unknown>)[key]
               if (key === 'compatibleModels') {
+                if (Array.isArray(v) && (v.length > COMPAT_MAX_MODELS ||
+                    v.some(m => typeof m !== 'string' || m.length > COMPAT_MAX_MODEL_LEN))) {
+                  throw new HttpError(400, 'عدد النصوص أو طول أحدها يتجاوز الحد المسموح')
+                }
                 const list = sanitizeModels(Array.isArray(v) ? v : splitModelLines(v))
                 if (!list.length) throw new HttpError(400, 'لا موديلات صالحة في الصفّ')
                 safe.compatibleModels = list
@@ -5363,8 +5359,14 @@ export default {
             // لا وجود له فيه؛ وما عداه `patch` على صفّ المرآة.
             const kind = prev?.kind === 'new' ? 'new' : 'patch'
             await put(id, kind, merged, false)
+            const saved = await env.XDB.prepare(
+              'SELECT data FROM x_compat_edits WHERE id = ?1 AND brand_file = ?2'
+            ).bind(`ce_${id}_${kind}`, brandFile).first<{ data: string }>()
+            if (!saved) throw new HttpError(500, 'تعذر تأكيد حفظ الصف')
             await logSecurity(env, request, 'owner_compat_patch', `id=${id} brand=${brandFile}`)
-            return sealed({ ok: true, id, kind })
+            return sealed({ ok: true, id, kind, record: {
+              ...(original ? JSON.parse(original.data) : {}), ...JSON.parse(saved.data), id,
+            } })
           }
 
           if (op === 'delete') {
@@ -5372,11 +5374,11 @@ export default {
             if (!id) throw new HttpError(400, 'id مطلوب')
             // صف أنشأه المالك يُحذف فعلياً: لا مصدر تحته ليُعلَّم عليه.
             const isNew = await env.XDB.prepare(
-              `SELECT 1 x FROM x_compat_edits WHERE doc_key = ?1 AND kind = 'new'`
-            ).bind(id).first<any>()
+              `SELECT 1 x FROM x_compat_edits WHERE doc_key = ?1 AND brand_file = ?2 AND kind = 'new'`
+            ).bind(id, brandFile).first<any>()
             if (isNew) {
-              await env.XDB.prepare('DELETE FROM x_compat_edits WHERE doc_key = ?1')
-                .bind(id).run()
+              await env.XDB.prepare('DELETE FROM x_compat_edits WHERE doc_key = ?1 AND brand_file = ?2')
+                .bind(id, brandFile).run()
             } else {
               // الحذف لا يمسح الطبقة: يُعلَّم `deleted` فوق محتواها القائم
               // ليبقى قابلاً للاسترجاع. البحث بـ`kind='patch'` وحده كان
@@ -5384,8 +5386,12 @@ export default {
               // المالك، وهو السلوك الذي يظهر كـ«الحذف لا ينجح» على صفّ قائم.
               const prev = await env.XDB.prepare(
                 `SELECT data FROM x_compat_edits
-                 WHERE doc_key = ?1 AND kind IN ('patch', 'new')`
-              ).bind(id).first<{ data: string }>()
+                 WHERE doc_key = ?1 AND brand_file = ?2 AND kind IN ('patch', 'new')`
+              ).bind(id, brandFile).first<{ data: string }>()
+              const original = await env.MIRROR.prepare(
+                "SELECT id FROM docs WHERE id = ?1 AND brand_file = ?2 AND collection = 'compatibility'"
+              ).bind(id, brandFile).first()
+              if (!original) throw new HttpError(404, 'صف التوافق غير موجود في هذه الشركة')
               await put(id, 'patch', prev ? JSON.parse(prev.data) : {}, true)
             }
             await logSecurity(env, request, 'owner_compat_delete', `id=${id} brand=${brandFile}`)

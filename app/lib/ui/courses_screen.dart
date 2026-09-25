@@ -13,7 +13,6 @@ import 'package:video_player/video_player.dart';
 
 import '../core/api.dart';
 import '../core/app_config.dart';
-import '../core/config.dart';
 import '../core/media_proxy.dart';
 import '../core/models.dart';
 import 'cached_image.dart';
@@ -220,10 +219,15 @@ class _CoursesScreenState extends State<CoursesScreen>
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => CoursePlayerScreen(
         api: widget.api,
+        course: course,
         video: fresh,
-        title: fresh.title,
-        courseTitle: course.title,
-        onNeedUnlock: () => _askForKey(course),
+        // بعد الفتح يُعاد تحميل الدورات داخل `_askForKey` — نُرجع النسخة
+        // الجديدة لتحدّث شاشة المشغّل قائمتها وروابط البث فوراً.
+        onNeedUnlock: () async {
+          await _askForKey(course);
+          if (!mounted) return null;
+          return _courses.where((x) => x.id == course.id).firstOrNull;
+        },
       ),
     ));
     if (!mounted) return;
@@ -576,53 +580,44 @@ class _CoursesScreenState extends State<CoursesScreen>
     ]);
   }
 
-  /// نداء الفتح — يظهر أعلى القائمة فقط حين تكون الدورة مقفلة.
+  /// نداء الفتح — شريط مدمج في أعلى القائمة، لا يأخذ مساحة كبيرة.
   Widget _unlockBanner(Course c) => Container(
         margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
           color: XTheme.gold.withOpacity(.10),
-          borderRadius: BorderRadius.circular(XTheme.rLg),
+          borderRadius: BorderRadius.circular(XTheme.rMd),
           border: Border.all(color: XTheme.gold.withOpacity(.35)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              const Icon(Icons.lock_outline, color: XTheme.gold, size: 18),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text('الدورة كاملة مقفلة',
+        child: Row(children: [
+          const Icon(Icons.lock_outline, color: XTheme.gold, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('الدورة مقفلة',
                     style:
-                        TextStyle(fontSize: 13.8, fontWeight: FontWeight.w900)),
-              ),
-            ]),
-            const SizedBox(height: 6),
-            Text(
-              'المفتاح يُفعَّل مرة واحدة على هذا الجهاز ويفتح كل الفيديوهات، '
-              'وكل ما يُضيفه المالك لاحقاً في هذه الدورة.',
-              style: TextStyle(fontSize: 12.2, color: XTheme.textDim, height: 1.5),
+                        TextStyle(fontSize: 13, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 2),
+                Text('أدخل المفتاح لفتح كل الفيديوهات',
+                    style: TextStyle(fontSize: 11.5, color: XTheme.textDim)),
+              ],
             ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () => _askForKey(c),
-                  icon: const Icon(Icons.key, size: 17),
-                  label: const Text('لدي مفتاح'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _contactOwner,
-                  icon: const Icon(Icons.support_agent, size: 17),
-                  label: const Text('المالك'),
-                ),
-              ),
-            ]),
-          ],
-        ),
+          ),
+          FilledButton.icon(
+            onPressed: () => _askForKey(c),
+            icon: const Icon(Icons.key, size: 14),
+            label: const Text('فتح', style: TextStyle(fontSize: 12)),
+          ),
+          const SizedBox(width: 6),
+          OutlinedButton.icon(
+            onPressed: _contactOwner,
+            icon: const Icon(Icons.support_agent, size: 14),
+            label: const Text('المالك', style: TextStyle(fontSize: 12)),
+          ),
+        ]),
       );
 
   Widget _videoTile(Course c, CourseVideo v, int index) {
@@ -630,96 +625,104 @@ class _CoursesScreenState extends State<CoursesScreen>
     // يجعل فيديو مجانياً داخل دورة مقفلة يظهر بلا قفل — وهو ما يسمح به
     // الخادم فعلاً، فلا تتناقض الواجهة مع الاستحقاق.
     final locked = !_canPlay(c, v);
-    return InkWell(
-      borderRadius: BorderRadius.circular(XTheme.rMd),
-      onTap: () => _openVideo(c, v),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // المصغّرة الحقيقية التي يرفعها المالك، وعليها علامة القفل إن كان
-          // الدرس مقفلاً — فيعرف المستخدم حاله من الصورة قبل أي نقر.
-          Stack(children: [
-            SizedBox(
-              width: 118,
-              height: 66,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(XTheme.rSm),
-                child: _VideoThumb(
-                  api: widget.api,
-                  video: v,
-                  locked: locked,
+    return Card(
+      margin: const EdgeInsets.only(bottom: 9),
+      color: XTheme.surface,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(XTheme.rMd),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(XTheme.rMd),
+        onTap: () => _openVideo(c, v),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            // المصغّرة الحقيقية التي يرفعها المالك، وعليها علامة القفل إن كان
+            // الدرس مقفلاً — فيعرف المستخدم حاله من الصورة قبل أي نقر.
+            Stack(children: [
+              SizedBox(
+                width: 118,
+                height: 66,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(XTheme.rSm),
+                  child: _VideoThumb(
+                    api: widget.api,
+                    video: v,
+                    locked: locked,
+                  ),
                 ),
               ),
-            ),
-            // القفل فوق الصورة نفسها، لا بدل الصورة.
-            if (locked)
-              Positioned.fill(
-                child: DecoratedBox(
+              // القفل فوق الصورة نفسها، لا بدل الصورة.
+              if (locked)
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(XTheme.rSm),
+                      color: Colors.black.withOpacity(.42),
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.lock, color: Colors.white, size: 26),
+                    ),
+                  ),
+                ),
+              Positioned(
+                bottom: 4,
+                right: 4,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(XTheme.rSm),
-                    color: Colors.black.withOpacity(.42),
+                    color: Colors.black.withOpacity(.7),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                  child: const Center(
-                    child: Icon(Icons.lock, color: Colors.white, size: 26),
+                  child: Text(
+                    v.durationLabel.isEmpty ? '$index' : v.durationLabel,
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 10,
+                        fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
-            Positioned(
-              bottom: 4,
-              right: 4,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(.7),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  v.durationLabel.isEmpty ? '$index' : v.durationLabel,
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 10,
-                      fontWeight: FontWeight.w700),
-                ),
+            ]),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(v.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 13.6, fontWeight: FontWeight.w800)),
+                  if (v.description.trim().isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(v.description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 11.6, color: XTheme.textDim, height: 1.4)),
+                  ],
+                  const SizedBox(height: 5),
+                  Row(children: [
+                    if (v.isFree)
+                      _pill('مجاني', XTheme.ok)
+                    else if (locked)
+                      _pill('مقفل', XTheme.gold)
+                    else
+                      _pill('متاح', XTheme.cyan),
+                    if (v.sizeLabel.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Text(v.sizeLabel,
+                          style: TextStyle(
+                              fontSize: 10.5, color: XTheme.textDim)),
+                    ],
+                  ]),
+                ],
               ),
             ),
           ]),
-          const SizedBox(width: 11),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(v.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 13.6, fontWeight: FontWeight.w800)),
-                if (v.description.trim().isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(v.description,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          fontSize: 11.6, color: XTheme.textDim, height: 1.4)),
-                ],
-                const SizedBox(height: 5),
-                Row(children: [
-                  if (v.isFree)
-                    _pill('مجاني', XTheme.ok)
-                  else if (locked)
-                    _pill('مقفل', XTheme.gold)
-                  else
-                    _pill('متاح', XTheme.cyan),
-                  if (v.sizeLabel.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Text(v.sizeLabel,
-                        style: TextStyle(
-                            fontSize: 10.5, color: XTheme.textDim)),
-                  ],
-                ]),
-              ],
-            ),
-          ),
-        ]),
+        ),
       ),
     );
   }
@@ -751,26 +754,28 @@ class _LockBadge extends StatelessWidget {
   }
 }
 
-/// مشغّل فيديو الدورة — ينزّل مرة، يكاش، ثم يشغّل من الملف المحلي.
+/// مشغّل فيديو الدورة على طراز يوتيوب — المشغّل أعلى الشاشة وقائمة دروس
+/// الدورة تحته. اختيار درس آخر يبدّل المشغّل في مكانه بلا خروج وعودة.
 ///
-/// الفيديو مشفّر عند النقل ولا يمكن لـ`video_player` فكّه في الطيران، فالتنزيل
-/// ثم التشغيل المحلي هو الطريق الوحيد. ونتيجته أفضل أيضاً: تقديم وترجيع سلسان
-/// بلا إعادة تحميل، والمشاهدة الثانية بلا شبكة.
+/// الفيديو يُبثّ عبر الوكيل المحلي الذي يوقّع كل طلب Range طازجاً، فلا
+/// ينزّل الملف كاملاً ولا تصل رابطاً صالحاً لغير المستحق.
 class CoursePlayerScreen extends StatefulWidget {
   const CoursePlayerScreen({
     super.key,
     required this.api,
+    required this.course,
     required this.video,
-    required this.title,
-    this.courseTitle = '',
     this.onNeedUnlock,
   });
 
   final Api api;
+  final Course course;
   final CourseVideo video;
-  final String title;
-  final String courseTitle;
-  final VoidCallback? onNeedUnlock;
+
+  /// يفتح حوار المفتاح ثم يعيد الدورة المحدّثة من الخادم، أو null إن لم يُفتح.
+  /// إعادة الدورة لازمة: القائمة داخل هذه الشاشة تحتاج رابط البث الجديد الذي
+  /// لم يكن موجوداً قبل الفتح.
+  final Future<Course?> Function()? onNeedUnlock;
 
   @override
   State<CoursePlayerScreen> createState() => _CoursePlayerScreenState();
@@ -779,7 +784,12 @@ class CoursePlayerScreen extends StatefulWidget {
 class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   VideoPlayerController? _player;
 
-  /// العنوان المحلي الذي يخدمه الوكيل — يُطلق عند الخروج.
+  /// الدورة والدرس المعروضان الآن — تتغيّران عند اختيار درس من القائمة أو
+  /// عند تحديث الدورة بعد فتحها بالمفتاح.
+  late Course _course;
+  late CourseVideo _current;
+
+  /// العنوان المحلي الذي يخدمه الوكيل — يُطلق عند الخروج أو تبديل الدرس.
   String? _proxyUrl;
   bool _preparing = true;
   String? _error;
@@ -798,6 +808,8 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     // حجب التقاط الشاشة طوال مشاهدة الدرس: الفيديو محتوى مدفوع، والتسجيل
     // منه بالتقاط الشاشة يسرّبه كاملاً بلا استحقاق.
     SecureScreen.on();
+    _course = widget.course;
+    _current = widget.video;
     _watchKillSwitch();
     _prepare();
   }
@@ -830,7 +842,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     // حرس أخير: الخادم لا يرسل رابطاً لغير المستحق. الوصول إلى هنا برابط
     // فارغ كان يحاول تشغيل مسار باطل فيُظهر سواداً ثم «فشل». الرسالة الصريحة
     // والزرّ أدناه يقودان إلى طلب الكود مباشرة.
-    if (widget.video.streamUrl.isEmpty) {
+    if (_current.streamUrl.isEmpty) {
       setState(() {
         _preparing = false;
         _error = 'هذا الدرس يحتاج كود فتح من المالك';
@@ -840,7 +852,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     _armSpinner();
     try {
       final url = await MediaProxy.instance
-          .urlFor(widget.api, widget.video.streamUrl);
+          .urlFor(widget.api, _current.streamUrl);
       _proxyUrl = url;
       if (!mounted) return;
 
@@ -947,148 +959,438 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     await _prepare();
   }
 
+  /// هل الدرس متاح للتشغيل؟ نفس شرط الخادم: `playable` ورابط بثّ غير فارغ.
+  bool _locked(CourseVideo v) => !(v.playable && v.streamUrl.isNotEmpty);
+
+  /// اختيار درس من القائمة تحت المشغّل.
+  ///
+  /// الضغط على الدرس الجاري يبدّل تشغيل/إيقاف بدل إعادة التحميل، والمقفل
+  /// يفتح حوار المفتاح — لا ينتقل إلى مشغّل سيفشل.
+  Future<void> _select(CourseVideo v) async {
+    if (v.id == _current.id) {
+      final p = _player;
+      if (p != null && p.value.isInitialized) {
+        p.value.isPlaying ? p.pause() : p.play();
+      }
+      return;
+    }
+    if (_locked(v)) {
+      await _unlock();
+      return;
+    }
+    await _switchTo(v);
+  }
+
+  /// تبديل الدرس داخل المشغّل نفسه: إيقاف القديم، تحرير مساره في الوكيل،
+  /// ثم تجهيز الجديد — كل ذلك في الشاشة نفسها كما في قوائم يوتيوب.
+  Future<void> _switchTo(CourseVideo v) async {
+    try {
+      await _player?.dispose();
+    } catch (_) {}
+    _player = null;
+    final u = _proxyUrl;
+    if (u != null) MediaProxy.instance.release(u);
+    _proxyUrl = null;
+    _blankFrames = 0;
+    setState(() => _current = v);
+    await _prepare();
+  }
+
+  /// فتح الدورة من داخل المشغّل: يطلب المفتاح، يأخذ الدورة المحدّثة، ثم
+  /// يشغّل الدرس الحالي تلقائياً إن صار متاحاً.
+  Future<void> _unlock() async {
+    final cb = widget.onNeedUnlock;
+    if (cb == null) return;
+    final fresh = await cb();
+    if (!mounted || fresh == null) return;
+    setState(() {
+      _course = fresh;
+      final cur =
+          fresh.videos.where((v) => v.id == _current.id).firstOrNull;
+      if (cur != null) _current = cur;
+    });
+    if (_player == null &&
+        _current.playable &&
+        _current.streamUrl.isNotEmpty) {
+      await _prepare();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black.withOpacity(.5),
-        foregroundColor: Colors.white,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(widget.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontSize: 14.5, fontWeight: FontWeight.w800)),
-            if (widget.courseTitle.isNotEmpty)
-              Text(widget.courseTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: Colors.white54)),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'إغلاق',
-            icon: const Icon(Icons.close),
-            onPressed: () => Navigator.pop(context),
+      backgroundColor: XTheme.bg,
+      body: SafeArea(
+        child: Column(children: [
+          _playerArea(),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+              children: [
+                _meta(),
+                Divider(
+                    height: 22,
+                    color: XTheme.textDim.withOpacity(.12)),
+                _listHeader(),
+                const SizedBox(height: 10),
+                for (var i = 0; i < _course.videos.length; i++)
+                  _episodeTile(_course.videos[i], i + 1),
+              ],
+            ),
           ),
-        ],
+        ]),
       ),
-      body: Center(child: _body()),
     );
   }
 
-  Widget _body() {
+  /// سطح المشغّل أعلى الشاشة بعرض كامل ونسبة 16:9 — كما في يوتيوب.
+  Widget _playerArea() {
+    return Container(
+      color: Colors.black,
+      child: Stack(children: [
+        AspectRatio(aspectRatio: 16 / 9, child: _playerSurface()),
+        // زر الرجوع فوق المشغّل في الزاوية، مكان «السهم للأسفل» في يوتيوب.
+        PositionedDirectional(
+          top: 4,
+          start: 4,
+          child: IconButton(
+            tooltip: 'رجوع',
+            style: IconButton.styleFrom(
+                backgroundColor: Colors.black.withOpacity(.45)),
+            icon: const Icon(Icons.arrow_forward,
+                size: 20, color: Colors.white),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _playerSurface() {
     if (_preparing) {
-      // لا صورة سوداء في المنتصف: كان يظهر مسطّح أسود (أو مصغّرة لا تُحمَّل)
-      // فيبدو المشغّل «عاطلاً» ثم يشتغل فجأة. الآن لا يظهر إلا مؤشر حقيقي،
-      // ولا يظهر أصلاً إن كان الاتصال سريعاً.
+      // لا صورة سوداء صامتة: مؤشر حقيقي يظهر فقط إن طال الانتظار.
       return Center(
         child: AnimatedOpacity(
           opacity: _showSpinner ? 1 : 0,
           duration: const Duration(milliseconds: 180),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            CircularProgressIndicator(color: XTheme.accent),
-            const SizedBox(height: 14),
+            const CircularProgressIndicator(color: XTheme.accent),
+            const SizedBox(height: 12),
             const Text('جاري تجهيز الفيديو…',
-                style: TextStyle(color: Colors.white70, fontSize: 13)),
+                style: TextStyle(color: Colors.white70, fontSize: 12.5)),
           ]),
         ),
       );
     }
     if (_error != null) {
-      return Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, color: XTheme.danger, size: 44),
-            const SizedBox(height: 14),
-            Text(_error!,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70, fontSize: 13.5)),
-            const SizedBox(height: 18),
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              OutlinedButton.icon(
-                onPressed: _hardReload,
-                icon: const Icon(Icons.refresh, size: 17),
-                label: const Text('إعادة المحاولة'),
-              ),
-              if (widget.onNeedUnlock != null) ...[
-                const SizedBox(width: 10),
-                FilledButton.icon(
-                  onPressed: widget.onNeedUnlock,
-                  icon: const Icon(Icons.key, size: 17),
-                  label: const Text('فتح الدورة'),
-                ),
-              ],
-            ]),
-          ],
-        ),
-      );
-    }
-    final p = _player!;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AspectRatio(
-          // `aspectRatio` يبقى صفراً حتى يصل أول إطار، والنسبة 16/9 هنا
-          // تُبقي المساحة محجوزة فلا تقفز الصفحة عند بدء العرض.
-          aspectRatio: p.value.aspectRatio <= 0 ? 16 / 9 : p.value.aspectRatio,
-          child: VideoPlayer(p),
-        ),
-        const SizedBox(height: 10),
-        ValueListenableBuilder<VideoPlayerValue>(
-          valueListenable: p,
-          builder: (_, v, __) => Column(children: [
-            VideoProgressIndicator(
-              p,
-              allowScrubbing: true,
-              colors: const VideoProgressColors(
-                playedColor: XTheme.accent,
-                bufferedColor: Colors.white24,
-                backgroundColor: Colors.white10,
-              ),
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 22),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.error_outline, color: XTheme.danger, size: 34),
+          const SizedBox(height: 10),
+          Text(_error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 12.5)),
+          const SizedBox(height: 12),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            OutlinedButton.icon(
+              onPressed: _hardReload,
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('إعادة المحاولة',
+                  style: TextStyle(fontSize: 12)),
             ),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              IconButton(
-                iconSize: 40,
-                color: Colors.white,
-                icon: Icon(v.isPlaying
-                    ? Icons.pause_circle_filled
-                    : Icons.play_circle_filled),
-                onPressed: () => v.isPlaying ? p.pause() : p.play(),
-              ),
-              const SizedBox(width: 18),
-              Text(
-                '${_fmt(v.position)} / ${_fmt(v.duration)}',
-                style: const TextStyle(color: Colors.white70, fontSize: 12.5),
-              ),
-            ]),
-            // خطأ المشغّل بعد بدء التشغيل (ترميز غير مدعوم، ملف تالف) كان
-            // يُترك على سطح أسود صامت. نعرضه مع طريق إعادة المحاولة.
-            if (v.hasError) ...[
-              const SizedBox(height: 8),
-              Text(
-                v.errorDescription ?? 'تعذر تشغيل الفيديو',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70, fontSize: 12.5),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: _hardReload,
-                icon: const Icon(Icons.refresh, size: 17),
-                label: const Text('إعادة المحاولة'),
+            if (widget.onNeedUnlock != null) ...[
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: _unlock,
+                icon: const Icon(Icons.key, size: 16),
+                label:
+                    const Text('فتح الدورة', style: TextStyle(fontSize: 12)),
               ),
             ],
           ]),
+        ]),
+      );
+    }
+    final p = _player!;
+    return Stack(fit: StackFit.expand, children: [
+      FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width: p.value.size.width <= 0 ? 16 : p.value.size.width,
+          height: p.value.size.height <= 0 ? 9 : p.value.size.height,
+          child: VideoPlayer(p),
         ),
-      ],
+      ),
+      // لمسة واحدة تشغّل وتوقف، وزرّ المنتصف يظهر فقط حين يكون الفيديو
+      // متوقفاً — شكل زرّ التشغيل الكبير المعتاد.
+      Positioned.fill(
+        child: GestureDetector(
+          onTap: () => p.value.isPlaying ? p.pause() : p.play(),
+          child: ValueListenableBuilder<VideoPlayerValue>(
+            valueListenable: p,
+            builder: (_, v, __) => v.isPlaying
+                ? const SizedBox.shrink()
+                : Center(
+                    child: Container(
+                      width: 58,
+                      height: 58,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black.withOpacity(.55),
+                      ),
+                      child: const Icon(Icons.play_arrow,
+                          size: 38, color: Colors.white),
+                    ),
+                  ),
+          ),
+        ),
+      ),
+      // شريط التقدم على الحافة السفلى للمشغّل — موضعه في يوتيوب.
+      Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: VideoProgressIndicator(
+          p,
+          allowScrubbing: true,
+          padding: EdgeInsets.zero,
+          colors: const VideoProgressColors(
+            playedColor: XTheme.accent,
+            bufferedColor: Colors.white24,
+            backgroundColor: Colors.white10,
+          ),
+        ),
+      ),
+      // خطأ المشغّل بعد بدء التشغيل يُعرض فوق الفيديو مع إعادة محاولة.
+      Positioned(
+        left: 0,
+        right: 0,
+        bottom: 8,
+        child: ValueListenableBuilder<VideoPlayerValue>(
+          valueListenable: p,
+          builder: (_, v, __) => v.hasError
+              ? Center(
+                  child: TextButton.icon(
+                    onPressed: _hardReload,
+                    icon: const Icon(Icons.refresh,
+                        size: 15, color: Colors.white),
+                    label: const Text('إعادة المحاولة',
+                        style: TextStyle(color: Colors.white)),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ),
+    ]);
+  }
+
+  /// عنوان الدرس والدورة وموضعهما — أسفل المشغّل مباشرة كبطاقة يوتيوب.
+  Widget _meta() {
+    final idx =
+        _course.videos.indexWhere((v) => v.id == _current.id);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 12, 4, 2),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(_current.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Row(children: [
+          Icon(Icons.play_lesson_outlined, size: 14, color: XTheme.textDim),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(_course.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: XTheme.textDim)),
+          ),
+          if (idx >= 0) ...[
+            Text('الدرس ${idx + 1} من ${_course.videos.length}',
+                style: TextStyle(fontSize: 11, color: XTheme.textDim)),
+            const SizedBox(width: 8),
+          ],
+          if (_player != null)
+            ValueListenableBuilder<VideoPlayerValue>(
+              valueListenable: _player!,
+              builder: (_, v, __) => Text(
+                '${_fmt(v.position)} / ${_fmt(v.duration)}',
+                style: TextStyle(fontSize: 11, color: XTheme.textDim),
+              ),
+            ),
+        ]),
+      ]),
     );
   }
+
+  Widget _listHeader() => Row(children: [
+        const Text('دروس الدورة',
+            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w900)),
+        const SizedBox(width: 7),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: XTheme.surface2,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text('${_course.videos.length}',
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: XTheme.textDim)),
+        ),
+        const Spacer(),
+        if (_course.locked && !_course.unlocked)
+          TextButton.icon(
+            onPressed: _unlock,
+            icon: const Icon(Icons.key, size: 14, color: XTheme.gold),
+            label: const Text('فتح الدورة',
+                style: TextStyle(fontSize: 12, color: XTheme.gold)),
+          ),
+      ]);
+
+  /// صفّ درس في القائمة تحت المشغّل: مصغّرة، رقم، عنوان، مدة، وحالة.
+  Widget _episodeTile(CourseVideo v, int index) {
+    final current = v.id == _current.id;
+    final locked = _locked(v);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(XTheme.rMd),
+        onTap: () => _select(v),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: current
+                ? XTheme.accent.withOpacity(.09)
+                : XTheme.surface,
+            borderRadius: BorderRadius.circular(XTheme.rMd),
+            border: Border.all(
+              color: current
+                  ? XTheme.accent.withOpacity(.45)
+                  : XTheme.textDim.withOpacity(.10),
+            ),
+          ),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(
+              width: 22,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 22),
+                child: current
+                    ? const Icon(Icons.equalizer_rounded,
+                        size: 16, color: XTheme.accent)
+                    : Text('$index',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: XTheme.textDim)),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Stack(children: [
+              SizedBox(
+                width: 112,
+                height: 63,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(XTheme.rSm),
+                  child: _VideoThumb(
+                      api: widget.api, video: v, locked: locked),
+                ),
+              ),
+              if (locked)
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(XTheme.rSm),
+                      color: Colors.black.withOpacity(.42),
+                    ),
+                    child: const Center(
+                      child: Icon(Icons.lock,
+                          color: Colors.white, size: 22),
+                    ),
+                  ),
+                ),
+              if (v.durationLabel.isNotEmpty)
+                Positioned(
+                  bottom: 4,
+                  right: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(.7),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(v.durationLabel,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                ),
+            ]),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(v.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: current ? XTheme.accent : XTheme.text)),
+                  if (v.description.trim().isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(v.description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: XTheme.textDim,
+                            height: 1.4)),
+                  ],
+                  const SizedBox(height: 5),
+                  Row(children: [
+                    if (current)
+                      _miniPill('يُعرض الآن', XTheme.accent)
+                    else if (v.isFree)
+                      _miniPill('مجاني', XTheme.ok)
+                    else if (locked)
+                      _miniPill('مقفل', XTheme.gold)
+                    else
+                      _miniPill('متاح', XTheme.cyan),
+                    if (v.sizeLabel.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Text(v.sizeLabel,
+                          style: TextStyle(
+                              fontSize: 10, color: XTheme.textDim)),
+                    ],
+                  ]),
+                ],
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _miniPill(String t, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withOpacity(.13),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(t,
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w800, color: color)),
+      );
 
 
   static String _fmt(Duration d) {

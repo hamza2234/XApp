@@ -110,12 +110,18 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     try {
       final r = await widget.api.claimGift();
       final amount = (r['amount'] as num?)?.toInt() ?? 0;
-      if (mounted) setState(() => _giftClaimed = true);
+      if (mounted) setState(() {
+        _giftClaimed = true;
+        _giftNextAt = (r['nextAt'] as num?)?.toInt() ?? 0;
+        _coins = (r['balance'] as num?)?.toInt() ?? _coins;
+        _freeLeft = 0;
+      });
       // نجلب موعد هديّة الغد فوراً ليظهر العدّاد التنازلي.
-      unawaited(_refresh());
       return GiftClaimResult(
         ok: true,
         amount: amount,
+        balance: (r['balance'] as num?)?.toInt(),
+        nextAt: (r['nextAt'] as num?)?.toInt(),
         message: r['message']?.toString() ?? '',
       );
     } on ApiException catch (e) {
@@ -797,11 +803,7 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
                 _refresh();
                 return;
               }
-              await widget.store.clearSession();
-              final g = await widget.api.guest();
-              await widget.store.setToken(g['token']);
-              await widget.store.setUser(g['user']);
-              setState(() {});
+              await logoutToGuest(context, widget.api, widget.store);
             }),
             Padding(
               padding: const EdgeInsets.all(14),
