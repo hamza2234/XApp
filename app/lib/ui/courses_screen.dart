@@ -13,7 +13,7 @@ import 'package:video_player/video_player.dart';
 
 import '../core/api.dart';
 import '../core/app_config.dart';
-import '../core/media_proxy.dart';
+
 import '../core/models.dart';
 import 'cached_image.dart';
 import 'external_link.dart';
@@ -790,7 +790,6 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   late CourseVideo _current;
 
   /// العنوان المحلي الذي يخدمه الوكيل — يُطلق عند الخروج أو تبديل الدرس.
-  String? _proxyUrl;
   bool _preparing = true;
   String? _error;
   bool _killed = false;
@@ -819,8 +818,6 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     SecureScreen.off();
     _spinnerTimer?.cancel();
     AppConfig.instance.removeListener(_onCfg);
-    final u = _proxyUrl;
-    if (u != null) MediaProxy.instance.release(u);
     // الإنهاء قد يفشل إن كان المشغّل نصف مهيّأ — لا نُسقط الشاشة بسببه.
     try {
       _player?.dispose();
@@ -828,11 +825,12 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     super.dispose();
   }
 
-  /// يبدأ التشغيل مباشرة من الخادم.
+  /// يبدأ التشغيل مباشرة من Cloudflare.
   ///
-  /// لا تنزيل كامل ولا ملف وسيط: الخادم يفكّ التشفير ويخدم القطع بمدى Range،
-  /// والوكيل المحلي يوقّع كل طلب طازجاً. المشغّل يجلب أول أجزاء الملف فقط كي
-  /// يعرض، ثم يواصل ما يحتاجه فعلاً — فالبداية فورية والتنزيل لا يكتمل أبداً.
+  /// رابط البثّ يحمل رمزاً موقّعاً قصير العمر أصدره الخادم بعد فحص
+  /// الاستحقاق — فيفتح المشغّل العنوان مباشرة بلا وكيل محلي. إزالة طبقة
+  /// الوسيط هي ما يجعل البداية سريعة على الشبكات الضعيفة: طلب Range واحد
+  /// من الهاتف إلى R2 عبر الخادم، لا ثلاث قفزات.
   Future<void> _prepare() async {
     setState(() {
       _preparing = true;
@@ -851,9 +849,8 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     }
     _armSpinner();
     try {
-      final url = await MediaProxy.instance
-          .urlFor(widget.api, _current.streamUrl);
-      _proxyUrl = url;
+      final url =
+          widget.api.streamUriFor(_current.streamUrl).toString();
       if (!mounted) return;
 
       final c = VideoPlayerController.networkUrl(Uri.parse(url));
@@ -947,15 +944,12 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   ///
   /// لا شيء يُمسح من القرص لأن شيئاً لم يُكتب عليه أصلاً — التشغيل بثٌّ مباشر.
   Future<void> _hardReload() async {
-    // إغلاق المشغّل والوكيل معاً: إعادة تسجيل المسار مطلوبة لأن التوقيع
-    // المرتبط بالمسار قد يكون انتهى، ولا معنى لتشغيل ملف لم يعد له عنوان.
+    // إغلاق المشغّل كاملاً ثم تجهيز من جديد برابط الرمز نفسه — صلاحيته
+    // ست ساعات فلا يحتاج تحديثاً لإعادة المحاولة.
     try {
       await _player?.dispose();
     } catch (_) {}
     _player = null;
-    final u = _proxyUrl;
-    if (u != null) MediaProxy.instance.release(u);
-    _proxyUrl = null;
     await _prepare();
   }
 
@@ -981,16 +975,13 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     await _switchTo(v);
   }
 
-  /// تبديل الدرس داخل المشغّل نفسه: إيقاف القديم، تحرير مساره في الوكيل،
-  /// ثم تجهيز الجديد — كل ذلك في الشاشة نفسها كما في قوائم يوتيوب.
+  /// تبديل الدرس داخل المشغّل نفسه: إيقاف القديم ثم تجهيز الجديد —
+  /// كل ذلك في الشاشة نفسها كما في قوائم يوتيوب.
   Future<void> _switchTo(CourseVideo v) async {
     try {
       await _player?.dispose();
     } catch (_) {}
     _player = null;
-    final u = _proxyUrl;
-    if (u != null) MediaProxy.instance.release(u);
-    _proxyUrl = null;
     _blankFrames = 0;
     setState(() => _current = v);
     await _prepare();

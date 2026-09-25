@@ -166,8 +166,10 @@ class Api {
   Future<Map<String, String>> _signLearn(String method, String pathWithQuery) =>
       _sign(method, pathWithQuery);
 
-  /// عنوان مطلق لمسار بثّ داخل الخادم — تستعمله وكيل الوسائط المحلي.
-  Uri streamUriFor(String path) => _uri(path);
+  /// عنوان مطلق لمسار بثّ داخل الخادم. `Uri.parse` مقصود لا `_uri`: رابط
+  /// البثّ يحمل استعلاماً موقّعاً (`?i=&e=&s=`)، وبناؤه كـ`path` كان
+  /// يُرمّز `?` فيفقد الرمز ويردّ الخادم «رابط غير صالح».
+  Uri streamUriFor(String path) => Uri.parse('$kApiBase$path');
 
   /// ترويسات موقّعة لمسار بثّ.
   ///

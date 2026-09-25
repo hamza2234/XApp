@@ -1858,6 +1858,54 @@ async function releaseOwnerDevice(env: Env, installId: string): Promise<void> {
   ).bind(installId).run()
 }
 
+// ---------- روابط بثّ موقّعة للدروس ----------
+// مشغّل الفيديو لا يستطيع إرسال ترويسات توقيع مخصّصة في كل طلب قطعة،
+// والوكيل المحلي كان حلقة فشل كاملة تُعلّق `initialize()` على الشبكات
+// الضعيفة. بدلاً منه يُصدر الخادم رابطاً موقّعاً بـHMAC قصير العمر داخل
+// ردّ الدورات الموقَّع أصلاً — يُثبت أنه وُلّد بعد فحص الاستحقاق، ويتحقق
+// معالج البثّ منه قبل قراءة أي بايت من R2. البثّ يذهب من Cloudflare إلى
+// المشغّل مباشرة: أقصر مسار ممكن وأسرع بداية على أي شبكة.
+const LEARN_STREAM_TTL = 6 * 3600 * 1000
+
+let _learnKey: Promise<CryptoKey> | null = null
+function learnHmacKey(env: Env): Promise<CryptoKey> {
+  _learnKey ??= crypto.subtle.importKey('raw',
+    new TextEncoder().encode(`learn-stream|${env.X_JWT_SECRET}`),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+  return _learnKey
+}
+
+/** رمز بثّ لفيديو على تثبيت بعينه حتى انتهاء `exp`. */
+async function learnToken(env: Env, videoId: string, installId: string,
+                          exp: number): Promise<string> {
+  const sig = await crypto.subtle.sign('HMAC', await learnHmacKey(env),
+    new TextEncoder().encode(`${videoId}|${installId}|${exp}`))
+  return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** طلب بثّ يحمل رمزاً في الرابط بدل ترويسات التوقيع. */
+function learnTokenRequest(request: Request): boolean {
+  if (request.method !== 'GET') return false
+  const u = new URL(request.url)
+  return /^\/v1\/learn\/stream\/[\w-]{1,64}$/.test(u.pathname) &&
+    u.searchParams.has('s') && u.searchParams.has('i') && u.searchParams.has('e')
+}
+
+/** يتحقق من رمز البثّ ويعيد installId الذي صدر له — بلا ثقة بأي ترويسة. */
+async function verifyLearnToken(env: Env, request: Request,
+                                videoId: string): Promise<string | null> {
+  const u = new URL(request.url)
+  const s = u.searchParams.get('s') ?? ''
+  const inst = u.searchParams.get('i') ?? ''
+  const e = Number(u.searchParams.get('e') ?? 0)
+  if (!/^[0-9a-f]{64}$/.test(s) || !/^[\w:-]{6,80}$/.test(inst) || e <= Date.now()) {
+    return null
+  }
+  const ok = await crypto.subtle.verify('HMAC', await learnHmacKey(env),
+    hexToBytes(s), new TextEncoder().encode(`${videoId}|${inst}|${e}`))
+  return ok ? inst : null
+}
+
 /**
  * شكل الفيديو كما يراه العميل.
  *
@@ -1865,7 +1913,7 @@ async function releaseOwnerDevice(env: Env, installId: string): Promise<void> {
  * حجم ولا رابط بث — حتى عدد الثواني يمكن أن يُعاد بناؤه لاحقاً. يُرسل فقط
  * ما تحتاجه الواجهة لرسم قفل. هذا ما يجعل الشاشة آمنة ولو سُرّبت الاستجابة.
  */
-function videoView(v: any, unlocked: boolean, hidden = false) {
+function videoView(v: any, unlocked: boolean, hidden = false, streamUrl = '') {
   // مفتاح الإيقاف: عند تفعيله لا يُبنى أي رابط بثّ لأي فيديو، ولا يبقى
   // `playable` صحيحاً. الحجب هنا لا في الواجهة كي لا يُبثّ الملف أصلاً —
   // نسخة قديمة من التطبيق لا تعرف المفتاح تتعطّل معه بلا تحديث.
@@ -1884,11 +1932,10 @@ function videoView(v: any, unlocked: boolean, hidden = false) {
     thumbUrl: v.thumb_key ? `/v1/learn/thumb/${v.id}` : '',
   }
   // الرابط لا يُبنى إلا لفيلم مباح — لا وجود له في ردّ المقفل إطلاقاً.
-  // `streamUrl` هو المصدر الوحيد: الخادم يفكّ AES-CTR قطعةً قطعة ويدعم
-  // Range، فالمشغّل يبثّ هذه المسافة مباشرة ويرجّع موضعه بلا تنزيل الملف
-  // كاملاً. لا مسار ثانٍ ولا ملف وسيط عند العميل.
+  // `streamUrl` يحمل رمزاً موقّعاً يفتح البثّ مباشرة من Cloudflare بدعم
+  // Range — بلا وسيط محلي ولا ترويسات مخصّصة من المشغّل.
   return canPlay
-    ? { ...base, streamUrl: `/v1/learn/stream/${v.id}` }
+    ? { ...base, streamUrl: streamUrl || `/v1/learn/stream/${v.id}` }
     : base
 }
 
@@ -1924,6 +1971,24 @@ async function coursesFor(env: Env, installId: string, isOwner = false,
     byCourse.set(v.course_id, list)
   }
 
+  // رمز بثّ لكل فيديو قد يُعرض لهذا التثبيت: مجاني دائماً، أو في دورة
+  // مُستحَقّة أو على جهاز المالك. لا يُسكّ رمز لفيديو لن يصل العميل رابطه
+  // أصلاً — الرموز حِكر على الاستحقاق مثل الروابط تماماً.
+  const exp = Date.now() + LEARN_STREAM_TTL
+  const toks = new Map<string, string>()
+  const need: any[] = []
+  for (const c of courses.results ?? []) {
+    if (!c.locked || granted.has(c.id) || isOwner) {
+      need.push(...(byCourse.get(c.id) ?? []))
+      continue
+    }
+    for (const v of byCourse.get(c.id) ?? []) {
+      if (v.mode === 'free') need.push(v)
+    }
+  }
+  await Promise.all(need.map(async v =>
+    toks.set(v.id, await learnToken(env, v.id, installId, exp))))
+
   return (courses.results ?? []).map(c => {
     const unlocked = !c.locked || granted.has(c.id) || isOwner
     const list = byCourse.get(c.id) ?? []
@@ -1939,7 +2004,12 @@ async function coursesFor(env: Env, installId: string, isOwner = false,
       unlocked,
       videoCount: list.length,
       freeCount: list.filter(v => v.mode === 'free').length,
-      videos: list.map(v => videoView(v, v.mode === 'free' || unlocked, videosHidden)),
+      videos: list.map(v => {
+        const playable = (v.mode === 'free' || unlocked) && !videosHidden
+        const tok = playable ? toks.get(v.id) : undefined
+        const url = tok ? `/v1/learn/stream/${v.id}?i=${installId}&e=${exp}&s=${tok}` : ''
+        return videoView(v, v.mode === 'free' || unlocked, videosHidden, url)
+      }),
     }
   })
 }
@@ -2698,7 +2768,11 @@ export default {
       // تسجيل المفتاح العام معفى: لا يمكن توقيع طلب بمفتاح لم يُسجَّل بعد،
       // وهو الطلب الوحيد الذي يسبق وجود التوقيع. حمايته في حدّ المعدّل
       // وطول المفتاح، لا في التوقيع.
-      if (path.startsWith('/v1/') && path !== '/v1/install/key') {
+      // روابط بثّ الدروس بالرمز معفاة هنا: المشغّل لا يرسل ترويسات توقيع،
+      // والرمز يُفحص داخل معالج البثّ قبل قراءة أي بايت — الإعفاء من
+      // البوابة ليس إعفاءً من التحقق.
+      if (path.startsWith('/v1/') && path !== '/v1/install/key' &&
+          !learnTokenRequest(request)) {
         await verifySignature(env, request)
       }
 
@@ -2965,7 +3039,12 @@ export default {
 
       // ---------- كل المسارات التالية تتطلب جلسة (زائر أو مستخدم) ----------
 
-      const auth = await authenticate(env, request)
+      // طلبات البثّ بالرمز لا تحمل جلسة: المشغّل يستدعي الرابط كما وصله.
+      // استحقاقها يأتي من الرمز الموقّع الذي يُفحص في المعالج — لذلك تُمنح
+      // مصادقة اصطناعية ضيف لا تملك شيئاً سوى المسار نفسه.
+      const auth = learnTokenRequest(request)
+        ? { caller: { uid: '', role: 'guest' }, user: null }
+        : await authenticate(env, request)
       const caller = auth.caller
 
       // ---------- بيانات التوافقات (قراءة من المرآة فقط) ----------
@@ -4216,14 +4295,17 @@ export default {
         })
       }
 
-      // بث الفيديو. لا يُخدَم ملف صريح أبداً: يُقرأ من R2، يُشفّر AES-CTR
-      // بمفتاح الدورات، ويُرسل مع nonce. من يعترض البث يحصل على بايتات
-      // عديمة الفائدة بلا مفتاح التطبيق.
+      // بث الفيديو مباشرة من R2. الهوية إمّا رمز رابط موقّع بالخادم (أصدره
+      // بعد فحص الاستحقاق في ردّ الدورات) أو توقيع ترويسات من عميل قديم
+      // عبر الوكيل. الاثنان ينتهيان إلى installId موثّق، وعليه وحده يُحسم
+      // الاستحقاق — لا شيء مرسلاً يُصدَّق.
       const streamMatch = path.match(/^\/v1\/learn\/stream\/([\w-]{1,64})$/)
       if (streamMatch && request.method === 'GET') {
+        // طلبات المدى كثيرة بطبيعتها — الحدّ أوسع من بقية المسارات لكنه
+        // يقيس التنوّع لا الحجم: قطعة متابعة لا تكلّف كطلب جديد.
         await Promise.all([
-          rateLimit(env, request, 'learn_stream', 120, 600),
-          burstLimit(env, request, 'learn_stream', 15)
+          rateLimit(env, request, 'learn_stream', 480, 600),
+          burstLimit(env, request, 'learn_stream', 60)
         ])
         const video = await env.XDB
           .prepare(`SELECT id, course_id, object_key, mime, mode
@@ -4231,16 +4313,31 @@ export default {
           .bind(streamMatch[1]).first<any>()
         if (!video) throw new HttpError(404, 'الفيديو غير موجود')
 
+        // الرابط الموقّع يحمل installId الذي صدر له. توقيع الترويسات
+        // (المسار القديم) يعطي installId الموثّق في البوابة. بلا أيٍّ منهما
+        // لا بثّ — فالطلب مجهول تماماً.
+        let installId = verifiedInstallOf(request)
+        const tokUrl = new URL(request.url)
+        if (tokUrl.searchParams.has('s')) {
+          const tokInstall = await verifyLearnToken(env, request, video.id)
+          if (!tokInstall) {
+            await logSecurity(env, request, 'learn_bad_token', `video=${video.id}`)
+            throw new HttpError(403, 'رابط البثّ غير صالح أو انتهى — حدّث قائمة الدروس')
+          }
+          installId = tokInstall
+        }
+        if (!installId) throw new HttpError(403, 'طلب غير موثّق')
+
         // الاستحقاق يُقرأ من الخادم: الفيديو المجاني متاح للجميع، والمقفل
         // يحتاج دورة مفعّلة على هذا الجهاز. لا يهم ما يدّعيه العميل.
         // لا مباح إلا ما وُسم مجاناً، أو دورة استحقّها هذا الجهاز، أو
         // جهاز المالك نفسه. الدور وحده لا يفتح شيئاً: من سجّل بحساب المالك
         // على جهاز آخر لا يرث استحقاقه.
         const allowed = video.mode === 'free' ||
-          await courseUnlocked(env, verifiedInstallOf(request), video.course_id) ||
-          await ownerDevice(env, verifiedInstallOf(request))
+          await courseUnlocked(env, installId, video.course_id) ||
+          await ownerDevice(env, installId)
         if (!allowed) {
-          await logSecurity(env, request, 'learn_locked_stream', `video=${video.id} install=${verifiedInstallOf(request)}`)
+          await logSecurity(env, request, 'learn_locked_stream', `video=${video.id} install=${installId}`)
           throw new HttpError(403, 'هذا الفيديو مقفل — افتح الدورة بمفتاح')
         }
 
