@@ -1858,16 +1858,6 @@ async function releaseOwnerDevice(env: Env, installId: string): Promise<void> {
   ).bind(installId).run()
 }
 
-/** يزيل وسم المالك عن التثبيت (عند الخروج من اللوحة). */
-async function unmarkOwnerDevice(env: Env, installId: string): Promise<void> {
-  if (!installId) return
-  try {
-    await env.XDB.prepare(
-      'UPDATE x_devices SET owner_marked = 0 WHERE install_id = ?1'
-    ).bind(installId).run()
-  } catch { /* تجاهل */ }
-}
-
 /**
  * شكل الفيديو كما يراه العميل.
  *
@@ -4130,12 +4120,15 @@ export default {
       }
 
       // ---------- سحب وسم جهاز المالك ----------
-      // عند الخروج من اللوحة يُلغى الوسم، فتصير الدورات المقفلة مقفلة على
-      // هذا الجهاز أيضاً. لا يُسمح بسحب وسم جهاز آخر: الوسم لا ينتقل.
+      // عند الخروج من اللوحة تُحرَّر الخانة كاملة (الوسم والربط معاً):
+      // تحرير الوسم وحده كان يترك owner_bound مشغولاً للأبد، فتتراكم
+      // تثبيتات محذوفة حتى يُقفل المالك خارج لوحته عند السقف 3 — وهو ما
+      // حدث فعلاً. تحرير الربط عند الخروج لا يُضعف الحدّ: السقف يبقى على
+      // الأجهزة المتزامنة، والدخول يظل يحتاج كلمة مرور المالك.
       if (path === '/v1/owner/device/release' && request.method === 'POST') {
         const auth = await authenticate(env, request)
         if (auth.caller.role !== 'owner') throw new HttpError(403, 'forbidden')
-        await unmarkOwnerDevice(env, verifiedInstallOf(request))
+        await releaseOwnerDevice(env, verifiedInstallOf(request))
         await logSecurity(env, request, 'owner_device_release')
         return json({ ok: true })
       }
