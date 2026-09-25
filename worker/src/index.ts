@@ -4375,8 +4375,10 @@ export default {
           throw new HttpError(403, settings.videosHiddenMessage || 'الفيديوهات متوقفة مؤقتاً')
         }
 
-        const obj = await env.XLEARN.get(video.object_key)
-        if (!obj?.body) {
+        // بيانات الملف أولاً بلا جسم: `head` يعيد الحجم والوجود في جلبة
+        // واحدة رخيصة، والجسم نفسه يُجلب لاحقاً بالمدى المطلوب فقط.
+        const meta = await env.XLEARN.head(video.object_key)
+        if (!meta) {
           await logSecurity(env, request, 'learn_stream_missing',
             `video=${video.id} key=${video.object_key}`)
           throw new HttpError(404, 'ملف الفيديو مفقود')
@@ -4385,7 +4387,7 @@ export default {
 
         // دعم Range: المشغّل يطلب البداية القليلة ليعرض فوراً ثم يواصل الباقي
         // في الخلفية. نمرّر المدى إلى R2 نفسه بدل تنزيل الملف كاملاً.
-        const size = obj.size ?? 0
+        const size = meta.size ?? 0
         let start = 0
         let end = size > 0 ? size - 1 : 0
         let partial = false
@@ -4413,14 +4415,31 @@ export default {
         // أن الطلب وصل وأن الرمز والاستحقاق والملف كلها سليمة، ولا نغرق
         // السجل بعشرات طلبات القطع التي يرسلها المشغّل لكل مقطع.
         if (start === 0) {
-          // أول 16 بايت تكشف تلف الملف: MP4 سليم يبدأ بصندوق `ftyp`.
+          // تشخيص البداية: أول 256 بايت تكفي لمشي صناديق MP4 الأولى. لو
+          // ظهر `mdat` قبل `moov` فالفهرس في نهاية الملف — والمشغّل على
+          // شبكة ضعيفة يبتلع الملف حتى نهايته قبل أول إطار، وهذا هو بطء
+          // «جار تجهيز الفيديو» الحقيقي. نسجّل الموضع لنعرف إن كان يجب
+          // إعادة رفع الفيديو بـfaststart.
           let head = ''
           try {
             const h = await env.XLEARN.get(video.object_key,
-              { range: { offset: 0, length: 16 } })
+              { range: { offset: 0, length: 256 } })
             if (h) {
               const b = new Uint8Array(await h.arrayBuffer())
-              head = Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+              head = Array.from(b.subarray(0, 16),
+                x => x.toString(16).padStart(2, '0')).join('')
+              let off = 0, moov = 'unknown'
+              for (let i = 0; i < 4 && off + 8 <= b.length; i++) {
+                const sz = (b[off] << 24 | b[off + 1] << 16 |
+                  b[off + 2] << 8 | b[off + 3]) >>> 0
+                const ty = String.fromCharCode(
+                  b[off + 4], b[off + 5], b[off + 6], b[off + 7])
+                if (ty === 'moov') { moov = `front@${off}`; break }
+                if (ty === 'mdat') { moov = 'end'; break }
+                if (sz < 8) break
+                off += sz
+              }
+              head += ` moov=${moov}`
             }
           } catch { /* التشخيص لا يُسقط البثّ */ }
           await logSecurity(env, request, 'learn_stream_serve',
@@ -4434,7 +4453,7 @@ export default {
           ? await env.XLEARN.get(video.object_key, {
               range: { offset: start, length: span }
             })
-          : obj
+          : await env.XLEARN.get(video.object_key)
         if (!ranged?.body) throw new HttpError(404, 'ملف الفيديو مفقود')
 
         const headers = new Headers({

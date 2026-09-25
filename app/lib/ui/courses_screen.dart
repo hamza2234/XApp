@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import '../core/api.dart';
@@ -789,7 +790,10 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   late Course _course;
   late CourseVideo _current;
 
-  /// العنوان المحلي الذي يخدمه الوكيل — يُطلق عند الخروج أو تبديل الدرس.
+  /// طبقة التحكم فوق الفيديو — تظهر باللمس وتختفي بعد 3 ثوانٍ كما في يوتيوب.
+  bool _controls = false;
+  Timer? _ctrlTimer;
+
   bool _preparing = true;
   String? _error;
   bool _killed = false;
@@ -817,6 +821,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
   void dispose() {
     SecureScreen.off();
     _spinnerTimer?.cancel();
+    _ctrlTimer?.cancel();
     AppConfig.instance.removeListener(_onCfg);
     // الإنهاء قد يفشل إن كان المشغّل نصف مهيّأ — لا نُسقط الشاشة بسببه.
     try {
@@ -857,7 +862,10 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
       try {
         // مهلة صريحة: بلا سقف، تعليق الاتصال يُبقي التهيئة معلّقة للأبد على
         // صورة سوداء بلا رسالة — وهو ما ظهر شاشة سوداء لا تنتهي.
-        await c.initialize().timeout(const Duration(seconds: 25));
+        // السقف 60 ثانية لا 25: القتل المبكر كان يقطع تنزيلاً يتقدم على
+        // شبكة ضعيفة فيعيده من الصفر، فتتحول «أول إطار» إلى دقائق من
+        // المحاولات الملغاة — وهو ما رآه المستخدم «بطء شديد».
+        await c.initialize().timeout(const Duration(seconds: 60));
       } on TimeoutException {
         await c.dispose();
         // مهلة التهيئة ليست فشلاً نهائياً: أول طلب يعبر الوكيل يوقظ الجلسة
@@ -1034,12 +1042,22 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
     );
   }
 
-  /// سطح المشغّل أعلى الشاشة بعرض كامل ونسبة 16:9 — كما في يوتيوب.
+  /// سطح المشغّل أعلى الشاشة. النسبة تتبع الفيديو نفسه لا رقماً ثابتاً:
+  /// الفيديو العرضي يملأ 16:9، والطولي يأخذ إطاره الطولي الكامل — تثبيت
+  /// 16:9 كان يسحق الفيديو الطويل في شريط صغير بأشرطة سوداء ضخمة.
   Widget _playerArea() {
+    final v = _player?.value;
+    double ar = 16 / 9;
+    if (v != null && v.isInitialized && v.aspectRatio > 0.05) {
+      // سقف الارتفاع 75% من الشاشة كي لا يبتلع الفيديو الطويل قائمة الدروس.
+      final maxH = MediaQuery.of(context).size.height * .75;
+      final w = MediaQuery.of(context).size.width;
+      ar = v.aspectRatio.clamp(w / maxH, 2.4);
+    }
     return Container(
       color: Colors.black,
       child: Stack(children: [
-        AspectRatio(aspectRatio: 16 / 9, child: _playerSurface()),
+        AspectRatio(aspectRatio: ar, child: _playerSurface()),
         // زر الرجوع فوق المشغّل في الزاوية، مكان «السهم للأسفل» في يوتيوب.
         PositionedDirectional(
           top: 4,
@@ -1115,43 +1133,36 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
           child: VideoPlayer(p),
         ),
       ),
-      // لمسة واحدة تشغّل وتوقف، وزرّ المنتصف يظهر فقط حين يكون الفيديو
-      // متوقفاً — شكل زرّ التشغيل الكبير المعتاد.
+      // لمسة واحدة تُظهر طبقة التحكم، ولمسة ثانية تخفيها — كما في يوتيوب.
       Positioned.fill(
         child: GestureDetector(
-          onTap: () => p.value.isPlaying ? p.pause() : p.play(),
-          child: ValueListenableBuilder<VideoPlayerValue>(
-            valueListenable: p,
-            builder: (_, v, __) => v.isPlaying
-                ? const SizedBox.shrink()
-                : Center(
-                    child: Container(
-                      width: 58,
-                      height: 58,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.black.withOpacity(.55),
-                      ),
-                      child: const Icon(Icons.play_arrow,
-                          size: 38, color: Colors.white),
-                    ),
-                  ),
+          onTap: _toggleControls,
+          child: AnimatedOpacity(
+            opacity: _controls ? 1 : 0,
+            duration: const Duration(milliseconds: 180),
+            child: Container(
+              color: Colors.black.withOpacity(.35),
+              child: _controlsOverlay(p),
+            ),
           ),
         ),
       ),
-      // شريط التقدم على الحافة السفلى للمشغّل — موضعه في يوتيوب.
+      // شريط التقدم على الحافة السفلى للمشغّل — مرئي دائماً وقابل للسحب.
       Positioned(
         left: 0,
         right: 0,
         bottom: 0,
-        child: VideoProgressIndicator(
-          p,
-          allowScrubbing: true,
-          padding: EdgeInsets.zero,
-          colors: const VideoProgressColors(
-            playedColor: XTheme.accent,
-            bufferedColor: Colors.white24,
-            backgroundColor: Colors.white10,
+        child: SizedBox(
+          height: 5,
+          child: VideoProgressIndicator(
+            p,
+            allowScrubbing: true,
+            padding: EdgeInsets.zero,
+            colors: const VideoProgressColors(
+              playedColor: XTheme.accent,
+              bufferedColor: Colors.white30,
+              backgroundColor: Colors.white10,
+            ),
           ),
         ),
       ),
@@ -1159,7 +1170,7 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
       Positioned(
         left: 0,
         right: 0,
-        bottom: 8,
+        bottom: 10,
         child: ValueListenableBuilder<VideoPlayerValue>(
           valueListenable: p,
           builder: (_, v, __) => v.hasError
@@ -1176,6 +1187,100 @@ class _CoursePlayerScreenState extends State<CoursePlayerScreen> {
         ),
       ),
     ]);
+  }
+
+  /// إظهار/إخفاء طبقة التحكم، وإخفاؤها تلقائياً بعد 3 ثوانٍ أثناء التشغيل.
+  void _toggleControls() {
+    _ctrlTimer?.cancel();
+    setState(() => _controls = !_controls);
+    if (_controls) {
+      _ctrlTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _controls = false);
+      });
+    }
+  }
+
+  /// أزرار التحكم فوق الفيديو: تشغيل كبير في المنتصف، وسطر سفلي فيه
+  /// الوقت الحالي والكلي وزر ملء الشاشة — تخطيط يوتيوب المعتاد.
+  Widget _controlsOverlay(VideoPlayerController p) {
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: p,
+      builder: (_, v, __) => Stack(children: [
+        Center(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(40),
+            onTap: () {
+              v.isPlaying ? p.pause() : p.play();
+              _ctrlTimer?.cancel();
+              _ctrlTimer = Timer(const Duration(seconds: 3), () {
+                if (mounted) setState(() => _controls = false);
+              });
+            },
+            child: Container(
+              width: 58,
+              height: 58,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.black.withOpacity(.55),
+              ),
+              child: Icon(
+                v.isBuffering
+                    ? Icons.hourglass_top_rounded
+                    : v.isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                size: 38,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 8,
+          right: 8,
+          bottom: 8,
+          child: Row(children: [
+            Text(
+              '${_fmt(v.position)} / ${_fmt(v.duration)}',
+              style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700),
+            ),
+            const Spacer(),
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _openFullscreen,
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.fullscreen_rounded,
+                    size: 24, color: Colors.white),
+              ),
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  /// ملء الشاشة: الاتجاه يتبع الفيديو — عرضيّ يقلب الشاشة أفقياً، وطوليّ
+  /// يبقى عمودياً ليملأ الطول فعلاً بدل شريط رفيع.
+  Future<void> _openFullscreen() async {
+    final p = _player;
+    if (p == null || !p.value.isInitialized) return;
+    final landscape = p.value.aspectRatio >= 1;
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    await SystemChrome.setPreferredOrientations(landscape
+        ? const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
+        : const [DeviceOrientation.portraitUp]);
+    await Navigator.of(context, rootNavigator: true).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _FullCourseVideo(player: p),
+      ),
+    );
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    await SystemChrome.setPreferredOrientations(
+        const [DeviceOrientation.portraitUp]);
   }
 
   /// عنوان الدرس والدورة وموضعهما — أسفل المشغّل مباشرة كبطاقة يوتيوب.
@@ -1460,3 +1565,166 @@ class _VideoThumb extends StatelessWidget {
   }
 }
 
+
+/// مشغّل ملء الشاشة لدرس الدورة.
+///
+/// يستعمل كائن المشغّل نفسه — لا يُنشئ ولا يُنهي واحداً — لأن الملكية بقيت
+/// عند `CoursePlayerScreen`؛ إنهاؤه هنا كان سيقتل التشغيل بعد الرجوع.
+/// الاتجاه أُقفل قبل فتح الصفحة في `_openFullscreen`.
+class _FullCourseVideo extends StatefulWidget {
+  const _FullCourseVideo({required this.player});
+
+  final VideoPlayerController player;
+
+  @override
+  State<_FullCourseVideo> createState() => _FullCourseVideoState();
+}
+
+class _FullCourseVideoState extends State<_FullCourseVideo> {
+  bool _controls = true;
+  Timer? _timer;
+
+  void _toggle() {
+    _timer?.cancel();
+    setState(() => _controls = !_controls);
+    if (_controls) {
+      _timer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _controls = false);
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _controls = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  static String _fmt(Duration d) =>
+      _CoursePlayerScreenState._fmt(d);
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.player;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onTap: _toggle,
+        child: Center(
+          child: Stack(fit: StackFit.expand, children: [
+            Center(
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: SizedBox(
+                  width: p.value.size.width <= 0 ? 16 : p.value.size.width,
+                  height: p.value.size.height <= 0 ? 9 : p.value.size.height,
+                  child: VideoPlayer(p),
+                ),
+              ),
+            ),
+            AnimatedOpacity(
+              opacity: _controls ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: ValueListenableBuilder<VideoPlayerValue>(
+                valueListenable: p,
+                builder: (_, v, __) => Stack(children: [
+                  PositionedDirectional(
+                    top: 14,
+                    start: 8,
+                    child: IconButton(
+                      style: IconButton.styleFrom(
+                          backgroundColor: Colors.black45),
+                      icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                          color: Colors.white, size: 28),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ),
+                  Center(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(44),
+                      onTap: () {
+                        v.isPlaying ? p.pause() : p.play();
+                        // إعادة تسليح مؤقّت الإخفاء دون قلب الطبقة —
+                        // الزر نفسه ليس مُبدّل ظهور.
+                        _timer?.cancel();
+                        _timer = Timer(const Duration(seconds: 3), () {
+                          if (mounted) setState(() => _controls = false);
+                        });
+                      },
+                      child: Container(
+                        width: 68,
+                        height: 68,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.black.withOpacity(.55),
+                        ),
+                        child: Icon(
+                          v.isBuffering
+                              ? Icons.hourglass_top_rounded
+                              : v.isPlaying
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                          size: 44,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: 20,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          height: 5,
+                          child: VideoProgressIndicator(
+                            p,
+                            allowScrubbing: true,
+                            padding: EdgeInsets.zero,
+                            colors: const VideoProgressColors(
+                              playedColor: XTheme.accent,
+                              bufferedColor: Colors.white30,
+                              backgroundColor: Colors.white10,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(children: [
+                          Text(
+                            '${_fmt(v.position)} / ${_fmt(v.duration)}',
+                            style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700),
+                          ),
+                          const Spacer(),
+                          // زر «الصغير» — الرجوع إلى مشغّل الصفحة.
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            icon: const Icon(Icons.fullscreen_exit_rounded,
+                                color: Colors.white, size: 26),
+                            onPressed: () => Navigator.pop(context),
+                          ),
+                        ]),
+                      ],
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
